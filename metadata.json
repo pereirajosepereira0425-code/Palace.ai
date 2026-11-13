@@ -1,0 +1,6 @@
+{
+  "name": "Palace.ai - Ultimate Character AI & Roleplay Hub",
+  "description": "All-in-one AI character roleplay platform inspired by Chub.ai, Janitor.ai, and SpicyChat. Discover, create, and chat with AI characters featuring High-Thinking, Voice TTS, Search Grounding, Tavern lorebooks, and cloud persistence.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
