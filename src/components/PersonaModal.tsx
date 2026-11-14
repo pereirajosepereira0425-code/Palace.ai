@@ -23,10 +23,13 @@ import { useAuth } from '../context/AuthContext.tsx';
 import { SharedPersona } from '../types/index.ts';
 import { WikiEditor } from './WikiEditor.tsx';
 import { ThreeAvatarViewer } from './ThreeAvatarViewer.tsx';
+import { TagInput } from './TagInput.tsx';
 
 interface PersonaModalProps {
   isOpen: boolean;
   onClose: () => void;
+  initialEditPersona?: SharedPersona | null;
+  onPersonasChanged?: () => void;
 }
 
 const AVATAR_PRESETS = [
@@ -37,7 +40,12 @@ const AVATAR_PRESETS = [
   'https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&w=600&q=80',
 ];
 
-export const PersonaModal: React.FC<PersonaModalProps> = ({ isOpen, onClose }) => {
+export const PersonaModal: React.FC<PersonaModalProps> = ({
+  isOpen,
+  onClose,
+  initialEditPersona,
+  onPersonasChanged,
+}) => {
   const { persona: activePersona, setPersona, savePersonaToCloud, guestId, user, getIdToken } = useAuth();
 
   // Mode: 'list' (manage multiple personas) or 'edit' (create / modify full persona)
@@ -45,6 +53,7 @@ export const PersonaModal: React.FC<PersonaModalProps> = ({ isOpen, onClose }) =
   const [userPersonas, setUserPersonas] = useState<SharedPersona[]>([]);
   const [loadingPersonas, setLoadingPersonas] = useState(false);
   const [editingUuid, setEditingUuid] = useState<string | null>(null);
+  const [confirmDeleteUuid, setConfirmDeleteUuid] = useState<string | null>(null);
 
   // Full Persona Fields (Exact mirror of bot fields)
   const [name, setName] = useState('');
@@ -98,8 +107,13 @@ export const PersonaModal: React.FC<PersonaModalProps> = ({ isOpen, onClose }) =
   useEffect(() => {
     if (isOpen) {
       fetchMyPersonas();
+      if (initialEditPersona) {
+        handleStartEdit(initialEditPersona);
+      } else {
+        setViewMode('list');
+      }
     }
-  }, [isOpen, user]);
+  }, [isOpen, user, initialEditPersona]);
 
   if (!isOpen) return null;
 
@@ -224,19 +238,25 @@ export const PersonaModal: React.FC<PersonaModalProps> = ({ isOpen, onClose }) =
   };
 
   const handleDeletePersona = async (uuid: string) => {
-    if (!confirm('Are you sure you want to delete this persona?')) return;
+    if (confirmDeleteUuid !== uuid) {
+      setConfirmDeleteUuid(uuid);
+      setTimeout(() => setConfirmDeleteUuid((curr) => (curr === uuid ? null : curr)), 3500);
+      return;
+    }
+    setConfirmDeleteUuid(null);
     try {
       const token = await getIdToken();
       const headers: Record<string, string> = {};
       if (token) headers['Authorization'] = `Bearer ${token}`;
 
-      const res = await fetch(`/api/personas/${uuid}?guestId=${guestId}`, {
+      const res = await fetch(`/api/personas/${uuid}?guestId=${encodeURIComponent(guestId)}`, {
         method: 'DELETE',
         headers,
       });
 
       if (res.ok) {
         setUserPersonas((prev) => prev.filter((p) => p.uuid !== uuid));
+        onPersonasChanged?.();
       }
     } catch (err) {
       console.error(err);
@@ -311,6 +331,7 @@ export const PersonaModal: React.FC<PersonaModalProps> = ({ isOpen, onClose }) =
       savePersonaToCloud(name.trim(), payload.bio);
 
       await fetchMyPersonas();
+      onPersonasChanged?.();
       setViewMode('list');
       setSuccessMsg(`Persona "${name}" saved and set to active!`);
       setTimeout(() => setSuccessMsg(''), 3000);
@@ -478,18 +499,26 @@ export const PersonaModal: React.FC<PersonaModalProps> = ({ isOpen, onClose }) =
                         <div className="flex items-center justify-between pt-2 border-t border-zinc-800/80">
                           <div className="flex items-center gap-1.5">
                             <button
+                              type="button"
                               onClick={() => handleStartEdit(p)}
-                              className="p-1.5 rounded-lg border border-zinc-800 hover:bg-zinc-800 text-zinc-400 hover:text-white"
+                              className="flex items-center gap-1 px-2 py-1 rounded-lg border border-amber-500/40 bg-amber-500/15 text-[11px] font-bold text-amber-200 hover:bg-amber-500/30 transition-all"
                               title="Edit Persona"
                             >
-                              <Edit3 className="h-3.5 w-3.5" />
+                              <Edit3 className="h-3 w-3" />
+                              <span>Edit</span>
                             </button>
                             <button
+                              type="button"
                               onClick={() => handleDeletePersona(p.uuid)}
-                              className="p-1.5 rounded-lg border border-zinc-800 hover:bg-zinc-800 text-zinc-400 hover:text-rose-400"
-                              title="Delete Persona"
+                              className={`flex items-center gap-1 px-2 py-1 rounded-lg border text-[11px] font-bold transition-all ${
+                                confirmDeleteUuid === p.uuid
+                                  ? 'border-rose-500 bg-rose-600 text-white'
+                                  : 'border-rose-500/40 bg-rose-950/30 text-rose-300 hover:bg-rose-900/40'
+                              }`}
+                              title={confirmDeleteUuid === p.uuid ? 'Click again to delete persona' : 'Delete Persona'}
                             >
-                              <Trash2 className="h-3.5 w-3.5" />
+                              <Trash2 className="h-3 w-3" />
+                              <span>{confirmDeleteUuid === p.uuid ? 'Confirm' : 'Delete'}</span>
                             </button>
                           </div>
 
@@ -535,11 +564,21 @@ export const PersonaModal: React.FC<PersonaModalProps> = ({ isOpen, onClose }) =
                       className="h-full w-full"
                     />
                   ) : (
-                    <img
-                      src={avatar}
-                      alt="Avatar"
-                      className="h-full w-full object-cover object-top"
-                    />
+                    <>
+                      <img
+                        src={avatar}
+                        alt=""
+                        aria-hidden="true"
+                        referrerPolicy="no-referrer"
+                        className="absolute inset-0 h-full w-full object-cover blur-xl scale-110 opacity-35 pointer-events-none"
+                      />
+                      <img
+                        src={avatar}
+                        alt="Avatar"
+                        referrerPolicy="no-referrer"
+                        className="relative z-10 h-full w-full object-contain"
+                      />
+                    </>
                   )}
 
                   {/* Upload button over image */}
@@ -835,6 +874,16 @@ export const PersonaModal: React.FC<PersonaModalProps> = ({ isOpen, onClose }) =
                 />
               </div>
             </div>
+
+            {/* Chub Dynamic Free-Form Tags for Persona */}
+            <TagInput
+              selectedTags={tags}
+              onChange={setTags}
+              title="Persona Tags (Saved to Chub Tag DB)"
+              subtitle="Add custom tags or choose existing Chub tags for your persona."
+              guestId={guestId}
+              compact
+            />
 
             {/* Submit Action Buttons */}
             <div className="flex items-center justify-between pt-4 border-t border-zinc-800">

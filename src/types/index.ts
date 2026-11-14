@@ -115,9 +115,18 @@ export interface ChatMessage {
   createdAt?: string;
 }
 
+export interface TagRecord {
+  id: number;
+  name: string;
+  slug: string;
+  usageCount: number;
+  createdBy: string;
+  createdAt?: string;
+}
+
 export interface ChubChatSettings {
-  promptStructure: 'tavern_v2' | 'roleplay_classic' | 'instruct' | 'alpaca' | 'chatml' | 'vicuna';
-  apiProvider: 'gemini' | 'chub_mars' | 'custom_openai';
+  promptStructure: string;
+  apiProvider: string;
   model: string;
   includeNames: boolean;
   banEmojis: boolean;
@@ -143,13 +152,17 @@ export interface ChubChatSettings {
   lorebookTokenBudget: number;
   matchWholeWords: boolean;
   lorebookRecursiveScanning: boolean;
-  ttsApi: 'gemini_flash_tts' | 'gemini_flash_lite_tts' | 'chub_voice' | 'custom_tts';
+  ttsApi: string;
+  ttsEndpointUrl?: string;
+  ttsApiKey?: string;
   defaultModel: string;
   defaultVoice: string;
   autoGeneration: boolean;
   restrictNarration: boolean;
   stagingUrl?: string;
   characterViewStyle?: 'chub' | 'janitor';
+  useAvatarAsBackground?: boolean;
+  avatarBackgroundFit?: 'contain' | 'cover';
   groupChatSettings?: {
     joinOrder: 'round_robin' | 'natural_turn' | 'manual';
     silenceThreshold: number;

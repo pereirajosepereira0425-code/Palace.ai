@@ -14,11 +14,20 @@ import {
   ExternalLink,
 } from 'lucide-react';
 
+import {
+  CHUB_API_PROVIDERS,
+  CHUB_ACTIVE_MODELS,
+  CHUB_PROMPT_STRUCTURES,
+  CHUB_TTS_APIS,
+} from '../utils/chubOptions.ts';
+
 export interface GenerationPresets {
-  apiProvider: 'gemini' | 'chub' | 'openrouter' | 'custom';
+  apiProvider: string;
   chubApiUrl: string;
   chubApiKey: string;
   customModel: string;
+  promptStructure: string;
+  ttsApi: string;
   temperature: number;
   topP: number;
   maxContextTokens: number;
@@ -31,7 +40,9 @@ export const DEFAULT_PRESETS: GenerationPresets = {
   apiProvider: 'gemini',
   chubApiUrl: 'https://api.chub.ai/v1',
   chubApiKey: '',
-  customModel: 'gemini-4-argon',
+  customModel: 'gemini-3.8-flash',
+  promptStructure: 'tavern_v2',
+  ttsApi: 'gemini_flash_tts',
   temperature: 0.85,
   topP: 0.95,
   maxContextTokens: 8192,
@@ -55,48 +66,83 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
 }) => {
   const [formData, setFormData] = useState<GenerationPresets>(presets);
   const [savedSuccess, setSavedSuccess] = useState(false);
+  const [testingConn, setTestingConn] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
 
   useEffect(() => {
     setFormData(presets);
+    setTestResult(null);
   }, [presets, isOpen]);
 
   if (!isOpen) return null;
 
-  const handleProviderSelect = (provider: GenerationPresets['apiProvider']) => {
-    let defaultUrl = formData.chubApiUrl;
-    let defaultModel = formData.customModel;
-
-    if (provider === 'chub') {
-      defaultUrl = 'https://api.chub.ai/v1';
-      defaultModel = 'mars-70b';
-    } else if (provider === 'openrouter') {
-      defaultUrl = 'https://openrouter.ai/api/v1';
-      defaultModel = 'anthropic/claude-3.5-sonnet';
-    } else if (provider === 'gemini') {
-      defaultUrl = '';
-      defaultModel = 'gemini-4-argon';
-    }
-
+  const handleProviderSelect = (providerId: string) => {
+    const prov = CHUB_API_PROVIDERS.find((p) => p.id === providerId);
     setFormData({
       ...formData,
-      apiProvider: provider,
-      chubApiUrl: defaultUrl,
-      customModel: defaultModel,
+      apiProvider: providerId,
+      chubApiUrl: prov?.defaultUrl !== undefined ? prov.defaultUrl : formData.chubApiUrl,
+      customModel: prov?.defaultModel || formData.customModel,
     });
+    setTestResult(null);
+  };
+
+  const handleTestConnection = async () => {
+    try {
+      setTestingConn(true);
+      setTestResult(null);
+      const res = await fetch('/api/config/test-connection', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          apiProvider: formData.apiProvider,
+          apiUrl: formData.chubApiUrl,
+          apiKey: formData.chubApiKey,
+          model: formData.customModel,
+        }),
+      });
+      const data = await res.json();
+      setTestResult({ ok: Boolean(data.ok), message: data.message || 'Checked connection.' });
+    } catch (err: any) {
+      setTestResult({ ok: false, message: err?.message || 'Connection test failed.' });
+    } finally {
+      setTestingConn(false);
+    }
   };
 
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
     onSavePresets(formData);
+    // Sync key Chub settings into localStorage so ChatRoom & ChubSettingsModal share the selection
+    try {
+      const existingRaw = localStorage.getItem('palace_chub_chat_settings');
+      const existing = existingRaw ? JSON.parse(existingRaw) : {};
+      localStorage.setItem(
+        'palace_chub_chat_settings',
+        JSON.stringify({
+          ...existing,
+          apiProvider: formData.apiProvider,
+          model: formData.customModel,
+          promptStructure: formData.promptStructure || existing.promptStructure || 'tavern_v2',
+          ttsApi: formData.ttsApi || existing.ttsApi || 'gemini_flash_tts',
+          defaultVoice: formData.voiceName,
+          contextSize: formData.maxContextTokens || existing.contextSize || 8192,
+          stagingUrl: formData.chubApiUrl || existing.stagingUrl,
+        })
+      );
+    } catch {
+      // ignore storage error
+    }
     setSavedSuccess(true);
     setTimeout(() => {
       setSavedSuccess(false);
       onClose();
-    }, 1000);
+    }, 800);
   };
 
   const handleReset = () => {
     setFormData(DEFAULT_PRESETS);
+    setTestResult(null);
   };
 
   return (
@@ -116,7 +162,7 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
                 </span>
               </h2>
               <p className="text-xs text-zinc-400">
-                Configure Chub.ai Mars/Mercury API, Gemini engine, thinking parameters, and context.
+                Configure Chub.ai Mars/Mercury API, Gemini engine, context budget, and voice.
               </p>
             </div>
           </div>
@@ -124,6 +170,7 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
           <button
             onClick={onClose}
             className="rounded-xl p-2 text-zinc-400 hover:bg-zinc-900 hover:text-white transition-all"
+            aria-label="Close Presets"
           >
             <X className="h-5 w-5" />
           </button>
@@ -137,58 +184,201 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
         )}
 
         <form onSubmit={handleSave} className="space-y-6 text-xs">
-          {/* Provider Selector Tabs */}
-          <div>
-            <label className="block text-xs font-bold uppercase tracking-wider text-purple-400 mb-2">
-              Model Engine / API Source
+          {/* Always-visible Chub.ai API Key Quick Access */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-2xl border border-fuchsia-500/35 bg-gradient-to-r from-purple-950/50 via-zinc-900/80 to-fuchsia-950/40 p-3.5">
+            <div className="space-y-0.5">
+              <div className="font-bold text-purple-200 flex items-center gap-1.5">
+                <Key className="h-3.5 w-3.5 text-amber-300" />
+                <span>Chub.ai API &amp; Secrets</span>
+              </div>
+              <p className="text-[11px] text-zinc-400">
+                Create or copy your Chub.ai Mars/Mercury key directly from your Chub account settings.
+              </p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              {formData.apiProvider === 'gemini' && (
+                <button
+                  type="button"
+                  onClick={() => handleProviderSelect('chub_mars')}
+                  className="rounded-xl border border-purple-500/40 bg-purple-900/40 px-3 py-2 text-[11px] font-bold text-purple-200 hover:bg-purple-800/50 transition-all cursor-pointer"
+                >
+                  Use Chub API
+                </button>
+              )}
+              <a
+                href="https://chub.ai/profile"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-purple-600 to-fuchsia-600 px-3.5 py-2 text-[11px] font-bold text-white shadow-md hover:from-purple-500 hover:to-fuchsia-500 transition-all"
+              >
+                <span>🔑 Create Chub.ai API Key</span>
+                <ExternalLink className="h-3.5 w-3.5" />
+              </a>
+            </div>
+          </div>
+
+          {/* API Provider Selector (Full Chub.ai List) */}
+          <div className="space-y-3">
+            <label className="block text-xs font-bold uppercase tracking-wider text-purple-400">
+              API Provider ({CHUB_API_PROVIDERS.length} Chub.ai &amp; External Providers)
             </label>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-              {[
-                { id: 'gemini', label: 'Gemini Palace', sub: 'Native High-Thinking' },
-                { id: 'chub', label: 'Chub.ai API', sub: 'Mars / Mercury' },
-                { id: 'openrouter', label: 'OpenRouter', sub: '300+ LLM Hub' },
-                { id: 'custom', label: 'Custom URL', sub: 'OpenAI-Compatible' },
-              ].map((prov) => {
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-48 overflow-y-auto pr-1">
+              {CHUB_API_PROVIDERS.map((prov) => {
                 const isSelected = formData.apiProvider === prov.id;
                 return (
                   <button
                     key={prov.id}
                     type="button"
-                    onClick={() => handleProviderSelect(prov.id as any)}
-                    className={`rounded-2xl border p-3 text-left transition-all ${
+                    onClick={() => handleProviderSelect(prov.id)}
+                    className={`rounded-2xl border p-2.5 text-left transition-all ${
                       isSelected
                         ? 'border-purple-500 bg-purple-600/20 text-white ring-1 ring-purple-500'
                         : 'border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200'
                     }`}
                   >
-                    <div className="font-bold text-xs">{prov.label}</div>
-                    <div className="text-[10px] text-zinc-500 mt-0.5">{prov.sub}</div>
+                    <div className="font-bold text-xs truncate">{prov.label}</div>
+                    <div className="text-[10px] text-zinc-500 mt-0.5 truncate">{prov.badge}</div>
                   </button>
                 );
               })}
             </div>
           </div>
 
+          {/* Active Model + Prompt Structure + TTS API */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 rounded-2xl border border-zinc-800 bg-zinc-900/40 p-4">
+            <div className="space-y-1.5">
+              <label className="block font-bold text-purple-300">
+                Active Model ({CHUB_ACTIVE_MODELS.length}+ Models)
+              </label>
+              <select
+                value={
+                  CHUB_ACTIVE_MODELS.some((m) => m.id === formData.customModel)
+                    ? formData.customModel
+                    : '__custom__'
+                }
+                onChange={(e) => {
+                  if (e.target.value !== '__custom__') {
+                    setFormData({ ...formData, customModel: e.target.value });
+                  }
+                }}
+                className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 focus:border-purple-500 focus:outline-none"
+              >
+                {Array.from(new Set(CHUB_ACTIVE_MODELS.map((m) => m.provider || 'Other'))).map(
+                  (group) => (
+                    <optgroup key={group} label={group}>
+                      {CHUB_ACTIVE_MODELS.filter((m) => (m.provider || 'Other') === group).map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.label}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )
+                )}
+                <option value="__custom__">Custom Model ID</option>
+              </select>
+              <input
+                type="text"
+                value={formData.customModel}
+                onChange={(e) => setFormData({ ...formData, customModel: e.target.value })}
+                placeholder="e.g. chub-mars, chub-mercury, gemini-3.8-flash"
+                className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-1.5 text-[11px] font-mono text-zinc-200 focus:border-purple-500 focus:outline-none"
+              />
+              <div className="pt-1">
+                <label className="block font-bold text-purple-300 mb-1">
+                  Max Context Window (Speed vs Memory)
+                </label>
+                <select
+                  value={formData.maxContextTokens || 8192}
+                  onChange={(e) =>
+                    setFormData({ ...formData, maxContextTokens: parseInt(e.target.value, 10) || 8192 })
+                  }
+                  className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-1.5 text-xs text-zinc-100 focus:border-purple-500 focus:outline-none"
+                >
+                  <option value={4096}>4,096 tokens (Fastest for giant cards)</option>
+                  <option value={8192}>8,192 tokens (Balanced Chub Standard)</option>
+                  <option value={16384}>16,384 tokens (Long Lorebook Roleplay)</option>
+                  <option value={32768}>32,768 tokens (Deep Memory)</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="block font-bold text-purple-300 mb-1">
+                  Prompt Structure ({CHUB_PROMPT_STRUCTURES.length} Formats)
+                </label>
+                <select
+                  value={formData.promptStructure || 'tavern_v2'}
+                  onChange={(e) => setFormData({ ...formData, promptStructure: e.target.value })}
+                  className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 focus:border-purple-500 focus:outline-none"
+                >
+                  {CHUB_PROMPT_STRUCTURES.map((ps) => (
+                    <option key={ps.id} value={ps.id}>
+                      {ps.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block font-bold text-purple-300 mb-1">
+                  Text-To-Speech (TTS) API ({CHUB_TTS_APIS.length} Engines)
+                </label>
+                <select
+                  value={formData.ttsApi || 'gemini_flash_tts'}
+                  onChange={(e) => setFormData({ ...formData, ttsApi: e.target.value })}
+                  className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 focus:border-purple-500 focus:outline-none"
+                >
+                  {CHUB_TTS_APIS.map((tts) => (
+                    <option key={tts.id} value={tts.id}>
+                      {tts.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          </div>
+
           {/* Chub / Custom API configuration fields */}
           {formData.apiProvider !== 'gemini' && (
             <div className="rounded-2xl border border-purple-500/30 bg-purple-950/20 p-4 space-y-4">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="font-bold text-purple-300 flex items-center gap-1.5">
                   <Key className="h-4 w-4" />
-                  Custom Endpoint Credentials
+                  Provider Endpoint Credentials ({formData.apiProvider})
                 </span>
-                {formData.apiProvider === 'chub' && (
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleTestConnection}
+                    disabled={testingConn}
+                    className="rounded-lg border border-purple-500/40 bg-purple-600/20 px-2.5 py-1 text-[11px] font-bold text-purple-200 hover:bg-purple-600/40 disabled:opacity-50 cursor-pointer"
+                  >
+                    {testingConn ? 'Testing...' : 'Test Connection'}
+                  </button>
                   <a
                     href="https://chub.ai/profile"
                     target="_blank"
-                    rel="noreferrer"
-                    className="flex items-center gap-1 text-[11px] text-purple-400 hover:underline"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-1 rounded-lg bg-purple-600/30 border border-purple-400/40 px-2.5 py-1 text-[11px] font-bold text-purple-200 hover:bg-purple-600/50"
                   >
                     <span>Get Chub API Key</span>
                     <ExternalLink className="h-3 w-3" />
                   </a>
-                )}
+                </div>
               </div>
+
+              {testResult && (
+                <div
+                  className={`rounded-xl border px-3 py-2 text-[11px] font-semibold ${
+                    testResult.ok
+                      ? 'border-emerald-500/40 bg-emerald-950/30 text-emerald-300'
+                      : 'border-amber-500/40 bg-amber-950/30 text-amber-200'
+                  }`}
+                >
+                  {testResult.message}
+                </div>
+              )}
 
               <div>
                 <label className="block text-zinc-300 font-semibold mb-1">
@@ -196,13 +386,12 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
                 </label>
                 <input
                   type="url"
-                  required
                   value={formData.chubApiUrl}
                   onChange={(e) =>
                     setFormData({ ...formData, chubApiUrl: e.target.value })
                   }
                   placeholder="https://api.chub.ai/v1"
-                  className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3.5 py-2 text-xs text-zinc-100 placeholder-zinc-600 focus:border-purple-500 focus:outline-none"
+                  className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3.5 py-2 text-xs text-zinc-100 placeholder-zinc-600 focus:border-purple-500 focus:outline-none font-mono"
                 />
               </div>
 
@@ -216,23 +405,8 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
                   onChange={(e) =>
                     setFormData({ ...formData, chubApiKey: e.target.value })
                   }
-                  placeholder="Paste your Chub Mars/Mercury or OpenRouter Key..."
+                  placeholder="Paste your Chub Mars/Mercury, OpenAI, Anthropic, or OpenRouter Key..."
                   className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3.5 py-2 text-xs text-zinc-100 placeholder-zinc-600 focus:border-purple-500 focus:outline-none font-mono"
-                />
-              </div>
-
-              <div>
-                <label className="block text-zinc-300 font-semibold mb-1">
-                  Target Model Name
-                </label>
-                <input
-                  type="text"
-                  value={formData.customModel}
-                  onChange={(e) =>
-                    setFormData({ ...formData, customModel: e.target.value })
-                  }
-                  placeholder="e.g. mars-70b, mercury, anthropic/claude-3.5-sonnet"
-                  className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3.5 py-2 text-xs text-zinc-100 placeholder-zinc-600 focus:border-purple-500 focus:outline-none"
                 />
               </div>
             </div>

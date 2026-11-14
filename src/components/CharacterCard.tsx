@@ -8,6 +8,8 @@ import {
   Globe,
   Volume2,
   Share2,
+  Edit3,
+  Trash2,
 } from 'lucide-react';
 import { Character } from '../types/index.ts';
 import { exportTavernCard } from '../utils/characterUtils.ts';
@@ -15,20 +17,27 @@ import { exportTavernCard } from '../utils/characterUtils.ts';
 interface CharacterCardProps {
   character: Character;
   isLiked?: boolean;
+  canEdit?: boolean;
   onLikeToggle?: (charId: number) => void;
   onSelectCharacter: (char: Character) => void;
   onQuickView: (char: Character) => void;
+  onEditCharacter?: (char: Character) => void;
+  onDeleteCharacter?: (char: Character) => void;
 }
 
 export const CharacterCard: React.FC<CharacterCardProps> = ({
   character,
   isLiked = false,
+  canEdit = false,
   onLikeToggle,
   onSelectCharacter,
   onQuickView,
+  onEditCharacter,
+  onDeleteCharacter,
 }) => {
   const [likeCount, setLikeCount] = useState(character.likeCount);
   const [liked, setLiked] = useState(isLiked);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   // Parse tags
   let tagList: string[] = [];
@@ -68,8 +77,16 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
       <div className="relative aspect-[3/4] w-full overflow-hidden bg-zinc-950">
         <img
           src={character.avatar}
+          alt=""
+          aria-hidden="true"
+          referrerPolicy="no-referrer"
+          className="absolute inset-0 h-full w-full object-cover blur-xl scale-110 opacity-35 pointer-events-none"
+        />
+        <img
+          src={character.avatar}
           alt={character.name}
-          className="h-full w-full object-cover object-top transition-transform duration-500 group-hover:scale-105"
+          referrerPolicy="no-referrer"
+          className="relative z-10 h-full w-full object-contain transition-transform duration-500 group-hover:scale-105"
           loading="lazy"
           onError={(e) => {
             // fallback if avatar link breaks
@@ -204,7 +221,7 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
             )}
           </div>
 
-          <div className="flex items-center gap-2 pt-2 border-t border-zinc-800/80">
+          <div className="flex items-center gap-1.5 pt-2 border-t border-zinc-800/80">
             <button
               onClick={(e) => {
                 e.stopPropagation();
@@ -215,11 +232,54 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
               Details
             </button>
             <button
-              onClick={() => onSelectCharacter(character)}
+              onClick={(e) => {
+                e.stopPropagation();
+                onSelectCharacter(character);
+              }}
               className="flex-1 rounded-xl bg-gradient-to-r from-purple-600 to-fuchsia-600 py-2 text-xs font-semibold text-white shadow-md shadow-purple-900/30 hover:from-purple-500 hover:to-fuchsia-500 transition-all text-center"
             >
               Chat
             </button>
+            {canEdit && onEditCharacter && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onEditCharacter(character);
+                }}
+                aria-label={`Edit ${character.name}`}
+                title="Edit your character"
+                className="flex items-center justify-center gap-1 rounded-xl border border-amber-500/40 bg-amber-500/15 px-2.5 py-2 text-xs font-bold text-amber-200 hover:bg-amber-500/30 transition-all shrink-0"
+              >
+                <Edit3 className="h-3.5 w-3.5" />
+                <span>Edit</span>
+              </button>
+            )}
+            {canEdit && onDeleteCharacter && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (!confirmDelete) {
+                    setConfirmDelete(true);
+                    setTimeout(() => setConfirmDelete(false), 3500);
+                    return;
+                  }
+                  setConfirmDelete(false);
+                  onDeleteCharacter(character);
+                }}
+                aria-label={`Delete ${character.name}`}
+                title={confirmDelete ? 'Click again to permanently delete' : 'Delete your character'}
+                className={`flex items-center justify-center gap-1 rounded-xl border px-2.5 py-2 text-xs font-bold transition-all shrink-0 ${
+                  confirmDelete
+                    ? 'border-rose-500 bg-rose-600 text-white shadow-md'
+                    : 'border-rose-500/40 bg-rose-950/30 text-rose-300 hover:bg-rose-900/40'
+                }`}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                {confirmDelete && <span>Confirm</span>}
+              </button>
+            )}
           </div>
         </div>
       </div>

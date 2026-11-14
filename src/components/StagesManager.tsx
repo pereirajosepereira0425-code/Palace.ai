@@ -9,6 +9,7 @@ import {
   Palette,
   Eye,
   Sliders,
+  Edit3,
 } from 'lucide-react';
 
 export interface Stage {
@@ -22,6 +23,15 @@ export interface Stage {
 }
 
 export const DEFAULT_STAGES: Stage[] = [
+  {
+    id: 'use-character-avatar',
+    name: "Character's Avatar (Full Uncropped)",
+    category: 'Character',
+    imageUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=1600&q=80',
+    description: "Automatically uses the active character's full avatar image as your chat background.",
+    blurLevel: 1,
+    overlayOpacity: 0.68,
+  },
   {
     id: 'cyberpunk-neon',
     name: 'Neo-Tokyo Rainy Alley',
@@ -102,9 +112,11 @@ export const StagesManager: React.FC<StagesManagerProps> = ({
 
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
   const [isAddingNew, setIsAddingNew] = useState(false);
+  const [editingStageId, setEditingStageId] = useState<string | null>(null);
+  const [confirmDeleteStageId, setConfirmDeleteStageId] = useState<string | null>(null);
   const [previewStage, setPreviewStage] = useState<Stage | null>(null);
 
-  // New stage form state
+  // New / Edit stage form state
   const [newName, setNewName] = useState('');
   const [newCategory, setNewCategory] = useState('Fantasy');
   const [newImageUrl, setNewImageUrl] = useState('');
@@ -114,24 +126,62 @@ export const StagesManager: React.FC<StagesManagerProps> = ({
 
   const categories = ['All', ...Array.from(new Set(stages.map((s) => s.category)))];
 
-  const handleCreateStage = (e: React.FormEvent) => {
+  const resetStageForm = () => {
+    setEditingStageId(null);
+    setNewName('');
+    setNewCategory('Fantasy');
+    setNewImageUrl('');
+    setNewDescription('');
+    setNewBlur(2);
+    setNewOpacity(0.65);
+  };
+
+  const handleStartEditStage = (stage: Stage, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setEditingStageId(stage.id);
+    setNewName(stage.name);
+    setNewCategory(stage.category || 'Custom');
+    setNewImageUrl(stage.imageUrl);
+    setNewDescription(stage.description || '');
+    setNewBlur(stage.blurLevel);
+    setNewOpacity(stage.overlayOpacity);
+    setIsAddingNew(true);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleSaveStage = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newName.trim() || !newImageUrl.trim()) return;
 
-    const newStage: Stage = {
-      id: 'custom-' + Date.now(),
-      name: newName.trim(),
-      category: newCategory.trim() || 'Custom',
-      imageUrl: newImageUrl.trim(),
-      description: newDescription.trim() || 'A custom atmosphere for roleplay.',
-      blurLevel: newBlur,
-      overlayOpacity: newOpacity,
-    };
+    let updated: Stage[];
+    let targetStage: Stage;
 
-    const updated = [newStage, ...stages];
+    if (editingStageId) {
+      targetStage = {
+        id: editingStageId,
+        name: newName.trim(),
+        category: newCategory.trim() || 'Custom',
+        imageUrl: newImageUrl.trim(),
+        description: newDescription.trim() || 'A custom atmosphere for roleplay.',
+        blurLevel: newBlur,
+        overlayOpacity: newOpacity,
+      };
+      updated = stages.map((s) => (s.id === editingStageId ? targetStage : s));
+    } else {
+      targetStage = {
+        id: 'custom-' + Date.now(),
+        name: newName.trim(),
+        category: newCategory.trim() || 'Custom',
+        imageUrl: newImageUrl.trim(),
+        description: newDescription.trim() || 'A custom atmosphere for roleplay.',
+        blurLevel: newBlur,
+        overlayOpacity: newOpacity,
+      };
+      updated = [targetStage, ...stages];
+    }
+
     setStages(updated);
 
-    // Save custom ones to localStorage
     const customOnly = updated.filter((s) => s.id.startsWith('custom-'));
     try {
       localStorage.setItem('palace_custom_stages', JSON.stringify(customOnly));
@@ -139,19 +189,27 @@ export const StagesManager: React.FC<StagesManagerProps> = ({
       console.error(err);
     }
 
-    onSelectStage(newStage);
+    onSelectStage(targetStage);
     setIsAddingNew(false);
-    setNewName('');
-    setNewImageUrl('');
-    setNewDescription('');
+    resetStageForm();
   };
 
   const handleDeleteStage = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
+    if (confirmDeleteStageId !== id) {
+      setConfirmDeleteStageId(id);
+      setTimeout(() => setConfirmDeleteStageId((curr) => (curr === id ? null : curr)), 3500);
+      return;
+    }
+    setConfirmDeleteStageId(null);
     const updated = stages.filter((s) => s.id !== id);
     setStages(updated);
     const customOnly = updated.filter((s) => s.id.startsWith('custom-'));
     localStorage.setItem('palace_custom_stages', JSON.stringify(customOnly));
+    if (editingStageId === id) {
+      setIsAddingNew(false);
+      resetStageForm();
+    }
   };
 
   const filteredStages =
@@ -176,7 +234,15 @@ export const StagesManager: React.FC<StagesManagerProps> = ({
         </div>
 
         <button
-          onClick={() => setIsAddingNew(!isAddingNew)}
+          onClick={() => {
+            if (isAddingNew) {
+              setIsAddingNew(false);
+              resetStageForm();
+            } else {
+              resetStageForm();
+              setIsAddingNew(true);
+            }
+          }}
           className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-purple-600 to-amber-500 px-4 py-2.5 text-xs font-bold text-white shadow-lg shadow-purple-900/30 hover:from-purple-500 hover:to-amber-400 transition-all self-start sm:self-auto"
         >
           <Plus className="h-4 w-4" />
@@ -184,15 +250,15 @@ export const StagesManager: React.FC<StagesManagerProps> = ({
         </button>
       </div>
 
-      {/* New Stage Creator Drawer */}
+      {/* New / Edit Stage Creator Drawer */}
       {isAddingNew && (
         <form
-          onSubmit={handleCreateStage}
+          onSubmit={handleSaveStage}
           className="mb-8 rounded-3xl border border-purple-500/30 bg-zinc-900/70 p-6 backdrop-blur-xl space-y-4 shadow-xl"
         >
           <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-purple-400">
             <Palette className="h-4 w-4" />
-            <span>Design New Stage</span>
+            <span>{editingStageId ? 'Edit Custom Stage' : 'Design New Stage'}</span>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -302,7 +368,10 @@ export const StagesManager: React.FC<StagesManagerProps> = ({
           <div className="flex justify-end gap-2 pt-2">
             <button
               type="button"
-              onClick={() => setIsAddingNew(false)}
+              onClick={() => {
+                setIsAddingNew(false);
+                resetStageForm();
+              }}
               className="rounded-xl border border-zinc-800 bg-zinc-900 px-4 py-2 text-xs font-semibold text-zinc-400 hover:text-zinc-200"
             >
               Cancel
@@ -312,7 +381,7 @@ export const StagesManager: React.FC<StagesManagerProps> = ({
               className="flex items-center gap-1.5 rounded-xl bg-purple-600 px-5 py-2 text-xs font-bold text-white hover:bg-purple-500"
             >
               <Check className="h-4 w-4" />
-              <span>Save &amp; Activate Stage</span>
+              <span>{editingStageId ? 'Update & Activate Stage' : 'Save & Activate Stage'}</span>
             </button>
           </div>
         </form>
@@ -399,13 +468,30 @@ export const StagesManager: React.FC<StagesManagerProps> = ({
                 </div>
 
                 {stage.id.startsWith('custom-') && (
-                  <button
-                    onClick={(e) => handleDeleteStage(stage.id, e)}
-                    className="text-zinc-500 hover:text-rose-400 transition-colors p-1"
-                    title="Delete custom stage"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={(e) => handleStartEditStage(stage, e)}
+                      className="flex items-center gap-1 rounded-lg border border-amber-500/40 bg-amber-500/15 px-2 py-1 text-[11px] font-bold text-amber-200 hover:bg-amber-500/30 transition-colors"
+                      title="Edit custom stage"
+                    >
+                      <Edit3 className="h-3 w-3" />
+                      <span>Edit</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(e) => handleDeleteStage(stage.id, e)}
+                      className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] font-bold transition-colors ${
+                        confirmDeleteStageId === stage.id
+                          ? 'border-rose-500 bg-rose-600 text-white'
+                          : 'border-rose-500/40 bg-rose-950/30 text-rose-300 hover:bg-rose-900/40'
+                      }`}
+                      title={confirmDeleteStageId === stage.id ? 'Click again to delete stage' : 'Delete custom stage'}
+                    >
+                      <Trash2 className="h-3 w-3" />
+                      <span>{confirmDeleteStageId === stage.id ? 'Confirm' : 'Delete'}</span>
+                    </button>
+                  </div>
                 )}
               </div>
             </div>

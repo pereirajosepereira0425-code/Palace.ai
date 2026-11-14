@@ -31,6 +31,8 @@ import {
   Zap,
   Shield,
   Users,
+  Edit3,
+  Trash2,
 } from 'lucide-react';
 import { Character, ChatSession } from '../types/index.ts';
 import { ThreeAvatarViewer } from './ThreeAvatarViewer.tsx';
@@ -39,6 +41,7 @@ import {
   calculateTokenBreakdown,
   exportTavernCard,
 } from '../utils/characterUtils.ts';
+import { isOwnedByRequester } from '../utils/ownership.ts';
 import { useAuth } from '../context/AuthContext.tsx';
 
 export interface StartChatOptions {
@@ -53,6 +56,8 @@ interface CharacterDetailViewProps {
   onBack: () => void;
   onLikeToggle?: (charId: number) => void;
   onForkCharacter?: (char: Character) => void;
+  onEditCharacter?: (char: Character) => void;
+  onDeleteCharacter?: (char: Character) => void;
   onViewCreator?: (creatorName: string) => void;
   isLiked?: boolean;
 }
@@ -166,10 +171,17 @@ export const CharacterDetailView: React.FC<CharacterDetailViewProps> = ({
   onBack,
   onLikeToggle,
   onForkCharacter,
+  onEditCharacter,
+  onDeleteCharacter,
   onViewCreator,
   isLiked = false,
 }) => {
   const { guestId, getIdToken, persona, user } = useAuth();
+  const canModify = isOwnedByRequester(character.creatorId, {
+    userUid: user?.uid,
+    guestId,
+  });
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   // View mode: 'chub' or 'janitor'
   const [viewStyle, setViewStyle] = useState<'chub' | 'janitor'>(() => {
@@ -539,11 +551,21 @@ export const CharacterDetailView: React.FC<CharacterDetailViewProps> = ({
                       className="h-full w-full"
                     />
                   ) : (
-                    <img
-                      src={character.avatar}
-                      alt={character.name}
-                      className="h-full w-full object-cover object-top"
-                    />
+                    <>
+                      <img
+                        src={character.avatar}
+                        alt=""
+                        aria-hidden="true"
+                        referrerPolicy="no-referrer"
+                        className="absolute inset-0 h-full w-full object-cover blur-xl scale-110 opacity-35 pointer-events-none"
+                      />
+                      <img
+                        src={character.avatar}
+                        alt={character.name}
+                        referrerPolicy="no-referrer"
+                        className="relative z-10 h-full w-full object-contain"
+                      />
+                    </>
                   )}
 
                   <button
@@ -633,6 +655,40 @@ export const CharacterDetailView: React.FC<CharacterDetailViewProps> = ({
                     <ImageIcon className="h-3.5 w-3.5 text-pink-400" />
                     <span>PNG Card</span>
                   </button>
+
+                  {canModify && onEditCharacter && (
+                    <button
+                      type="button"
+                      onClick={() => onEditCharacter(character)}
+                      className="flex items-center justify-center gap-1.5 rounded-xl border border-amber-500/50 bg-amber-500/15 px-3 py-2 text-xs font-bold text-amber-200 hover:bg-amber-500/30 transition-all"
+                    >
+                      <Edit3 className="h-3.5 w-3.5" />
+                      <span>Edit Character</span>
+                    </button>
+                  )}
+
+                  {canModify && onDeleteCharacter && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!confirmDelete) {
+                          setConfirmDelete(true);
+                          setTimeout(() => setConfirmDelete(false), 3500);
+                          return;
+                        }
+                        setConfirmDelete(false);
+                        onDeleteCharacter(character);
+                      }}
+                      className={`flex items-center justify-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-bold transition-all ${
+                        confirmDelete
+                          ? 'border-rose-500 bg-rose-600 text-white shadow-md'
+                          : 'border-rose-500/50 bg-rose-950/30 text-rose-300 hover:bg-rose-900/40'
+                      }`}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      <span>{confirmDelete ? 'Confirm Delete' : 'Delete'}</span>
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -1134,11 +1190,21 @@ export const CharacterDetailView: React.FC<CharacterDetailViewProps> = ({
                     className="h-full w-full"
                   />
                 ) : (
-                  <img
-                    src={character.avatar}
-                    alt={character.name}
-                    className="h-full w-full object-cover object-top"
-                  />
+                  <>
+                    <img
+                      src={character.avatar}
+                      alt=""
+                      aria-hidden="true"
+                      referrerPolicy="no-referrer"
+                      className="absolute inset-0 h-full w-full object-cover blur-xl scale-110 opacity-35 pointer-events-none"
+                    />
+                    <img
+                      src={character.avatar}
+                      alt={character.name}
+                      referrerPolicy="no-referrer"
+                      className="relative z-10 h-full w-full object-contain"
+                    />
+                  </>
                 )}
 
                 <button
@@ -1276,6 +1342,40 @@ export const CharacterDetailView: React.FC<CharacterDetailViewProps> = ({
                     <Download className="h-4 w-4 text-pink-400" />
                     <span>JSON</span>
                   </button>
+
+                  {canModify && onEditCharacter && (
+                    <button
+                      type="button"
+                      onClick={() => onEditCharacter(character)}
+                      className="flex items-center gap-1.5 rounded-2xl border border-amber-500/50 bg-amber-500/15 px-4 py-3 text-xs font-bold text-amber-200 hover:bg-amber-500/30 transition-all"
+                    >
+                      <Edit3 className="h-4 w-4" />
+                      <span>Edit</span>
+                    </button>
+                  )}
+
+                  {canModify && onDeleteCharacter && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!confirmDelete) {
+                          setConfirmDelete(true);
+                          setTimeout(() => setConfirmDelete(false), 3500);
+                          return;
+                        }
+                        setConfirmDelete(false);
+                        onDeleteCharacter(character);
+                      }}
+                      className={`flex items-center gap-1.5 rounded-2xl border px-4 py-3 text-xs font-bold transition-all ${
+                        confirmDelete
+                          ? 'border-rose-500 bg-rose-600 text-white shadow-md'
+                          : 'border-rose-500/50 bg-rose-950/30 text-rose-300 hover:bg-rose-900/40'
+                      }`}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                      <span>{confirmDelete ? 'Confirm?' : 'Delete'}</span>
+                    </button>
+                  )}
                 </div>
               </div>
             </div>

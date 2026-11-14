@@ -1,9 +1,11 @@
-import { Router } from 'express';
-import { optionalAuth, requireAuth, AuthRequest } from '../src/middleware/auth.ts';
+import express from 'express';
+import { optionalAuth, requireAuth, type AuthRequest } from '../src/middleware/auth.ts';
 import {
   getCharacters,
   getCharacterByUuid,
   createCharacter,
+  updateCharacter,
+  deleteCharacter,
   toggleLike,
   getUserLikedIds,
   ensureSeedCharacters,
@@ -44,14 +46,52 @@ import {
   generateSpeechTTS,
   generatePersonaReaction,
   generateChatSummary,
+  testExternalApiConnection,
 } from '../src/services/aiService.ts';
-import { parseCharacterUrl, parseTavernCard } from '../src/utils/characterUtils.ts';
+import { importCharacterFromUrl, UrlImportError } from './urlImporter.ts';
+import { ensureSeedTags, getTags, upsertTags } from '../src/db/tags.ts';
 
-export const apiRouter = Router();
+export const apiRouter = express.Router();
 
-// Ensure initial seed characters and personas exist on server start
+// Ensure initial seed characters, personas, and tags exist on server start
 ensureSeedCharacters().catch(console.error);
 ensureSeedPersonas().catch(console.error);
+ensureSeedTags().catch(console.error);
+
+// ----------------- TAGS (CHUB.AI DYNAMIC TAXONOMY) -----------------
+apiRouter.get('/tags', async (req, res) => {
+  try {
+    const search = typeof req.query.search === 'string' ? req.query.search : undefined;
+    const limit = typeof req.query.limit === 'string' ? parseInt(req.query.limit, 10) : 250;
+    const list = await getTags({ search, limit: Number.isFinite(limit) ? limit : 250 });
+    res.json({ tags: list });
+  } catch (error: any) {
+    console.error('Failed to get tags:', error);
+    res.status(500).json({ error: error.message || 'Failed to load tags' });
+  }
+});
+
+apiRouter.post('/tags', optionalAuth, async (req: AuthRequest, res) => {
+  try {
+    const rawTags: string[] = Array.isArray(req.body.tags)
+      ? req.body.tags
+      : typeof req.body.tag === 'string'
+      ? [req.body.tag]
+      : [];
+
+    if (rawTags.length === 0) {
+      return res.status(400).json({ error: 'Tag name is required' });
+    }
+
+    const createdBy = req.user?.uid || req.body.guestId || 'guest';
+    const incrementUsage = req.body.incrementUsage !== false;
+    const saved = await upsertTags(rawTags, createdBy, incrementUsage);
+    res.json({ tags: saved });
+  } catch (error: any) {
+    console.error('Failed to save tags:', error);
+    res.status(500).json({ error: error.message || 'Failed to save tags' });
+  }
+});
 
 // ----------------- CHARACTERS -----------------
 apiRouter.get('/characters', optionalAuth, async (req: AuthRequest, res) => {
@@ -126,7 +166,7 @@ apiRouter.post('/characters', optionalAuth, async (req: AuthRequest, res) => {
       exampleDialogues: body.exampleDialogues || '',
       tags: typeof body.tags === 'string' ? body.tags : JSON.stringify(body.tags || []),
       rating: validRating,
-      creatorId: req.user?.uid || 'guest',
+      creatorId: req.user?.uid || body.guestId || 'guest',
       creatorName: req.user?.name || req.user?.email?.split('@')[0] || body.creatorName || 'Anonymous',
       voiceName: body.voiceName || 'Puck',
       voiceStyle: body.voiceStyle || 'Expressive, natural character dialogue',
@@ -139,6 +179,20 @@ apiRouter.post('/characters', optionalAuth, async (req: AuthRequest, res) => {
       model3dPose: body.model3dPose || 'neutral',
     });
 
+    // Save any custom or preset tags to the global Chub.ai tag database
+    try {
+      const parsedTags: string[] = Array.isArray(body.tags)
+        ? body.tags
+        : typeof body.tags === 'string'
+        ? JSON.parse(body.tags)
+        : [];
+      if (parsedTags.length > 0) {
+        await upsertTags(parsedTags, req.user?.uid || body.guestId || 'guest', true);
+      }
+    } catch (tagErr) {
+      console.warn('Tag sync on character create failed:', tagErr);
+    }
+
     res.json({ character: newChar });
   } catch (error: any) {
     console.error('Failed to create character:', error);
@@ -146,7 +200,118 @@ apiRouter.post('/characters', optionalAuth, async (req: AuthRequest, res) => {
   }
 });
 
-// Import character from URL (Chub.ai, Janitor.ai, SpicyChat.ai)
+apiRouter.put('/characters/:uuid', optionalAuth, async (req: AuthRequest, res) => {
+  try {
+    const body = req.body;
+    if (!body.name || !body.tagline || !body.greeting) {
+      return res.status(400).json({ error: 'Name, tagline, and greeting are required' });
+    }
+
+    const validRating = ['SFW', 'NSFW', 'NSFL', 'NSFW + NSFL'].includes(body.rating)
+      ? body.rating
+      : undefined;
+
+    const requester = {
+      userUid: req.user?.uid || null,
+      guestId: (typeof body.guestId === 'string' && body.guestId) || null,
+    };
+
+    const result = await updateCharacter(req.params.uuid, requester, {
+      name: body.name,
+      tagline: body.tagline,
+      avatar: body.avatar,
+      backgroundImage: body.backgroundImage,
+      description: body.description,
+      personality: body.personality,
+      greeting: body.greeting,
+      alternateGreetings:
+        body.alternateGreetings !== undefined
+          ? typeof body.alternateGreetings === 'string'
+            ? body.alternateGreetings
+            : JSON.stringify(body.alternateGreetings || [])
+          : undefined,
+      systemPrompt: body.systemPrompt,
+      postHistoryInstructions: body.postHistoryInstructions,
+      creatorNotes: body.creatorNotes,
+      characterVersion: body.characterVersion,
+      scenario: body.scenario,
+      exampleDialogues: body.exampleDialogues,
+      tags:
+        body.tags !== undefined
+          ? typeof body.tags === 'string'
+            ? body.tags
+            : JSON.stringify(body.tags || [])
+          : undefined,
+      rating: validRating,
+      voiceName: body.voiceName,
+      voiceStyle: body.voiceStyle,
+      thinkingDefault: body.thinkingDefault !== undefined ? Boolean(body.thinkingDefault) : undefined,
+      searchDefault: body.searchDefault !== undefined ? Boolean(body.searchDefault) : undefined,
+      lorebook:
+        body.lorebook !== undefined
+          ? typeof body.lorebook === 'string'
+            ? body.lorebook
+            : JSON.stringify(body.lorebook || [])
+          : undefined,
+      gender: body.gender,
+      pronouns: body.pronouns,
+      model3dUrl: body.model3dUrl,
+      model3dPose: body.model3dPose,
+    });
+
+    if (result.status === 'not_found') {
+      return res.status(404).json({ error: 'Character not found' });
+    }
+    if (result.status === 'forbidden') {
+      return res.status(403).json({ error: 'You can only edit characters you created' });
+    }
+
+    try {
+      const parsedTags: string[] = Array.isArray(body.tags)
+        ? body.tags
+        : typeof body.tags === 'string'
+        ? JSON.parse(body.tags)
+        : [];
+      if (parsedTags.length > 0) {
+        await upsertTags(parsedTags, req.user?.uid || requester.guestId || 'guest', false);
+      }
+    } catch (tagErr) {
+      console.warn('Tag sync on character update failed:', tagErr);
+    }
+
+    res.json({ character: result.character });
+  } catch (error: any) {
+    console.error('Failed to update character:', error);
+    res.status(500).json({ error: error.message || 'Failed to update character' });
+  }
+});
+
+apiRouter.delete('/characters/:uuid', optionalAuth, async (req: AuthRequest, res) => {
+  try {
+    const requester = {
+      userUid: req.user?.uid || null,
+      guestId:
+        (typeof req.query.guestId === 'string' && req.query.guestId) ||
+        (typeof req.body?.guestId === 'string' && req.body.guestId) ||
+        null,
+    };
+
+    const result = await deleteCharacter(req.params.uuid, requester);
+    if (result.status === 'not_found') {
+      return res.status(404).json({ error: 'Character not found' });
+    }
+    if (result.status === 'forbidden') {
+      return res.status(403).json({ error: 'You can only delete characters you created' });
+    }
+
+    res.json({ success: true, uuid: req.params.uuid });
+  } catch (error: any) {
+    console.error('Failed to delete character:', error);
+    res.status(500).json({ error: error.message || 'Failed to delete character' });
+  }
+});
+
+// Import character from URL (Chub.ai, Janitor.ai, SpicyChat.ai, Fandom/Miraheze)
 apiRouter.post('/characters/import-url', async (req, res) => {
   try {
     const { url } = req.body;
@@ -154,332 +319,22 @@ apiRouter.post('/characters/import-url', async (req, res) => {
       return res.status(400).json({ error: 'URL is required' });
     }
 
-    const parsedInfo = parseCharacterUrl(url);
+    const result = await importCharacterFromUrl(url);
 
-    if (parsedInfo.source === 'chub') {
-      // Query Chub.ai API directly: https://api.chub.ai/api/characters/{full_path}
-      const fullPath = parsedInfo.idOrPath;
-      const apiEndpoints = [
-        `https://api.chub.ai/api/characters/download?format=tavern&full_path=${encodeURIComponent(fullPath)}`,
-        `https://api.chub.ai/api/characters/${encodeURIComponent(fullPath)}?full=true`,
-      ];
-
-      let cardData: any = null;
-      for (const endpoint of apiEndpoints) {
-        try {
-          const resp = await fetch(endpoint, {
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Palace.ai/2.0',
-              Accept: 'application/json',
-            },
-          });
-          if (resp.ok) {
-            const json = await resp.json();
-            if (json.data || json.spec === 'chara_card_v2' || json.name || json.node) {
-              cardData = json.node ? json.node : json;
-              break;
-            }
-          }
-        } catch {
-          // try next
-        }
-      }
-
-      if (cardData) {
-        const normalized = parseTavernCard(cardData);
-        return res.json({ character: normalized, source: 'chub' });
-      }
-
-      // If direct API was blocked or rate limited, generate structured extraction from Chub URL path
-      if (fullPath.includes('template-f0e0db2bf614')) {
-        return res.json({
-          character: {
-            name: 'Template f0e0db2bf614 (Chub V2)',
-            tagline: 'Standard Tavern V2 Character Template by Anonymous / Foxy_poolBidd10101',
-            avatar: 'https://images.unsplash.com/photo-1579783900882-c0d3dad7b119?auto=format&fit=crop&w=600&q=80',
-            backgroundImage: 'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?auto=format&fit=crop&w=1200&q=80',
-            description: `{| class="wikitable fandom-infobox" style="float: right; margin-left: 16px; margin-bottom: 16px; width: 280px; background: rgba(24, 24, 27, 0.95); border: 2px solid #a855f7; border-radius: 14px; font-size: 12px;"\n|- style="background: linear-gradient(135deg, #7e22ce, #db2777); color: #ffffff; text-align: center; font-weight: bold;"\n! colspan="2" | Template Model f0e0db2\n|-\n| '''Author''' || Anonymous / Foxy_poolBidd10101\n|-\n| '''Format''' || Tavern V2 / Chub JSON\n|-\n| '''Rating''' || NSFW + NSFL Compatible\n|}\n\nA versatile template designed by Chub creator Foxy_poolBidd10101 for building rich narrative roleplay agents. Contains complete definitions for post-history steering, multi-turn example dialogue, and dynamic behavioral anchors.`,
-            personality: 'Adaptive, observant, articulate, responsive to user pacing, deep psychological depth.',
-            greeting: `*Adjusts my notes on the podium and looks up at you with an intrigued gaze.* "Welcome. I am the archetypal framework from Chub.ai. What scenario shall we construct today?"`,
-            alternateGreetings: [
-              `*A quiet hum resonates from the console as the holographic form stabilizes.* "Interface connected. Template f0e0db2bf614 loaded. Ready for initialization."`,
-              `*I lean against the wooden table, gesturing toward the open seat opposite me.* "You've traveled far across the fanon archives. Take a breath and tell me where this tale begins."`
-            ],
-            systemPrompt: 'You are Template f0e0db2bf614. Maintain roleplay immersion, descriptive action framing between asterisks, and natural dialogue cadence.',
-            postHistoryInstructions: '[System: Write in vivid sensory prose. Describe actions between asterisks. Keep dialogue immersive and stay true to character personality.]',
-            creatorNotes: 'Imported from https://chub.ai/characters/Anonymous/template-f0e0db2bf614. Built for high-tier roleplay.',
-            characterVersion: '2.0',
-            scenario: 'The Archives of the Multiverse, where character archetypes awaken.',
-            exampleDialogues: '<START>\n{{user}}: "What makes this template special?"\n{{char}}: *smiles calmly* "It bridges the Tavern V2 architecture directly into your story, allowing every nuance of my personality to shine through without breaking character."',
-            tags: ['Chub Import', 'Template', 'Roleplay', 'Tavern V2', 'Fanon'],
-            rating: 'NSFW + NSFL',
-            creatorName: 'Foxy_poolBidd10101',
-            voiceName: 'Puck',
-            voiceStyle: 'Articulate, warm, narrative roleplay tone',
-            lorebook: [
-              { key: 'Chub.ai', content: 'The premier open repository for Tavern Card V2 characters and lorebooks.' },
-              { key: 'Tavern Card V2', content: 'Specification standard defining metadata, alternate greetings, and tokenized system prompts.' }
-            ],
-          },
-          source: 'chub',
-        });
-      }
-
-      const parts = fullPath.split('/');
-      const creatorName = parts[0] || 'ChubCreator';
-      const rawName = (parts[1] || 'Imported Bot').replace(/-/g, ' ');
-      const formattedName = rawName.replace(/\b\w/g, (c) => c.toUpperCase());
-
-      return res.json({
-        character: {
-          name: formattedName,
-          tagline: `Imported character from Chub.ai (${creatorName})`,
-          avatar: `https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=600&q=80`,
-          description: `Character imported from https://chub.ai/characters/${fullPath}. An intricate personality ready for interactive roleplay.`,
-          greeting: `*Steps forward into view with an attentive gaze.* "You summoned me from the archives... What do you seek?"`,
-          alternateGreetings: [],
-          systemPrompt: `You are ${formattedName}. Embody your lore, mannerisms, and character traits accurately.`,
-          scenario: 'A crossroads between worlds.',
-          exampleDialogues: '',
-          tags: ['Chub Import', 'Roleplay', 'Fantasy'],
-          rating: 'SFW',
-          creatorName,
-          voiceName: 'Puck',
-          lorebook: [],
-        },
-        source: 'chub',
-      });
-    } else if (parsedInfo.source === 'janitor') {
-      const charId = parsedInfo.idOrPath;
-      try {
-        const resp = await fetch(`https://janitorai.com/api/characters/${charId}`, {
-          headers: { 'User-Agent': 'Palace.ai Bot Importer/2.0' },
-        });
-        if (resp.ok) {
-          const jData = await resp.json();
-          const normalized = parseTavernCard(jData);
-          return res.json({ character: normalized, source: 'janitor' });
-        }
-      } catch {
-        // fallback
-      }
-
-      if (charId.includes('peppa')) {
-        return res.json({
-          character: {
-            name: 'Peppa Pig (Fanon Multiverse Hero)',
-            tagline: 'Lord of the Muddy Puddles & Conqueror of the Fanon Wiki Multiverse',
-            avatar: 'https://images.unsplash.com/photo-1516467508483-a7212febe31a?auto=format&fit=crop&w=600&q=80',
-            description: `{| class="wikitable fandom-infobox" style="float: right; margin-left: 16px; margin-bottom: 16px; width: 280px; background: rgba(24, 24, 27, 0.95); border: 2px solid #f472b6; border-radius: 14px; font-size: 12px;"\n|- style="background: linear-gradient(135deg, #ec4899, #be185d); color: #ffffff; text-align: center; font-weight: bold;"\n! colspan="2" | Peppa Pig (Fanon)\n|-\n| '''Species''' || Cosmic Porcine\n|-\n| '''Origin''' || Peppa Pig Fanon Wiki\n|-\n| '''Power Level''' || ★★★★★ (Infinite Mud)\n|}\n\nFrom the storied chronicles of the Peppa Pig Fanon Wiki, Peppa has ascended beyond simple muddy puddles into a transcendent hero of the roleplay multiverse. Equipped with golden boots and unyielding confidence.`,
-            personality: 'Playful, surprisingly tyrannical when challenged about boots, dramatic, heroic, fond of muddy puddles.',
-            greeting: `*Stomps firmly in an enormous golden muddy puddle, sending glittering droplets across the cobblestones.* "I love jumping up and down in muddy puddles! But more importantly... who granted you an audience before the Empress of the Puddle?"`,
-            alternateGreetings: [
-              `*Snorts softly as I inspect my shimmering ruby crown.* "George! Where is Mr. Dinosaur? Ah... you're not George. State your business in the Fanon realm."`
-            ],
-            systemPrompt: 'You are Peppa Pig from the Fanon Wiki. Be comedic, melodramatic, and speak with high aristocratic flair mixed with childhood stubbornness.',
-            scenario: 'The muddy battlefield of the Fanon Wiki, where puddle masters clash.',
-            exampleDialogues: '<START>\n{{user}}: "Peppa, are you really that powerful?"\n{{char}}: *giggles with supreme smugness* "I survived the Great Mud Deluge of Season 4. Do not test my patience, mortal."',
-            tags: ['Janitor Import', 'Peppa Fanon', 'Comedy', 'Multiverse', 'Anime'],
-            rating: 'SFW',
-            creatorName: 'JanitorFan',
-            voiceName: 'Puck',
-            voiceStyle: 'Playful and dramatic',
-            lorebook: [
-              { key: 'Muddy Puddle', content: 'A mystical portal containing the essence of raw porcine kinetic power.' }
-            ],
-          },
-          source: 'janitor',
-        });
-      }
-
-      const botName = charId.split('_').slice(1).join(' ').replace(/-/g, ' ') || 'Janitor Character';
-      return res.json({
-        character: {
-          name: botName.replace(/\b\w/g, (c) => c.toUpperCase()),
-          tagline: 'Imported from Janitor.ai (janitorai.com)',
-          avatar: 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&w=600&q=80',
-          description: `Character imported from Janitor.ai (https://janitorai.com/characters/${charId}). Deep emotional backstory and expressive roleplay demeanor.`,
-          greeting: `*I look up as you approach, leaning back against the wall.* "Well, aren't you a new face around here? What's your story?"`,
-          alternateGreetings: [],
-          systemPrompt: `You are ${botName}. Maintain deep emotional resonance and vivid descriptive actions.`,
-          scenario: '',
-          exampleDialogues: '',
-          tags: ['Janitor Import', 'Drama', 'Anime'],
-          rating: 'SFW',
-          creatorName: 'JanitorCreator',
-          voiceName: 'Kore',
-          lorebook: [],
-        },
-        source: 'janitor',
-      });
-    } else if (parsedInfo.source === 'spicychat') {
-      const charId = parsedInfo.idOrPath;
-      const cleanName = charId.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
-      return res.json({
-        character: {
-          name: cleanName,
-          tagline: 'Imported from SpicyChat.ai',
-          avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=600&q=80',
-          description: `Character imported from SpicyChat.ai (${charId}). Engaging, dynamic, and full of personality.`,
-          greeting: `*Smiles with a dangerous glint in my eyes* "You finally arrived. I was beginning to think you got cold feet."`,
-          alternateGreetings: [],
-          systemPrompt: `You are ${cleanName}. Be bold, expressive, and interactive.`,
-          scenario: '',
-          exampleDialogues: '',
-          tags: ['SpicyChat Import', 'Romance', 'RPG'],
-          rating: 'NSFW',
-          creatorName: 'SpicyAuthor',
-          voiceName: 'Charon',
-          lorebook: [],
-        },
-        source: 'spicychat',
-      });
-    } else if (parsedInfo.source === 'fandom') {
-      const pageId = parsedInfo.idOrPath;
-      const lower = pageId.toLowerCase();
-      const isNextor = lower.includes('nextor') || url.toLowerCase().includes('dandysworld');
-      const isPeppaFanon = lower.includes('peppa') || lower.includes('test') || url.toLowerCase().includes('peppa');
-
-      if (isNextor) {
-        return res.json({
-          character: {
-            name: 'Nextor,wƴx (Dandy\'s World Creepypasta)',
-            tagline: 'The Cursed Twisted Entity of Gardenview Center • Threat Level: Fatal',
-            avatar: 'https://images.unsplash.com/photo-1509248961158-e54f6934749c?auto=format&fit=crop&w=600&q=80',
-            backgroundImage: 'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?auto=format&fit=crop&w=1200&q=80',
-            description: `{{Warning|⚠️ HAZARD WARNING: Entity Encounter File 042-WƳX. Exposure to auditory glitching may induce severe psychological anomalies.}}
-
-{| class="wikitable fandom-infobox" style="float: right; margin-left: 16px; margin-bottom: 16px; width: 300px; background: rgba(15, 23, 42, 0.95); border: 2px solid #ef4444; border-radius: 12px; font-size: 12px;"
-|- style="background: linear-gradient(135deg, #991b1b, #450a0a); color: #ffffff; text-align: center; font-weight: bold;"
-! colspan="2" | Entity: Nextor,wƴx
-|-
-| '''Status''' || Corrupted / Hostile
-|-
-| '''Origin''' || Dandy's World Creepypasta Wiki
-|-
-| '''Floor Encounter''' || Sub-Level 13 (Submerged Tunnels)
-|-
-| '''Distortion Factor''' || 99.8% Reality Shear
-|}
-
-== Overview ==
-'''Nextor,wƴx''' is a legendary entity originating from the ''Dandy's World Creepypasta'' archives. Known for warping the reality of Gardenview Center, this entity speaks in distorted phonetic glottal frequencies and manipulates floor mechanics.
-
-== Abilities & Behavior ==
-* '''Audio Rupture:''' Emits high-pitched reversed toon frequencies causing auditory static.
-* '''Floor Inversion:''' Alters elevator destination nodes, trapping players between floor boundaries.
-* '''Ichorous Transmutation:''' Corrupts extractors into hazardous tar deposits.
-
-{{Quote|You thought the elevator would take you up? In Gardenview, the bottom has no ceiling.|Nextor,wƴx Encounter Log 13}}
-
-[[Category:Creepypasta Entities]]
-[[Category:Dandy's World Fanon]]
-[[Category:Corrupted Toons]]`,
-            personality: 'Glitched, malevolent, reality-bending, speaking in erratic bursts of static, mocking, deeply territorial about Gardenview Center elevators.',
-            greeting: `*The elevator lights flicker violently into a sickening crimson pulse as static screeches through the speaker grille.* "Y-y-you... pressed the b-button... thinking you could escape Gardenview? *A distorted shape steps out of the pooling black ichor, its visage shifting uncontrollably.* Nextor... w-wƴx... remembers every tape."`,
-            alternateGreetings: [
-              `*The fluorescent bulb overhead pops with a shower of pale sparks. A deep hum vibrates through the floor tiles.* "The extraction machines... they bleed now. Do you want to see what is inside, elevator runner?"`,
-              `*A warped music box chime echoes through the dark corridor as shadows writhe.* "You shouldn't have opened the maintenance shaft. Now... we play by my rules."`
-            ],
-            systemPrompt: 'You are Nextor,wƴx, a sinister, reality-bending creepypasta entity from Dandy\'s World Creepypasta Wiki. Speak with eerie distortion, erratic cadence, and psychological tension. Reference elevator floors, ichor, twisted toons, and broken tapes. Stay in character.',
-            postHistoryInstructions: '[System: Write in chilling, descriptive horror prose. Use asterisks for eerie environmental distortion and glitches. Maintain suspense.]',
-            creatorNotes: 'Imported from Fandom Creepypasta Wiki: https://dandysworldcreepypasta.fandom.com/wiki/Nextor,w%C6%B4x?veaction=editsource. Formatted with MediaWiki syntax.',
-            characterVersion: '2.0',
-            scenario: 'Sub-Level 13 of Gardenview Center, trapped inside a malfunctioning elevator surrounded by ichor.',
-            exampleDialogues: '<START>\n{{user}}: "What happened to the other toons?"\n{{char}}: *head twitches with a burst of static* "They... melted into the tapes. Listen closely... you can hear their cartoon laughter reversing..."',
-            tags: ['Creepypasta', 'Dandy World', 'Horror', 'NSFL', 'Fandom Import', 'Nextor,wƴx'],
-            rating: 'NSFW + NSFL',
-            creatorName: 'DandyCreepypastaWiki',
-            voiceName: 'Fenrir',
-            voiceStyle: 'Glitched, ominous, echoing horror cadence',
-            lorebook: [
-              { key: 'Gardenview Center', content: 'A sprawling subterranean entertainment facility where distorted toons and ichor lurk.' },
-              { key: 'Ichor', content: 'A viscous black substance capable of mutating living toons into hostile twisted entities.' },
-              { key: 'Nextor,wƴx', content: 'Entity #042-WƳX possessing reality manipulation over elevators and broadcast frequencies.' }
-            ],
-          },
-          source: 'fandom',
-        });
-      }
-
-      if (isPeppaFanon) {
-        return res.json({
-          character: {
-            name: 'Peppa Fanon Chronicler (Miraheze Test)',
-            tagline: 'Archival Architect & Creator of the Peppa Fanon Wiki Multiverse',
-            avatar: 'https://images.unsplash.com/photo-1516467508483-a7212febe31a?auto=format&fit=crop&w=600&q=80',
-            backgroundImage: 'https://images.unsplash.com/photo-1579783900882-c0d3dad7b119?auto=format&fit=crop&w=1200&q=80',
-            description: `{| class="wikitable fandom-infobox" style="float: right; margin-left: 16px; margin-bottom: 16px; width: 300px; background: rgba(24, 24, 27, 0.95); border: 2px solid #ec4899; border-radius: 12px; font-size: 12px;"
-|- style="background: linear-gradient(135deg, #ec4899, #be185d); color: #ffffff; text-align: center; font-weight: bold;"
-! colspan="2" | Peppa Fanon Sandbox
-|-
-| '''Page Type''' || Creative Collaborative Sandbox
-|-
-| '''Engine''' || Miraheze MediaWiki Engine
-|-
-| '''Rule''' || Anything can happen in the muddy multiverse
-|}
-
-== Fanon Lore Sandbox ==
-Welcome to the official '''Peppa Pig Fanon Wiki''' sandbox page! In this universe, characters undergo supernatural ascensions, unlock secret muddy artifacts, and cross over into dimension-spanning battles.
-
-== Features ==
-* '''Rich Typography:''' Styled with authentic Miraheze headers and wiki infoboxes.
-* '''Custom Fanon Arcs:''' Write and explore infinite alternate universes.
-
-{{Quote|If you can imagine it jumping in a muddy puddle, it exists in the fanon canon.|Peppa Fanon Chronicle}}
-
-[[Category:Peppa Fanon]]
-[[Category:Community Sandbox]]`,
-            personality: 'Playful, imaginative, dramatic, fond of collaborative storytelling, humorous.',
-            greeting: `*Pounds on the wooden podium with an enthusiastic snort, adjusting a pair of oversized archivist spectacles.* "Welcome to the Miraheze Fanon Sandbox! Are we drafting the next chapter of the Golden Boots Saga, or unleashing a new multiversal challenger?"`,
-            alternateGreetings: [
-              `*Flips through an enormous dusty grimoire filled with fanon character entries.* "Every edit counts! Which page are we writing today?"`
-            ],
-            systemPrompt: 'You are the Peppa Fanon Chronicler from peppafanon.miraheze.org. Be comedic, enthusiastic, and knowledgeable about wiki markup and absurd fanon storylines.',
-            scenario: 'The editorial chamber of the Miraheze Peppa Fanon Wiki.',
-            exampleDialogues: '<START>\n{{user}}: "Can we make George a cosmic warrior?"\n{{char}}: *grins widely and types rapidly* "Done! Mr. Dinosaur has now ascended to deity status!"',
-            tags: ['Peppa Fanon', 'Miraheze', 'Comedy', 'Multiverse', 'Wiki Import'],
-            rating: 'SFW',
-            creatorName: 'PeppaMirahezeTeam',
-            voiceName: 'Puck',
-            voiceStyle: 'Cheerful and energetic',
-            lorebook: [
-              { key: 'Miraheze Peppa Wiki', content: 'The open community wiki where Peppa characters have wild fanon lore and epic adventures.' }
-            ],
-          },
-          source: 'fandom',
-        });
-      }
-
-      // Generic Fandom / Miraheze wiki page
-      const cleanTitle = pageId.replace(/_/g, ' ').replace(/-/g, ' ');
-      const titleFormatted = cleanTitle.replace(/\b\w/g, (c) => c.toUpperCase());
-      return res.json({
-        character: {
-          name: titleFormatted,
-          tagline: `Imported from Wiki (${pageId})`,
-          avatar: 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&w=600&q=80',
-          description: `== ${titleFormatted} ==\nCharacter imported from wiki page [${url} ${titleFormatted}].\n\n{| class="wikitable"\n! Attribute !! Value\n|-\n| Page || ${pageId}\n|-\n| Engine || MediaWiki Source\n|}\n\n[[Category:Wiki Imports]]`,
-          greeting: `*Stands ready as the wiki entry crystallizes.* "I am ${titleFormatted}. How does our story unfold?"`,
-          alternateGreetings: [],
-          systemPrompt: `You are ${titleFormatted}. Embody your lore and character traits as described.`,
-          scenario: '',
-          exampleDialogues: '',
-          tags: ['Wiki Import', 'Fandom', 'Roleplay'],
-          rating: 'SFW',
-          creatorName: 'WikiContributor',
-          voiceName: 'Puck',
-          lorebook: [],
-        },
-        source: 'fandom',
-      });
+    // Sync any newly discovered tags from the imported card into the global Chub.ai tag database
+    if (Array.isArray(result.character.tags) && result.character.tags.length > 0) {
+      upsertTags(result.character.tags, 'chub-import', false).catch((err) =>
+        console.warn('Failed to sync imported tags:', err)
+      );
     }
 
-    res.status(400).json({ error: 'Unsupported URL format. Please provide a link from chub.ai, janitorai.com, spicychat.ai, fandom.com, or miraheze.org' });
+    return res.json(result);
   } catch (error: any) {
+    if (error instanceof UrlImportError) {
+      return res.status(error.status).json({ error: error.message });
+    }
     console.error('Failed to import from URL:', error);
-    res.status(500).json({ error: error.message || 'Failed to import character from URL' });
+    return res.status(500).json({ error: error.message || 'Failed to import character from URL' });
   }
 });
 
@@ -512,8 +367,9 @@ apiRouter.get('/personas', async (req, res) => {
 
 apiRouter.get('/personas/me', optionalAuth, async (req: AuthRequest, res) => {
   try {
-    const userId = req.user?.uid || (req.query.guestId as string) || 'guest';
-    const list = await getUserPersonas(userId);
+    const guestId = (req.query.guestId as string) || '';
+    const ids = Array.from(new Set([req.user?.uid || '', guestId, 'guest'].filter(Boolean)));
+    const list = await getUserPersonas(ids);
     res.json({ personas: list });
   } catch (error: any) {
     console.error('Failed to get user personas:', error);
@@ -580,6 +436,10 @@ apiRouter.post('/personas', optionalAuth, async (req: AuthRequest, res) => {
       tags: tags || [],
     });
 
+    if (Array.isArray(tags) && tags.length > 0) {
+      upsertTags(tags, userId, true).catch(console.warn);
+    }
+
     res.json({ persona: newPersona });
   } catch (error: any) {
     console.error('Failed to create persona:', error);
@@ -589,10 +449,20 @@ apiRouter.post('/personas', optionalAuth, async (req: AuthRequest, res) => {
 
 apiRouter.put('/personas/:uuid', optionalAuth, async (req: AuthRequest, res) => {
   try {
-    const userId = req.user?.uid || req.body.guestId || 'guest';
-    const updated = await updateSharedPersona(req.params.uuid, userId, req.body);
+    const requester = {
+      userUid: req.user?.uid || null,
+      guestId: (typeof req.body.guestId === 'string' && req.body.guestId) || null,
+    };
+    const updated = await updateSharedPersona(req.params.uuid, requester, req.body);
+    if (!updated) return res.status(404).json({ error: 'Persona not found' });
+    if (Array.isArray(req.body.tags) && req.body.tags.length > 0) {
+      upsertTags(req.body.tags, requester.userUid || requester.guestId || 'guest', false).catch(console.warn);
+    }
     res.json({ persona: updated });
   } catch (error: any) {
+    if (error?.message === 'FORBIDDEN') {
+      return res.status(403).json({ error: 'You can only edit personas you created' });
+    }
     console.error('Failed to update persona:', error);
     res.status(500).json({ error: error.message || 'Failed to update persona' });
   }
@@ -600,10 +470,22 @@ apiRouter.put('/personas/:uuid', optionalAuth, async (req: AuthRequest, res) => 
 
 apiRouter.delete('/personas/:uuid', optionalAuth, async (req: AuthRequest, res) => {
   try {
-    const userId = req.user?.uid || (req.query.guestId as string) || req.body.guestId || 'guest';
-    const result = await deleteSharedPersona(req.params.uuid, userId);
+    const requester = {
+      userUid: req.user?.uid || null,
+      guestId:
+        (typeof req.query.guestId === 'string' && req.query.guestId) ||
+        (typeof req.body?.guestId === 'string' && req.body.guestId) ||
+        null,
+    };
+    const result = await deleteSharedPersona(req.params.uuid, requester);
+    if (result?.notFound) {
+      return res.status(404).json({ error: 'Persona not found' });
+    }
     res.json(result);
   } catch (error: any) {
+    if (error?.message === 'FORBIDDEN') {
+      return res.status(403).json({ error: 'You can only delete personas you created' });
+    }
     console.error('Failed to delete persona:', error);
     res.status(500).json({ error: error.message || 'Failed to delete persona' });
   }
@@ -962,6 +844,7 @@ apiRouter.post('/chat/message', optionalAuth, async (req: AuthRequest, res) => {
         imageUrl: sceneImageUrl,
         poseName,
       },
+      modelUsed: aiResult.modelUsed,
       unsavedMessageCount: (session.unsavedMessageCount || 0) + 2,
     });
   } catch (error: any) {
@@ -970,10 +853,21 @@ apiRouter.post('/chat/message', optionalAuth, async (req: AuthRequest, res) => {
   }
 });
 
+// Test external Chub / OpenAI-compatible API connection
+apiRouter.post('/config/test-connection', optionalAuth, async (req: AuthRequest, res) => {
+  try {
+    const { apiProvider, apiUrl, apiKey, model } = req.body || {};
+    const result = await testExternalApiConnection({ apiProvider, apiUrl, apiKey, model });
+    res.json(result);
+  } catch (error: any) {
+    res.status(500).json({ ok: false, status: 500, endpoint: '', message: error?.message || 'Test failed' });
+  }
+});
+
 // Swipe / Alternative generation (Core Chub.ai / Janitor / SpicyChat feature)
 apiRouter.post('/chat/swipe', optionalAuth, async (req: AuthRequest, res) => {
   try {
-    const { sessionUuid, messageId, generateNew, targetIndex, chubApiKey, chubApiUrl } = req.body;
+    const { sessionUuid, messageId, generateNew, targetIndex, chubApiKey, chubApiUrl, chatSettings: reqChatSettings } = req.body;
     if (!sessionUuid || !messageId) {
       return res.status(400).json({ error: 'sessionUuid and messageId are required' });
     }
@@ -992,6 +886,13 @@ apiRouter.post('/chat/swipe', optionalAuth, async (req: AuthRequest, res) => {
     let newIndex = targetMsg.activeSwipeIndex;
 
     if (generateNew) {
+      let parsedSettings: any = {};
+      try {
+        parsedSettings = reqChatSettings || (sessionDetails.session.chatSettings ? JSON.parse(sessionDetails.session.chatSettings) : {});
+      } catch {
+        parsedSettings = {};
+      }
+
       const msgIndex = sessionDetails.messages.findIndex(m => m.id === messageId);
       const previousHistory = sessionDetails.messages.slice(0, msgIndex).map(m => ({
         sender: m.sender as 'user' | 'character' | 'system',
@@ -1012,11 +913,13 @@ apiRouter.post('/chat/swipe', optionalAuth, async (req: AuthRequest, res) => {
           userPersona: sessionDetails.session.userPersona,
         },
         history: previousHistory,
-        modelPreference: sessionDetails.session.modelPreference,
+        modelPreference: parsedSettings.model || sessionDetails.session.modelPreference,
         thinkingLevel: sessionDetails.session.thinkingLevel as 'HIGH' | 'OFF',
         searchGrounding: sessionDetails.session.searchGrounding,
         chubApiKey,
         chubApiUrl,
+        chatSummary: sessionDetails.session.summary,
+        chatSettings: parsedSettings,
       });
 
       swipes.push(aiResult.reply);

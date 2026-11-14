@@ -1,6 +1,7 @@
 import { db } from './index.ts';
-import { characters, userFavorites } from './schema.ts';
-import { desc, eq, ilike, and, sql } from 'drizzle-orm';
+import { characters, chatMessages, chatSessions, userFavorites } from './schema.ts';
+import { desc, eq, ilike, and, inArray, sql } from 'drizzle-orm';
+import { isOwnedByRequester, type RequesterIdentity } from '../utils/ownership.ts';
 
 export interface CharacterInsert {
   uuid: string;
@@ -54,7 +55,8 @@ export async function getCharacters(options: {
     }
 
     if (tag && tag !== 'All') {
-      conditions.push(sql`${characters.tags} ILIKE ${'%"' + tag + '"%'}`);
+      const escapedTag = tag.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+      conditions.push(sql`${characters.tags} ILIKE ${'%"' + escapedTag + '"%'}`);
     }
 
     if (rating && rating !== 'ALL') {
@@ -126,6 +128,90 @@ export async function createCharacter(data: CharacterInsert) {
   } catch (error) {
     console.error('createCharacter failed:', error);
     throw new Error('Failed to create character', { cause: error });
+  }
+}
+
+export async function updateCharacter(
+  uuid: string,
+  requester: RequesterIdentity,
+  data: Partial<CharacterInsert>
+): Promise<{ status: 'ok'; character: any } | { status: 'not_found' } | { status: 'forbidden' }> {
+  try {
+    const existing = await getCharacterByUuid(uuid);
+    if (!existing) return { status: 'not_found' };
+    if (!isOwnedByRequester(existing.creatorId, requester)) {
+      return { status: 'forbidden' };
+    }
+
+    const updatePayload: Record<string, any> = {};
+    if (data.name !== undefined) updatePayload.name = data.name;
+    if (data.tagline !== undefined) updatePayload.tagline = data.tagline;
+    if (data.avatar !== undefined) updatePayload.avatar = data.avatar;
+    if (data.backgroundImage !== undefined) updatePayload.backgroundImage = data.backgroundImage;
+    if (data.description !== undefined) updatePayload.description = data.description;
+    if (data.personality !== undefined) updatePayload.personality = data.personality;
+    if (data.greeting !== undefined) updatePayload.greeting = data.greeting;
+    if (data.alternateGreetings !== undefined) updatePayload.alternateGreetings = data.alternateGreetings;
+    if (data.systemPrompt !== undefined) updatePayload.systemPrompt = data.systemPrompt;
+    if (data.postHistoryInstructions !== undefined) updatePayload.postHistoryInstructions = data.postHistoryInstructions;
+    if (data.creatorNotes !== undefined) updatePayload.creatorNotes = data.creatorNotes;
+    if (data.characterVersion !== undefined) updatePayload.characterVersion = data.characterVersion;
+    if (data.scenario !== undefined) updatePayload.scenario = data.scenario;
+    if (data.exampleDialogues !== undefined) updatePayload.exampleDialogues = data.exampleDialogues;
+    if (data.tags !== undefined) updatePayload.tags = data.tags;
+    if (data.rating !== undefined) updatePayload.rating = data.rating;
+    if (data.voiceName !== undefined) updatePayload.voiceName = data.voiceName;
+    if (data.voiceStyle !== undefined) updatePayload.voiceStyle = data.voiceStyle;
+    if (data.thinkingDefault !== undefined) updatePayload.thinkingDefault = data.thinkingDefault;
+    if (data.searchDefault !== undefined) updatePayload.searchDefault = data.searchDefault;
+    if (data.lorebook !== undefined) updatePayload.lorebook = data.lorebook;
+    if (data.gender !== undefined) updatePayload.gender = data.gender;
+    if (data.pronouns !== undefined) updatePayload.pronouns = data.pronouns;
+    if (data.model3dUrl !== undefined) updatePayload.model3dUrl = data.model3dUrl;
+    if (data.model3dPose !== undefined) updatePayload.model3dPose = data.model3dPose;
+
+    const updated = await db
+      .update(characters)
+      .set(updatePayload)
+      .where(eq(characters.id, existing.id))
+      .returning();
+
+    return { status: 'ok', character: updated[0] };
+  } catch (error) {
+    console.error('updateCharacter failed:', error);
+    throw new Error('Failed to update character', { cause: error });
+  }
+}
+
+export async function deleteCharacter(
+  uuid: string,
+  requester: RequesterIdentity
+): Promise<{ status: 'ok' } | { status: 'not_found' } | { status: 'forbidden' }> {
+  try {
+    const existing = await getCharacterByUuid(uuid);
+    if (!existing) return { status: 'not_found' };
+    if (!isOwnedByRequester(existing.creatorId, requester)) {
+      return { status: 'forbidden' };
+    }
+
+    const sessions = await db
+      .select({ uuid: chatSessions.uuid })
+      .from(chatSessions)
+      .where(eq(chatSessions.characterId, existing.id));
+
+    const sessionUuids = sessions.map((s) => s.uuid);
+    if (sessionUuids.length > 0) {
+      await db.delete(chatMessages).where(inArray(chatMessages.sessionId, sessionUuids));
+      await db.delete(chatSessions).where(eq(chatSessions.characterId, existing.id));
+    }
+
+    await db.delete(userFavorites).where(eq(userFavorites.characterId, existing.id));
+    await db.delete(characters).where(eq(characters.id, existing.id));
+
+    return { status: 'ok' };
+  } catch (error) {
+    console.error('deleteCharacter failed:', error);
+    throw new Error('Failed to delete character', { cause: error });
   }
 }
 

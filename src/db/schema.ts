@@ -140,6 +140,16 @@ export const userFavorites = pgTable('user_favorites', {
   createdAt: timestamp('created_at').defaultNow(),
 });
 
+// Dynamic Chub.ai Tag Database (all preset & user-created custom tags)
+export const tags = pgTable('tags', {
+  id: serial('id').primaryKey(),
+  name: text('name').notNull().unique(),
+  slug: text('slug').notNull().unique(),
+  usageCount: integer('usage_count').notNull().default(0),
+  createdBy: text('created_by').notNull().default('system'),
+  createdAt: timestamp('created_at').defaultNow(),
+});
+
 // Relations
 export const usersRelations = relations(users, ({ many }) => ({
   favorites: many(userFavorites),

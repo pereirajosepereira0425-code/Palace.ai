@@ -10,6 +10,7 @@ import {
   Sparkles,
   HelpCircle,
   Copy,
+  Edit3,
 } from 'lucide-react';
 
 export interface LoreEntry {
@@ -23,7 +24,29 @@ export interface LoreEntry {
   caseSensitive: boolean;
 }
 
+export interface SavedLorebook {
+  id: string;
+  name: string;
+  description: string;
+  scanDepth: number;
+  entries: LoreEntry[];
+  updatedAt: string;
+}
+
 export const LorebookStudio: React.FC = () => {
+  const [editingLorebookId, setEditingLorebookId] = useState<string | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [savedLorebooks, setSavedLorebooks] = useState<SavedLorebook[]>(() => {
+    try {
+      const raw = localStorage.getItem('palace_saved_lorebooks');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch {}
+    return [];
+  });
+
   const [name, setName] = useState('New World Lorebook');
   const [description, setDescription] = useState('Comprehensive world info and lore triggers.');
   const [scanDepth, setScanDepth] = useState(4);
@@ -144,12 +167,60 @@ export const LorebookStudio: React.FC = () => {
   };
 
   const handleSaveToBrowser = () => {
+    const id = editingLorebookId || `lb_${Date.now()}`;
+    const record: SavedLorebook = {
+      id,
+      name: name.trim() || 'Untitled Lorebook',
+      description: description.trim(),
+      scanDepth,
+      entries,
+      updatedAt: new Date().toISOString(),
+    };
+    const nextList = editingLorebookId
+      ? savedLorebooks.map((lb) => (lb.id === id ? record : lb))
+      : [record, ...savedLorebooks];
+    setSavedLorebooks(nextList);
+    setEditingLorebookId(id);
+    localStorage.setItem('palace_saved_lorebooks', JSON.stringify(nextList));
     localStorage.setItem(
       'palace_active_lorebook',
-      JSON.stringify({ name, description, entries })
+      JSON.stringify({ name: record.name, description: record.description, entries })
     );
-    setSavedMsg('Lorebook saved to your Palace storage!');
+    setSavedMsg(editingLorebookId ? `Updated "${record.name}"!` : `Saved "${record.name}" to your Palace Lorebooks!`);
     setTimeout(() => setSavedMsg(''), 3000);
+  };
+
+  const handleLoadForEdit = (lb: SavedLorebook) => {
+    setEditingLorebookId(lb.id);
+    setName(lb.name);
+    setDescription(lb.description);
+    setScanDepth(lb.scanDepth || 4);
+    setEntries(lb.entries || []);
+    setSavedMsg(`✏️ Editing "${lb.name}"`);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleStartNewLorebook = () => {
+    setEditingLorebookId(null);
+    setName('New World Lorebook');
+    setDescription('Comprehensive world info and lore triggers.');
+    setScanDepth(4);
+    setEntries([]);
+  };
+
+  const handleDeleteLorebook = (id: string) => {
+    if (confirmDeleteId !== id) {
+      setConfirmDeleteId(id);
+      setTimeout(() => setConfirmDeleteId((curr) => (curr === id ? null : curr)), 3500);
+      return;
+    }
+    setConfirmDeleteId(null);
+    const nextList = savedLorebooks.filter((lb) => lb.id !== id);
+    setSavedLorebooks(nextList);
+    localStorage.setItem('palace_saved_lorebooks', JSON.stringify(nextList));
+    if (editingLorebookId === id) {
+      handleStartNewLorebook();
+    }
   };
 
   return (
@@ -319,14 +390,74 @@ export const LorebookStudio: React.FC = () => {
         </div>
 
         <div className="flex items-center justify-end gap-3 pt-4">
+          {editingLorebookId && (
+            <button
+              type="button"
+              onClick={handleStartNewLorebook}
+              className="rounded-xl border border-zinc-800 bg-zinc-900 px-4 py-2.5 text-xs font-semibold text-zinc-300 hover:text-white transition-all"
+            >
+              + New Lorebook
+            </button>
+          )}
           <button
             onClick={handleSaveToBrowser}
             className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-purple-600 to-fuchsia-600 px-6 py-2.5 text-xs font-bold text-white shadow-md hover:from-purple-500 hover:to-fuchsia-500 transition-all"
           >
             <Save className="h-4 w-4" />
-            <span>Save to Palace Storage</span>
+            <span>{editingLorebookId ? 'Update Lorebook' : 'Save to Palace Storage'}</span>
           </button>
         </div>
+
+        {/* Saved Lorebooks List with Edit & Delete */}
+        {savedLorebooks.length > 0 && (
+          <div className="pt-6 border-t border-zinc-800/80 space-y-3">
+            <h3 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
+              <BookOpen className="h-4 w-4 text-purple-400" />
+              <span>Your Saved Lorebooks ({savedLorebooks.length})</span>
+            </h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {savedLorebooks.map((lb) => (
+                <div
+                  key={lb.id}
+                  className={`rounded-2xl border p-4 flex items-center justify-between gap-3 ${
+                    editingLorebookId === lb.id
+                      ? 'border-purple-500/60 bg-purple-950/20'
+                      : 'border-zinc-800 bg-zinc-900/60'
+                  }`}
+                >
+                  <div className="min-w-0">
+                    <div className="text-xs font-bold text-white truncate">{lb.name}</div>
+                    <div className="text-[11px] text-zinc-400 truncate">
+                      {lb.entries.length} entries &bull; Scan depth {lb.scanDepth}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => handleLoadForEdit(lb)}
+                      className="flex items-center gap-1 rounded-xl border border-amber-500/40 bg-amber-500/15 px-2.5 py-1.5 text-xs font-bold text-amber-200 hover:bg-amber-500/30 transition-all"
+                    >
+                      <Edit3 className="h-3.5 w-3.5" />
+                      <span>Edit</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteLorebook(lb.id)}
+                      className={`flex items-center gap-1 rounded-xl border px-2.5 py-1.5 text-xs font-bold transition-all ${
+                        confirmDeleteId === lb.id
+                          ? 'border-rose-500 bg-rose-600 text-white'
+                          : 'border-rose-500/40 bg-rose-950/30 text-rose-300 hover:bg-rose-900/40'
+                      }`}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      <span>{confirmDeleteId === lb.id ? 'Confirm' : 'Delete'}</span>
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

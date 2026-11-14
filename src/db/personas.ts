@@ -1,7 +1,8 @@
 import { db } from './index.ts';
 import { personas } from './schema.ts';
-import { desc, eq, and, sql } from 'drizzle-orm';
-import { SharedPersona } from '../types/index.ts';
+import { desc, eq, and, inArray, sql } from 'drizzle-orm';
+import type { SharedPersona } from '../types/index.ts';
+import { isOwnedByRequester, type RequesterIdentity } from '../utils/ownership.ts';
 
 export async function getPublicPersonas(options: {
   search?: string;
@@ -37,9 +38,15 @@ export async function getPublicPersonas(options: {
   }
 }
 
-export async function getUserPersonas(userId: string) {
+export async function getUserPersonas(userIds: string | string[]) {
   try {
-    return await db.select().from(personas).where(eq(personas.userId, userId)).orderBy(desc(personas.createdAt));
+    const idList = Array.isArray(userIds) ? userIds.filter(Boolean) : [userIds].filter(Boolean);
+    if (idList.length === 0) return [];
+    return await db
+      .select()
+      .from(personas)
+      .where(inArray(personas.userId, idList))
+      .orderBy(desc(personas.createdAt));
   } catch (error) {
     console.error('getUserPersonas failed:', error);
     return [];
@@ -106,30 +113,44 @@ export async function createSharedPersona(data: {
   }
 }
 
-export async function updateSharedPersona(uuid: string, userId: string, data: Partial<{
-  name: string;
-  displayName: string;
-  avatar: string;
-  backgroundImage: string;
-  bio: string;
-  gender: string;
-  pronouns: string;
-  description: string;
-  personality: string;
-  greeting: string;
-  alternateGreetings: string[];
-  systemPrompt: string;
-  postHistoryInstructions: string;
-  scenario: string;
-  exampleDialogues: string;
-  creatorNotes: string;
-  lorebook: Array<{ key: string; content: string }>;
-  model3dUrl: string;
-  model3dPose: string;
-  isPublic: boolean;
-  tags: string[];
-}>) {
+export async function updateSharedPersona(
+  uuid: string,
+  requester: string | RequesterIdentity,
+  data: Partial<{
+    name: string;
+    displayName: string;
+    avatar: string;
+    backgroundImage: string;
+    bio: string;
+    gender: string;
+    pronouns: string;
+    description: string;
+    personality: string;
+    greeting: string;
+    alternateGreetings: string[];
+    systemPrompt: string;
+    postHistoryInstructions: string;
+    scenario: string;
+    exampleDialogues: string;
+    creatorNotes: string;
+    lorebook: Array<{ key: string; content: string }>;
+    model3dUrl: string;
+    model3dPose: string;
+    isPublic: boolean;
+    tags: string[];
+  }>
+) {
   try {
+    const existingList = await db.select().from(personas).where(eq(personas.uuid, uuid)).limit(1);
+    const existing = existingList[0];
+    if (!existing) return null;
+
+    const identity: RequesterIdentity =
+      typeof requester === 'string' ? { userUid: requester, guestId: requester } : requester;
+    if (!isOwnedByRequester(existing.userId, identity)) {
+      throw new Error('FORBIDDEN');
+    }
+
     const updatePayload: any = {};
     if (data.name !== undefined) updatePayload.name = data.name;
     if (data.displayName !== undefined) updatePayload.displayName = data.displayName;
@@ -153,25 +174,35 @@ export async function updateSharedPersona(uuid: string, userId: string, data: Pa
     if (data.isPublic !== undefined) updatePayload.isPublic = data.isPublic;
     if (data.tags !== undefined) updatePayload.tags = JSON.stringify(data.tags);
 
-    const result = await db.update(personas)
+    const result = await db
+      .update(personas)
       .set(updatePayload)
-      .where(and(eq(personas.uuid, uuid), eq(personas.userId, userId)))
+      .where(eq(personas.id, existing.id))
       .returning();
     return result[0];
   } catch (error) {
     console.error('updateSharedPersona failed:', error);
-    throw new Error('Failed to update persona', { cause: error });
+    throw error;
   }
 }
 
-export async function deleteSharedPersona(uuid: string, userId: string) {
+export async function deleteSharedPersona(uuid: string, requester: string | RequesterIdentity) {
   try {
-    await db.delete(personas)
-      .where(and(eq(personas.uuid, uuid), eq(personas.userId, userId)));
+    const existingList = await db.select().from(personas).where(eq(personas.uuid, uuid)).limit(1);
+    const existing = existingList[0];
+    if (!existing) return { success: false, notFound: true };
+
+    const identity: RequesterIdentity =
+      typeof requester === 'string' ? { userUid: requester, guestId: requester } : requester;
+    if (!isOwnedByRequester(existing.userId, identity)) {
+      throw new Error('FORBIDDEN');
+    }
+
+    await db.delete(personas).where(eq(personas.id, existing.id));
     return { success: true };
   } catch (error) {
     console.error('deleteSharedPersona failed:', error);
-    throw new Error('Failed to delete persona', { cause: error });
+    throw error;
   }
 }
 

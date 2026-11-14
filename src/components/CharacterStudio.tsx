@@ -25,16 +25,18 @@ import {
   Box,
   Paperclip,
   File as FileIcon,
+  Edit3,
 } from 'lucide-react';
 import {
   parseTavernCard,
   exportTavernCard,
   extractChubPngCard,
-  CHUB_ALL_TAGS,
 } from '../utils/characterUtils.ts';
 import { Character, ContentRating } from '../types/index.ts';
+import { useAuth } from '../context/AuthContext.tsx';
 import { WikiEditor } from './WikiEditor.tsx';
 import { ThreeAvatarViewer } from './ThreeAvatarViewer.tsx';
+import { TagInput } from './TagInput.tsx';
 
 interface AttachedCharacterFile {
   id: string;
@@ -46,8 +48,11 @@ interface AttachedCharacterFile {
 
 interface CharacterStudioProps {
   onCharacterCreated: (character: Character) => void;
+  onCharacterUpdated?: (character: Character) => void;
+  onCharacterDeleted?: (uuid: string) => void;
   onCancel: () => void;
   forkFromCharacter?: Character | null;
+  editingCharacter?: Character | null;
 }
 
 const AVATAR_PRESETS = [
@@ -70,9 +75,14 @@ const BACKGROUND_PRESETS = [
 
 export const CharacterStudio: React.FC<CharacterStudioProps> = ({
   onCharacterCreated,
+  onCharacterUpdated,
+  onCharacterDeleted,
   onCancel,
   forkFromCharacter,
+  editingCharacter,
 }) => {
+  const { getIdToken, guestId } = useAuth();
+
   // Chub.ai Full Specification Fields
   const [name, setName] = useState('');
   const [tagline, setTagline] = useState('');
@@ -102,58 +112,89 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
   const [model3dPose, setModel3dPose] = useState('neutral');
   const [loreEntries, setLoreEntries] = useState<Array<{ key: string; content: string }>>([]);
   const [attachedFiles, setAttachedFiles] = useState<AttachedCharacterFile[]>([]);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
-  // Pre-fill when Forking a character from Chub.ai / Janitor.ai detail view
+  // Pre-fill when Editing or Forking a character
   React.useEffect(() => {
-    if (!forkFromCharacter) return;
-    setName(`${forkFromCharacter.name} (Fork)`);
-    setTagline(forkFromCharacter.tagline || '');
-    setAvatar(forkFromCharacter.avatar || AVATAR_PRESETS[0]);
-    setBackgroundImage(forkFromCharacter.backgroundImage || '');
-    setRating(forkFromCharacter.rating || 'SFW');
-    setGreeting(forkFromCharacter.greeting || '');
+    const sourceChar = editingCharacter || forkFromCharacter;
+    if (!sourceChar) return;
+    setName(editingCharacter ? sourceChar.name : `${sourceChar.name} (Fork)`);
+    setTagline(sourceChar.tagline || '');
+    setAvatar(sourceChar.avatar || AVATAR_PRESETS[0]);
+    setBackgroundImage(sourceChar.backgroundImage || '');
+    setRating(sourceChar.rating || 'SFW');
+    setGreeting(sourceChar.greeting || '');
     try {
-      const alts = typeof forkFromCharacter.alternateGreetings === 'string'
-        ? JSON.parse(forkFromCharacter.alternateGreetings)
-        : forkFromCharacter.alternateGreetings;
+      const alts = typeof sourceChar.alternateGreetings === 'string'
+        ? JSON.parse(sourceChar.alternateGreetings)
+        : sourceChar.alternateGreetings;
       setAlternateGreetings(Array.isArray(alts) ? alts : []);
     } catch {
       setAlternateGreetings([]);
     }
-    setPersonality(forkFromCharacter.personality || '');
-    setDescription(forkFromCharacter.description || '');
-    setSystemPrompt(forkFromCharacter.systemPrompt || '');
-    setPostHistoryInstructions(forkFromCharacter.postHistoryInstructions || '');
-    setCreatorNotes(forkFromCharacter.creatorNotes || `Forked from ${forkFromCharacter.name} by @${forkFromCharacter.creatorName}`);
-    setCharacterVersion(forkFromCharacter.characterVersion || '1.0');
-    setScenario(forkFromCharacter.scenario || '');
-    setExampleDialogues(forkFromCharacter.exampleDialogues || '');
+    setPersonality(sourceChar.personality || '');
+    setDescription(sourceChar.description || '');
+    setSystemPrompt(sourceChar.systemPrompt || '');
+    setPostHistoryInstructions(sourceChar.postHistoryInstructions || '');
+    setCreatorNotes(
+      editingCharacter
+        ? sourceChar.creatorNotes || ''
+        : sourceChar.creatorNotes || `Forked from ${sourceChar.name} by @${sourceChar.creatorName}`
+    );
+    setCharacterVersion(sourceChar.characterVersion || '1.0');
+    setScenario(sourceChar.scenario || '');
+    setExampleDialogues(sourceChar.exampleDialogues || '');
     try {
-      const tags = typeof forkFromCharacter.tags === 'string'
-        ? JSON.parse(forkFromCharacter.tags)
-        : forkFromCharacter.tags;
-      setSelectedTags(Array.isArray(tags) ? tags : ['Fork']);
+      const tags = typeof sourceChar.tags === 'string'
+        ? JSON.parse(sourceChar.tags)
+        : sourceChar.tags;
+      setSelectedTags(Array.isArray(tags) ? tags : ['Roleplay']);
     } catch {
-      setSelectedTags(['Fork']);
+      setSelectedTags(['Roleplay']);
     }
-    setVoiceName(forkFromCharacter.voiceName || 'Puck');
-    setVoiceStyle(forkFromCharacter.voiceStyle || 'Expressive, natural character dialogue');
-    setThinkingDefault(Boolean(forkFromCharacter.thinkingDefault));
-    setSearchDefault(Boolean(forkFromCharacter.searchDefault));
-    setGender(forkFromCharacter.gender || 'Unknown');
-    setPronouns(forkFromCharacter.pronouns || 'They/Them');
-    setModel3dUrl(forkFromCharacter.model3dUrl || '');
-    setModel3dPose(forkFromCharacter.model3dPose || 'neutral');
+    setVoiceName(sourceChar.voiceName || 'Puck');
+    setVoiceStyle(sourceChar.voiceStyle || 'Expressive, natural character dialogue');
+    setThinkingDefault(Boolean(sourceChar.thinkingDefault));
+    setSearchDefault(Boolean(sourceChar.searchDefault));
+
+    const presetGenders = ['Female', 'Male', 'Non-Binary', 'Agender', 'Unknown'];
+    const rawGender = sourceChar.gender || 'Unknown';
+    if (presetGenders.includes(rawGender)) {
+      setGender(rawGender);
+      setCustomGender('');
+    } else {
+      setGender('Custom');
+      setCustomGender(rawGender);
+    }
+
+    const presetPronouns = ['She/Her', 'He/Him', 'They/Them', 'It/Its', 'Any'];
+    const rawPronouns = sourceChar.pronouns || 'They/Them';
+    if (presetPronouns.includes(rawPronouns)) {
+      setPronouns(rawPronouns);
+      setCustomPronouns('');
+    } else {
+      setPronouns('Custom');
+      setCustomPronouns(rawPronouns);
+    }
+
+    setModel3dUrl(sourceChar.model3dUrl || '');
+    setModel3dPose(sourceChar.model3dPose || 'neutral');
     try {
-      const lore = typeof forkFromCharacter.lorebook === 'string'
-        ? JSON.parse(forkFromCharacter.lorebook)
-        : forkFromCharacter.lorebook;
+      const lore = typeof sourceChar.lorebook === 'string'
+        ? JSON.parse(sourceChar.lorebook)
+        : sourceChar.lorebook;
       setLoreEntries(Array.isArray(lore) ? lore : []);
     } catch {
       setLoreEntries([]);
     }
-    setSuccessMsg(`Forked "${forkFromCharacter.name}"! Customize any field and publish your own version.`);
-  }, [forkFromCharacter]);
+    setConfirmingDelete(false);
+    setSuccessMsg(
+      editingCharacter
+        ? `✏️ Editing "${sourceChar.name}". Make any changes and click Save Changes!`
+        : `Forked "${sourceChar.name}"! Customize any field and publish your own version.`
+    );
+  }, [editingCharacter, forkFromCharacter]);
 
   // Any File Upload Handlers (FileReader base64 data URLs)
   const handleAvatarUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -186,9 +227,6 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
     reader.readAsDataURL(file);
   };
 
-  // Tag search query
-  const [tagSearch, setTagSearch] = useState('');
-
   // URL Importer State
   const [importUrl, setImportUrl] = useState('');
   const [importingUrl, setImportingUrl] = useState(false);
@@ -199,6 +237,7 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
   const [successMsg, setSuccessMsg] = useState('');
   const [testingVoice, setTestingVoice] = useState(false);
   const [audioElement, setAudioElement] = useState<HTMLAudioElement | null>(null);
+  const [avatarDims, setAvatarDims] = useState<{ w: number; h: number } | null>(null);
 
   // URL Import Handler (Chub.ai, Janitor.ai, SpicyChat.ai)
   const handleImportFromUrl = async () => {
@@ -219,7 +258,7 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
         throw new Error(data.error || 'Failed to import character from URL');
       }
 
-      const { character: imported, source } = await res.json();
+      const { character: imported, source, warning } = await res.json();
 
       setName(imported.name || '');
       setTagline(imported.tagline || '');
@@ -238,10 +277,31 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
       setSelectedTags(imported.tags?.length > 0 ? imported.tags : ['Chub Import']);
       setRating(imported.rating || 'SFW');
       setVoiceName(imported.voiceName || 'Puck');
+      if (imported.voiceStyle) setVoiceStyle(imported.voiceStyle);
+      if (imported.gender) {
+        const presetGenders = ['Female', 'Male', 'Non-Binary', 'Agender', 'Unknown'];
+        if (presetGenders.includes(imported.gender)) {
+          setGender(imported.gender);
+        } else {
+          setGender('Custom');
+          setCustomGender(imported.gender);
+        }
+      }
+      if (imported.pronouns) {
+        const presetPronouns = ['She/Her', 'He/Him', 'They/Them', 'It/Its', 'Any'];
+        if (presetPronouns.includes(imported.pronouns)) {
+          setPronouns(imported.pronouns);
+        } else {
+          setPronouns('Custom');
+          setCustomPronouns(imported.pronouns);
+        }
+      }
       setLoreEntries(imported.lorebook || []);
 
       setSuccessMsg(
-        `Successfully imported "${imported.name}" from ${source.toUpperCase()}! You can now edit and publish.`
+        warning
+          ? `Imported "${imported.name}" from ${source.toUpperCase()} — Note: ${warning}`
+          : `Successfully imported "${imported.name}" from ${source.toUpperCase()}! You can now edit and publish.`
       );
       setImportUrl('');
     } catch (err: any) {
@@ -432,14 +492,6 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
     reader.readAsDataURL(file);
   };
 
-  const toggleTag = (tag: string) => {
-    if (selectedTags.includes(tag)) {
-      setSelectedTags(selectedTags.filter((t) => t !== tag));
-    } else {
-      setSelectedTags([...selectedTags, tag]);
-    }
-  };
-
   // Alternate Greetings helpers
   const addAlternateGreeting = () => {
     setAlternateGreetings([...alternateGreetings, '']);
@@ -564,10 +616,20 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
             .join('\n')
         : '';
 
-      const res = await fetch('/api/characters', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+      const token = await getIdToken();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
+      const endpoint = editingCharacter
+        ? `/api/characters/${encodeURIComponent(editingCharacter.uuid)}`
+        : '/api/characters';
+      const method = editingCharacter ? 'PUT' : 'POST';
+
+      const res = await fetch(endpoint, {
+        method,
+        headers,
         body: JSON.stringify({
+          guestId,
           name: name.trim(),
           tagline: tagline.trim(),
           avatar,
@@ -600,21 +662,54 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
 
       if (!res.ok) {
         const errorData = await res.json();
-        throw new Error(errorData.error || 'Failed to create character');
+        throw new Error(
+          errorData.error || (editingCharacter ? 'Failed to update character' : 'Failed to create character')
+        );
       }
 
       const data = await res.json();
-      onCharacterCreated(data.character);
+      if (editingCharacter && onCharacterUpdated) {
+        onCharacterUpdated(data.character);
+      } else {
+        onCharacterCreated(data.character);
+      }
     } catch (err: any) {
-      setErrorMsg(err.message || 'Creation failed');
+      setErrorMsg(err.message || (editingCharacter ? 'Update failed' : 'Creation failed'));
     } finally {
       setSaving(false);
     }
   };
 
-  const filteredAllTags = CHUB_ALL_TAGS.filter((t) =>
-    t.toLowerCase().includes(tagSearch.toLowerCase())
-  );
+  const handleDeleteCurrentCharacter = async () => {
+    if (!editingCharacter) return;
+    if (!confirmingDelete) {
+      setConfirmingDelete(true);
+      setTimeout(() => setConfirmingDelete(false), 4000);
+      return;
+    }
+    try {
+      setDeleting(true);
+      setErrorMsg('');
+      const token = await getIdToken();
+      const headers: Record<string, string> = {};
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
+      const res = await fetch(
+        `/api/characters/${encodeURIComponent(editingCharacter.uuid)}?guestId=${encodeURIComponent(guestId)}`,
+        { method: 'DELETE', headers }
+      );
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.error || 'Failed to delete character');
+      }
+      onCharacterDeleted?.(editingCharacter.uuid);
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Delete failed');
+    } finally {
+      setDeleting(false);
+      setConfirmingDelete(false);
+    }
+  };
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-8">
@@ -622,9 +717,9 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
       <div className="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 border-b border-purple-900/40 pb-6">
         <div>
           <h1 className="text-2xl sm:text-3xl font-black text-zinc-100 flex items-center gap-2">
-            <span>Character Studio</span>
+            <span>{editingCharacter ? '✏️ Edit Character' : 'Character Studio'}</span>
             <span className="rounded-lg bg-purple-500/20 px-2 py-0.5 text-xs text-purple-300 border border-purple-500/30 font-semibold">
-              Chub.ai &amp; Tavern V2 Spec
+              {editingCharacter ? `Editing: ${editingCharacter.name}` : 'Chub.ai & Tavern V2 Spec'}
             </span>
           </h1>
           <p className="text-xs sm:text-sm text-zinc-400 mt-1">
@@ -684,9 +779,16 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
 
         <div className="flex flex-col sm:flex-row gap-2 mb-2.5">
           <input
-            type="url"
+            type="text"
+            aria-label="Character Import URL"
             value={importUrl}
             onChange={(e) => setImportUrl(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                handleImportFromUrl();
+              }
+            }}
             placeholder="Paste link (chub.ai, janitorai.com, spicychat.ai, fandom.com, peppafanon.miraheze.org...)"
             className="flex-1 rounded-xl border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-xs text-zinc-100 placeholder-zinc-500 focus:border-purple-500 focus:outline-none"
           />
@@ -773,24 +875,51 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
             <label className="text-xs font-bold uppercase tracking-wider text-purple-400 mb-2">
               Character Avatar &amp; 3D Model
             </label>
-            <div className="relative aspect-[3/4] w-40 overflow-hidden rounded-2xl border-2 border-purple-500/60 shadow-lg mb-2.5 bg-zinc-900 group">
+            <div className="relative w-full max-w-[240px] min-h-[160px] max-h-[320px] flex items-center justify-center overflow-hidden rounded-2xl border-2 border-purple-500/60 shadow-lg mb-2 bg-zinc-950 group">
               {model3dUrl ? (
-                <ThreeAvatarViewer
-                  characterName={name || 'Character'}
-                  avatarUrl={avatar}
-                  currentPose={model3dPose}
-                  className="h-full w-full"
-                />
+                <div className="h-64 w-full">
+                  <ThreeAvatarViewer
+                    characterName={name || 'Character'}
+                    avatarUrl={avatar}
+                    currentPose={model3dPose}
+                    className="h-full w-full"
+                  />
+                </div>
               ) : (
-                <img
-                  src={avatar}
-                  alt="Avatar Preview"
-                  className="h-full w-full object-cover object-top"
-                />
+                <>
+                  <img
+                    src={avatar}
+                    alt=""
+                    aria-hidden="true"
+                    referrerPolicy="no-referrer"
+                    className="absolute inset-0 h-full w-full object-cover blur-xl scale-110 opacity-30 pointer-events-none"
+                  />
+                  <img
+                    src={avatar}
+                    alt="Avatar Preview"
+                    referrerPolicy="no-referrer"
+                    onLoad={(e) => {
+                      const el = e.currentTarget;
+                      if (el.naturalWidth && el.naturalHeight) {
+                        setAvatarDims({ w: el.naturalWidth, h: el.naturalHeight });
+                      }
+                    }}
+                    className="relative z-10 max-h-[320px] w-full object-contain"
+                  />
+                </>
+              )}
+
+              {avatarDims && !model3dUrl && (
+                <div
+                  data-testid="avatar-resolution-badge"
+                  className="absolute top-2 left-2 z-20 rounded-lg bg-black/75 border border-white/15 px-2 py-0.5 text-[10px] font-mono font-bold text-purple-200 backdrop-blur-md"
+                >
+                  {avatarDims.w} &times; {avatarDims.h} px
+                </div>
               )}
 
               {/* Direct File Upload Overlay Button (Any file accepted) */}
-              <label className="absolute bottom-2 right-2 rounded-xl bg-black/70 border border-white/20 p-2 text-white hover:bg-black/90 cursor-pointer backdrop-blur-md shadow-md transition-all">
+              <label className="absolute bottom-2 right-2 z-20 rounded-xl bg-black/70 border border-white/20 p-2 text-white hover:bg-black/90 cursor-pointer backdrop-blur-md shadow-md transition-all">
                 <Upload className="h-3.5 w-3.5" />
                 <input
                   type="file"
@@ -803,7 +932,8 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
 
             <div className="w-full flex items-center gap-1.5 mb-2">
               <input
-                type="url"
+                type="text"
+                aria-label="Avatar URL"
                 value={avatar}
                 onChange={(e) => setAvatar(e.target.value)}
                 placeholder="Or paste image URL..."
@@ -1028,24 +1158,34 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
 
             {/* Background Image URL, File Upload & Presets */}
             <div>
-              <div className="flex items-center justify-between mb-1">
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
                 <label className="block text-xs font-bold uppercase tracking-wider text-purple-400">
                   Stage / Background Image URL (Optional)
                 </label>
-                <label className="text-[10px] text-purple-400 hover:underline cursor-pointer flex items-center gap-1">
-                  <Upload className="h-3 w-3" />
-                  <span>Upload Any Background File</span>
-                  <input
-                    type="file"
-                    accept="*/*"
-                    onChange={handleBackgroundUpload}
-                    className="hidden"
-                  />
-                </label>
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setBackgroundImage(avatar)}
+                    className="text-[10px] font-bold text-amber-300 hover:underline cursor-pointer flex items-center gap-1"
+                  >
+                    <ImageIcon className="h-3 w-3" />
+                    <span>Use Avatar as Background</span>
+                  </button>
+                  <label className="text-[10px] text-purple-400 hover:underline cursor-pointer flex items-center gap-1">
+                    <Upload className="h-3 w-3" />
+                    <span>Upload Any Background File</span>
+                    <input
+                      type="file"
+                      accept="*/*"
+                      onChange={handleBackgroundUpload}
+                      className="hidden"
+                    />
+                  </label>
+                </div>
               </div>
               <div className="flex gap-2">
                 <input
-                  type="url"
+                  type="text"
                   value={backgroundImage}
                   onChange={(e) => setBackgroundImage(e.target.value)}
                   placeholder="https://images.unsplash.com/... (Displays behind chat or upload any file)"
@@ -1300,51 +1440,13 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
           />
         </div>
 
-        {/* Chub All Tags Selector */}
-        <div className="rounded-3xl border border-zinc-800/80 bg-zinc-900/40 p-6 backdrop-blur-md space-y-4">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-            <div>
-              <label className="block text-xs font-bold uppercase tracking-wider text-purple-400">
-                Chub.ai Tag Taxonomy ({selectedTags.length} selected)
-              </label>
-              <p className="text-xs text-zinc-400 mt-0.5">
-                Select tags to help other users discover your character in the Palace.
-              </p>
-            </div>
-
-            {/* Quick Tag Search */}
-            <div className="relative w-full sm:w-64">
-              <Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500" />
-              <input
-                type="text"
-                value={tagSearch}
-                onChange={(e) => setTagSearch(e.target.value)}
-                placeholder="Filter 50+ tags..."
-                className="w-full rounded-xl border border-zinc-800 bg-zinc-950 pl-8 pr-3 py-1.5 text-xs text-zinc-200 placeholder-zinc-600 focus:border-purple-500 focus:outline-none"
-              />
-            </div>
-          </div>
-
-          <div className="flex flex-wrap gap-2 max-h-48 overflow-y-auto p-1">
-            {filteredAllTags.map((tag) => {
-              const isSelected = selectedTags.includes(tag);
-              return (
-                <button
-                  key={tag}
-                  type="button"
-                  onClick={() => toggleTag(tag)}
-                  className={`rounded-xl px-3 py-1.5 text-xs font-semibold transition-all border ${
-                    isSelected
-                      ? 'border-purple-500 bg-purple-500/20 text-purple-200 shadow-sm'
-                      : 'border-zinc-800 bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'
-                  }`}
-                >
-                  #{tag}
-                </button>
-              );
-            })}
-          </div>
-        </div>
+        {/* Chub Dynamic Free-Form Tag Database Selector */}
+        <TagInput
+          selectedTags={selectedTags}
+          onChange={setSelectedTags}
+          title="Chub.ai Tag Database"
+          subtitle="Type ANY custom tag and press Enter to save it permanently to the Chub.ai tag database, or toggle existing tags below."
+        />
 
         {/* Lorebook Trigger Entries */}
         <div className="rounded-3xl border border-zinc-800/80 bg-zinc-900/40 p-6 backdrop-blur-md space-y-4">
@@ -1472,23 +1574,55 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
         </div>
 
         {/* Submit Actions */}
-        <div className="flex items-center justify-end gap-3 pt-4">
-          <button
-            type="button"
-            onClick={onCancel}
-            className="rounded-xl border border-zinc-800 bg-zinc-900 px-5 py-2.5 text-xs font-semibold text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-all"
-          >
-            Cancel
-          </button>
+        <div className="flex flex-wrap items-center justify-between gap-3 pt-4">
+          <div>
+            {editingCharacter && onCharacterDeleted && (
+              <button
+                type="button"
+                disabled={deleting}
+                onClick={handleDeleteCurrentCharacter}
+                className={`flex items-center gap-2 rounded-xl border px-4 py-2.5 text-xs font-bold transition-all ${
+                  confirmingDelete
+                    ? 'border-rose-500 bg-rose-600 text-white shadow-lg shadow-rose-950/40'
+                    : 'border-rose-500/40 bg-rose-950/30 text-rose-300 hover:bg-rose-900/40'
+                }`}
+              >
+                <Trash2 className="h-4 w-4" />
+                <span>
+                  {deleting
+                    ? 'Deleting...'
+                    : confirmingDelete
+                    ? 'Click Again to Confirm Delete'
+                    : 'Delete Character'}
+                </span>
+              </button>
+            )}
+          </div>
 
-          <button
-            type="submit"
-            disabled={saving}
-            className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-purple-600 via-fuchsia-600 to-amber-500 px-6 py-2.5 text-xs font-bold text-white shadow-lg shadow-purple-900/40 hover:from-purple-500 hover:to-amber-400 disabled:opacity-50 transition-all"
-          >
-            <Save className="h-4 w-4" />
-            <span>{saving ? 'Saving to Cloud SQL...' : 'Create & Publish Character'}</span>
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={onCancel}
+              className="rounded-xl border border-zinc-800 bg-zinc-900 px-5 py-2.5 text-xs font-semibold text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-all"
+            >
+              Cancel
+            </button>
+
+            <button
+              type="submit"
+              disabled={saving}
+              className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-purple-600 via-fuchsia-600 to-amber-500 px-6 py-2.5 text-xs font-bold text-white shadow-lg shadow-purple-900/40 hover:from-purple-500 hover:to-amber-400 disabled:opacity-50 transition-all"
+            >
+              {editingCharacter ? <Edit3 className="h-4 w-4" /> : <Save className="h-4 w-4" />}
+              <span>
+                {saving
+                  ? 'Saving Changes...'
+                  : editingCharacter
+                  ? 'Save Changes'
+                  : 'Create & Publish Character'}
+              </span>
+            </button>
+          </div>
         </div>
       </form>
     </div>

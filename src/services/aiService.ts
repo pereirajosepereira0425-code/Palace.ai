@@ -1,4 +1,10 @@
 import { GoogleGenAI, ThinkingLevel } from '@google/genai';
+import { CHUB_API_PROVIDERS, getPromptStructureGuidance } from '../utils/chubOptions.ts';
+import {
+  buildBudgetedContext,
+  normalizeChatCompletionsUrl,
+  shouldUseHighThinking,
+} from '../utils/promptBudget.ts';
 
 // Initialize server-side GoogleGenAI client with telemetry User-Agent header
 const ai = new GoogleGenAI({
@@ -41,16 +47,26 @@ export interface GenerateReplyOptions {
   chatSettings?: {
     promptStructure?: string;
     apiProvider?: string;
+    model?: string;
     includeNames?: boolean;
     banEmojis?: boolean;
     promptNote?: string;
     promptNoteDepth?: number;
     repetitionPenalty?: number;
+    frequencyPenalty?: number;
+    presencePenalty?: number;
+    temperature?: number;
     topP?: number;
     topK?: number;
     maxNewTokens?: number;
+    contextSize?: number;
+    useLorebooks?: boolean;
+    lorebookScanDepth?: number;
+    lorebookTokenBudget?: number;
+    matchWholeWords?: boolean;
     stoppingStrings?: string;
     restrictNarration?: boolean;
+    stagingUrl?: string;
   };
 }
 
@@ -83,7 +99,8 @@ export function isQuotaOrRateLimitError(err: any): boolean {
 function generateSmartRoleplayFallback(character: CharacterContext, userMessage?: string, history?: ChatMessageItem[]): string {
   const name = character.name || 'Character';
   const lastUserText = userMessage || history?.slice(-1)[0]?.content || '';
-  
+  void lastUserText;
+
   if (name.toLowerCase().includes('peppa')) {
     return `*Stomps firmly in a glimmering muddy puddle, splashing golden droplets high into the air.* "Oink! You have my full, undivided attention! Tell me where our multiverse expedition ventures next!"`;
   }
@@ -97,32 +114,77 @@ function generateSmartRoleplayFallback(character: CharacterContext, userMessage?
   return `*Steps forward into the light, observing you with steady curiosity.* "I hear you clearly... In a world like ours, every word carries weight. Tell me what comes next."`;
 }
 
-/**
- * Match lorebook keywords against conversation context to dynamically inject lore
- */
-function extractRelevantLore(lorebookJson: string | null | undefined, textToScan: string): string[] {
-  if (!lorebookJson) return [];
+export async function testExternalApiConnection(options: {
+  apiProvider?: string;
+  apiUrl?: string;
+  apiKey?: string;
+  model?: string;
+}): Promise<{ ok: boolean; status: number; endpoint: string; message: string }> {
+  const providerMeta = CHUB_API_PROVIDERS.find((p) => p.id === options.apiProvider);
+  const rawUrl = (options.apiUrl || providerMeta?.defaultUrl || '').trim();
+  const endpoint = normalizeChatCompletionsUrl(rawUrl);
+
+  if (!endpoint) {
+    return {
+      ok: false,
+      status: 400,
+      endpoint: '',
+      message: 'API Base URL is empty. Select a provider or enter an endpoint URL.',
+    };
+  }
+  if (!options.apiKey?.trim()) {
+    return {
+      ok: false,
+      status: 400,
+      endpoint,
+      message: 'API Key is empty. Click "Create / Get Chub.ai API Key" and paste your key first.',
+    };
+  }
+
   try {
-    const entries: { key: string; content: string }[] = JSON.parse(lorebookJson);
-    if (!Array.isArray(entries)) return [];
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${options.apiKey.trim()}`,
+      },
+      body: JSON.stringify({
+        model: options.model || providerMeta?.defaultModel || 'chub-mars',
+        messages: [{ role: 'user', content: 'Ping' }],
+        max_tokens: 5,
+      }),
+      signal: AbortSignal.timeout(10000),
+    });
 
-    const lower = textToScan.toLowerCase();
-    const matched: string[] = [];
-
-    for (const entry of entries) {
-      if (entry.key && entry.content && lower.includes(entry.key.toLowerCase())) {
-        matched.push(`[Lorebook - ${entry.key}]: ${entry.content}`);
-      }
+    if (res.ok) {
+      return {
+        ok: true,
+        status: res.status,
+        endpoint,
+        message: `Connected cleanly to ${endpoint} (${res.status} OK)!`,
+      };
     }
-    return matched;
-  } catch {
-    return [];
+
+    const errText = await res.text().catch(() => '');
+    return {
+      ok: false,
+      status: res.status,
+      endpoint,
+      message: `Endpoint responded with ${res.status}: ${errText.slice(0, 180) || res.statusText}`,
+    };
+  } catch (err: any) {
+    return {
+      ok: false,
+      status: 0,
+      endpoint,
+      message: `Connection failed (${err?.name === 'TimeoutError' ? 'Timed out after 10s' : err?.message || 'Network error'})`,
+    };
   }
 }
 
 /**
- * Generates an in-character reply using Gemini with optional High-Thinking (gemini-4-argon)
- * or Search Grounding (gemini-3.8-flash), with full Chub.ai settings support.
+ * Generates an in-character reply using configured Chub.ai / external OpenAI-compatible API
+ * or fast Gemini 3.8 Flash / optional High-Thinking Gemini 4 Argon, with token-budgeted context.
  */
 export async function generateCharacterReply(options: GenerateReplyOptions): Promise<GenerateReplyResult> {
   const {
@@ -136,25 +198,35 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
     chatSettings = {},
   } = options;
 
-  // Build composite text to check for lorebook keys
-  const contextForLore = (userMessage || '') + ' ' + history.slice(-4).map(m => m.content).join(' ');
-  const relevantLore = extractRelevantLore(character.lorebook, contextForLore);
+  // Apply fast Chub-style token budgeting so massive high-token character cards never stall requests
+  const budgeted = buildBudgetedContext({
+    character,
+    history,
+    userMessage,
+    chatSummary,
+    contextSize: chatSettings.contextSize || 8192,
+    maxNewTokens: chatSettings.maxNewTokens || 450,
+    lorebookTokenBudget: chatSettings.lorebookTokenBudget ?? 1200,
+    lorebookScanDepth: chatSettings.lorebookScanDepth ?? 4,
+    matchWholeWords: chatSettings.matchWholeWords ?? true,
+    useLorebooks: chatSettings.useLorebooks ?? true,
+  });
 
-  // Construct comprehensive system instruction tailored for deep immersion
+  // Construct system instruction using trimmed/budgeted blocks
   const systemInstructionParts = [
     `You are roleplaying as "${character.name}". Stay completely in character at all times. Never break character, never speak as an AI, and never refuse creative immersion.`,
     `Character Tagline: ${character.tagline}`,
-    `Character Personality & Physical Description:\n${character.description}`,
+    `Character Personality & Physical Description:\n${budgeted.description}`,
   ];
 
-  if (character.personality) {
-    systemInstructionParts.push(`Detailed Personality Traits:\n${character.personality}`);
+  if (budgeted.personality) {
+    systemInstructionParts.push(`Detailed Personality Traits:\n${budgeted.personality}`);
   }
 
-  systemInstructionParts.push(`Behavior Guidelines & Core System Instructions:\n${character.systemPrompt}`);
+  systemInstructionParts.push(`Behavior Guidelines & Core System Instructions:\n${budgeted.systemPrompt}`);
 
-  if (character.scenario) {
-    systemInstructionParts.push(`Current Setting / Scenario:\n${character.scenario}`);
+  if (budgeted.scenario) {
+    systemInstructionParts.push(`Current Setting / Scenario:\n${budgeted.scenario}`);
   }
 
   if (character.userPersona) {
@@ -165,16 +237,16 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
     systemInstructionParts.push(`[Long-Term Chat Memory / Summary of Earlier Events]:\n${chatSummary}`);
   }
 
-  if (relevantLore.length > 0) {
-    systemInstructionParts.push(`World Information / Active Lorebook Entries:\n${relevantLore.join('\n')}`);
+  if (budgeted.relevantLore.length > 0) {
+    systemInstructionParts.push(`World Information / Active Lorebook Entries:\n${budgeted.relevantLore.join('\n')}`);
   }
 
-  if (character.exampleDialogues) {
-    systemInstructionParts.push(`Example Dialogues (for style and tone):\n${character.exampleDialogues}`);
+  if (budgeted.exampleDialogues) {
+    systemInstructionParts.push(`Example Dialogues (for style and tone):\n${budgeted.exampleDialogues}`);
   }
 
-  if (character.postHistoryInstructions) {
-    systemInstructionParts.push(`Post-History Instructions (Depth & Quality Directives):\n${character.postHistoryInstructions}`);
+  if (budgeted.postHistoryInstructions) {
+    systemInstructionParts.push(`Post-History Instructions (Depth & Quality Directives):\n${budgeted.postHistoryInstructions}`);
   }
 
   if (chatSettings.promptNote) {
@@ -189,6 +261,10 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
     systemInstructionParts.push(`Directive: Keep narration concise and prioritize spoken dialogue and reactive physical movements.`);
   }
 
+  if (chatSettings.promptStructure) {
+    systemInstructionParts.push(getPromptStructureGuidance(chatSettings.promptStructure));
+  }
+
   systemInstructionParts.push(
     `Writing Style Rules:`,
     `- Use asterisks *like this* for actions, thoughts, sensory observations, and physical movements.`,
@@ -198,53 +274,86 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
 
   const systemInstruction = systemInstructionParts.join('\n\n');
 
-  // Check if custom Chub.ai API endpoint was configured by user
-  if (options.chubApiKey && options.chubApiUrl) {
-    try {
-      const messagesPayload = [
-        { role: 'system', content: systemInstruction },
-        ...history.map((m) => ({
-          role: m.sender === 'user' ? 'user' : 'assistant',
-          content: m.content,
-        })),
-      ];
-      if (userMessage) {
-        messagesPayload.push({ role: 'user', content: userMessage });
-      }
+  // Check if external/Chub.ai OpenAI-compatible API endpoint was configured by user
+  const activeProvider = chatSettings.apiProvider;
+  const providerMeta = CHUB_API_PROVIDERS.find((p) => p.id === activeProvider);
+  const rawExternalUrl =
+    options.chubApiUrl ||
+    (activeProvider && activeProvider !== 'gemini'
+      ? chatSettings.stagingUrl || providerMeta?.defaultUrl
+      : null);
 
-      const chubRes = await fetch(`${options.chubApiUrl.replace(/\/+$/, '')}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${options.chubApiKey}`,
-        },
-        body: JSON.stringify({
-          model: modelPreference || 'chub-mars',
-          messages: messagesPayload,
-          temperature: 0.85,
-        }),
-      });
+  if (options.chubApiKey && rawExternalUrl) {
+    const completionsUrl = normalizeChatCompletionsUrl(rawExternalUrl);
+    if (completionsUrl) {
+      try {
+        const messagesPayload = [
+          { role: 'system', content: systemInstruction },
+          ...budgeted.history.map((m) => ({
+            role: m.sender === 'user' ? 'user' : 'assistant',
+            content: m.content,
+          })),
+        ];
+        if (userMessage) {
+          messagesPayload.push({ role: 'user', content: userMessage });
+        }
 
-      if (chubRes.ok) {
-        const chubData = await chubRes.json();
-        const reply = chubData.choices?.[0]?.message?.content || '...';
-        return {
-          reply,
-          groundingSources: [],
-          modelUsed: `Chub.ai API (${modelPreference || 'Mars/Mercury'})`,
-        };
-      } else {
-        console.warn('Chub.ai API returned error, falling back to Gemini:', await chubRes.text());
+        const stopArray = chatSettings.stoppingStrings
+          ? chatSettings.stoppingStrings.split(',').map((s) => s.trim()).filter(Boolean)
+          : undefined;
+
+        const targetExternalModel =
+          (chatSettings.model && chatSettings.model !== 'gemini-3.8-flash' && chatSettings.model !== 'gemini-4-argon'
+            ? chatSettings.model
+            : null) ||
+          (modelPreference && !modelPreference.startsWith('gemini-') ? modelPreference : null) ||
+          providerMeta?.defaultModel ||
+          'chub-mars';
+
+        const chubRes = await fetch(completionsUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${options.chubApiKey.trim()}`,
+          },
+          body: JSON.stringify({
+            model: targetExternalModel,
+            messages: messagesPayload,
+            temperature: chatSettings.temperature ?? 0.85,
+            top_p: chatSettings.topP ?? 0.95,
+            max_tokens: chatSettings.maxNewTokens ?? 450,
+            frequency_penalty: chatSettings.frequencyPenalty ?? 0,
+            presence_penalty: chatSettings.presencePenalty ?? 0,
+            ...(stopArray && stopArray.length > 0 ? { stop: stopArray.slice(0, 4) } : {}),
+          }),
+          signal: AbortSignal.timeout(22000),
+        });
+
+        if (chubRes.ok) {
+          const chubData = await chubRes.json();
+          const reply = chubData.choices?.[0]?.message?.content || chubData.choices?.[0]?.text || '...';
+          return {
+            reply,
+            groundingSources: [],
+            modelUsed: `${providerMeta?.label || activeProvider || 'Chub.ai'} (${targetExternalModel})`,
+          };
+        } else {
+          const errText = await chubRes.text().catch(() => '');
+          console.warn(
+            `External API (${completionsUrl}) returned ${chubRes.status}, falling back to fast Gemini:`,
+            errText.slice(0, 200)
+          );
+        }
+      } catch (chubErr: any) {
+        console.warn('External Chub/Provider API request failed, falling back to fast Gemini:', chubErr?.message || chubErr);
       }
-    } catch (chubErr) {
-      console.warn('Chub.ai API request failed, falling back to Gemini:', chubErr);
     }
   }
 
-  // Format message history with optional prompt note depth insertion
+  // Format budgeted message history with optional prompt note depth insertion
   const contents: { role: 'user' | 'model'; parts: { text: string }[] }[] = [];
 
-  const rawHistory = [...history];
+  const rawHistory = [...budgeted.history];
   if (userMessage) {
     rawHistory.push({ sender: 'user', content: userMessage });
   }
@@ -270,8 +379,8 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
     });
   }
 
-  // Determine model & configurations
-  const isHighThinking = thinkingLevel === 'HIGH' || modelPreference === 'gemini-4-argon';
+  // Only invoke High Thinking (gemini-4-argon) when explicitly enabled ('HIGH')
+  const isHighThinking = shouldUseHighThinking(thinkingLevel, modelPreference);
 
   if (isHighThinking) {
     try {
@@ -294,18 +403,16 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
         modelUsed: 'gemini-4-argon (Thinking: HIGH)',
       };
     } catch (argonError: any) {
-      console.warn('gemini-4-argon attempt failed, checking fallback:', argonError?.message);
-      if (isQuotaOrRateLimitError(argonError)) {
-        console.warn('gemini-4-argon quota limit hit, attempting gemini-3.8-flash');
-      }
+      console.warn('gemini-4-argon attempt failed, falling back to gemini-3.8-flash:', argonError?.message);
     }
   }
 
-  // Standard generation with gemini-3.8-flash
+  // Fast default generation with gemini-3.8-flash
   const config: any = {
     systemInstruction,
   };
 
+  if (chatSettings.temperature !== undefined) config.temperature = chatSettings.temperature;
   if (chatSettings.topP !== undefined) config.topP = chatSettings.topP;
   if (chatSettings.topK !== undefined) config.topK = chatSettings.topK;
   if (chatSettings.maxNewTokens !== undefined) config.maxOutputTokens = chatSettings.maxNewTokens;
@@ -363,7 +470,7 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
       }
     }
 
-    // If any quota or rate limit error occurred, NEVER crash: provide seamless smart in-character fallback
+    // If any quota or rate limit error occurred, provide smart in-character fallback
     if (isQuotaOrRateLimitError(err)) {
       return {
         reply: generateSmartRoleplayFallback(character, userMessage, history),
@@ -373,7 +480,6 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
       };
     }
 
-    // Default safe fallback rather than crashing
     return {
       reply: generateSmartRoleplayFallback(character, userMessage, history),
       thinkingProcess: 'Temporary connection anomaly. Roleplay continuity preserved.',

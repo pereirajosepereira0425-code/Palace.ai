@@ -59,7 +59,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
   return (
     <header className="sticky top-0 z-40 w-full border-b border-purple-900/40 bg-zinc-950/85 backdrop-blur-xl transition-all">
-      <div className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-2 px-3 sm:px-6 lg:px-8">
+      <div className="mx-auto flex h-16 max-w-[1440px] items-center justify-between gap-2 px-3 sm:px-5">
         {/* Brand / Logo */}
         <div className="flex items-center gap-2 shrink-0">
           <button
@@ -88,14 +88,14 @@ export const Navbar: React.FC<NavbarProps> = ({
           </button>
 
           {/* Quick Search on Desktop */}
-          <div className="relative ml-1 hidden md:block w-28 lg:w-32 xl:w-36">
+          <div className="relative ml-1 hidden md:block w-24 xl:w-28">
             <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400" />
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Search bots..."
-              className="w-full rounded-xl border border-zinc-800 bg-zinc-900/80 py-1.5 pl-8 pr-3 text-xs text-zinc-100 placeholder-zinc-500 focus:border-purple-500 focus:bg-zinc-900 focus:outline-none focus:ring-1 focus:ring-purple-500 transition-all"
+              className="w-full rounded-xl border border-zinc-800 bg-zinc-900/80 py-1.5 pl-7 pr-2 text-xs text-zinc-100 placeholder-zinc-500 focus:border-purple-500 focus:bg-zinc-900 focus:outline-none focus:ring-1 focus:ring-purple-500 transition-all"
             />
             {searchQuery && (
               <button
@@ -112,7 +112,7 @@ export const Navbar: React.FC<NavbarProps> = ({
         <nav className="flex flex-1 min-w-0 items-center justify-start gap-0.5 overflow-x-auto no-scrollbar py-1">
           <button
             onClick={() => setActiveTab('explore')}
-            className={`flex items-center gap-1 rounded-xl px-1.5 xl:px-2 py-1.5 text-[11px] xl:text-xs font-semibold transition-all shrink-0 cursor-pointer ${
+            className={`flex items-center gap-1 rounded-xl px-1.5 py-1.5 text-[11px] xl:text-xs font-semibold transition-all shrink-0 cursor-pointer ${
               activeTab === 'explore'
                 ? 'bg-purple-600/20 text-purple-200 border border-purple-500/40 shadow-sm'
                 : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
@@ -125,7 +125,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           <button
             onClick={() => setActiveTab('chats')}
-            className={`flex items-center gap-1 rounded-xl px-1.5 xl:px-2 py-1.5 text-[11px] xl:text-xs font-semibold transition-all shrink-0 cursor-pointer ${
+            className={`flex items-center gap-1 rounded-xl px-1.5 py-1.5 text-[11px] xl:text-xs font-semibold transition-all shrink-0 cursor-pointer ${
               activeTab === 'chats'
                 ? 'bg-purple-600/20 text-purple-200 border border-purple-500/40 shadow-sm'
                 : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
@@ -138,7 +138,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           <button
             onClick={() => setActiveTab('studio')}
-            className={`flex items-center gap-1 rounded-xl px-1.5 xl:px-2 py-1.5 text-[11px] xl:text-xs font-semibold transition-all shrink-0 cursor-pointer ${
+            className={`flex items-center gap-1 rounded-xl px-1.5 py-1.5 text-[11px] xl:text-xs font-semibold transition-all shrink-0 cursor-pointer ${
               activeTab === 'studio'
                 ? 'bg-purple-600/20 text-purple-200 border border-purple-500/40 shadow-sm'
                 : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
@@ -151,7 +151,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           <button
             onClick={() => setActiveTab('imagine')}
-            className={`flex items-center gap-1 rounded-xl px-1.5 xl:px-2 py-1.5 text-[11px] xl:text-xs font-semibold transition-all shrink-0 cursor-pointer ${
+            className={`flex items-center gap-1 rounded-xl px-1.5 py-1.5 text-[11px] xl:text-xs font-semibold transition-all shrink-0 cursor-pointer ${
               activeTab === 'imagine'
                 ? 'bg-purple-600/20 text-purple-200 border border-purple-500/40 shadow-sm'
                 : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
@@ -164,7 +164,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           <button
             onClick={() => setActiveTab('lorebooks')}
-            className={`flex items-center gap-1 rounded-xl px-1.5 xl:px-2 py-1.5 text-[11px] xl:text-xs font-semibold transition-all shrink-0 cursor-pointer ${
+            className={`flex items-center gap-1 rounded-xl px-1.5 py-1.5 text-[11px] xl:text-xs font-semibold transition-all shrink-0 cursor-pointer ${
               activeTab === 'lorebooks'
                 ? 'bg-purple-600/20 text-purple-200 border border-purple-500/40 shadow-sm'
                 : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
@@ -177,7 +177,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           <button
             onClick={() => setActiveTab('stages')}
-            className={`flex items-center gap-1 rounded-xl px-1.5 xl:px-2 py-1.5 text-[11px] xl:text-xs font-semibold transition-all shrink-0 cursor-pointer ${
+            className={`flex items-center gap-1 rounded-xl px-1.5 py-1.5 text-[11px] xl:text-xs font-semibold transition-all shrink-0 cursor-pointer ${
               activeTab === 'stages'
                 ? 'bg-purple-600/20 text-purple-200 border border-purple-500/40 shadow-sm'
                 : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
@@ -190,7 +190,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           <button
             onClick={() => setActiveTab('personas')}
-            className={`flex items-center gap-1 rounded-xl px-1.5 xl:px-2 py-1.5 text-[11px] xl:text-xs font-semibold transition-all shrink-0 cursor-pointer ${
+            className={`flex items-center gap-1 rounded-xl px-1.5 py-1.5 text-[11px] xl:text-xs font-semibold transition-all shrink-0 cursor-pointer ${
               activeTab === 'personas'
                 ? 'bg-purple-600/20 text-purple-200 border border-purple-500/40 shadow-sm'
                 : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
@@ -203,7 +203,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           <button
             onClick={() => setActiveTab('favorites')}
-            className={`flex items-center gap-1 rounded-xl px-1.5 xl:px-2 py-1.5 text-[11px] xl:text-xs font-semibold transition-all shrink-0 cursor-pointer ${
+            className={`flex items-center gap-1 rounded-xl px-1.5 py-1.5 text-[11px] xl:text-xs font-semibold transition-all shrink-0 cursor-pointer ${
               activeTab === 'favorites'
                 ? 'bg-purple-600/20 text-purple-200 border border-purple-500/40 shadow-sm'
                 : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
@@ -244,11 +244,11 @@ export const Navbar: React.FC<NavbarProps> = ({
           {/* Active Persona Chip */}
           <button
             onClick={onOpenPersonaModal}
-            className="flex items-center gap-1.5 rounded-xl border border-zinc-800 bg-zinc-900/80 px-2.5 py-1.5 text-xs text-zinc-300 hover:border-purple-500/50 hover:bg-zinc-800 transition-all"
+            className="flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900/80 px-2 py-1.5 text-xs text-zinc-300 hover:border-purple-500/50 hover:bg-zinc-800 transition-all"
             title="Edit your Active Persona"
           >
             <User className="h-3.5 w-3.5 text-amber-400" />
-            <span className="max-w-[70px] sm:max-w-[90px] truncate font-medium">
+            <span className="max-w-[60px] xl:max-w-[76px] truncate font-medium">
               {persona.name}
             </span>
           </button>
@@ -258,7 +258,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             <div className="flex items-center gap-1.5">
               <button
                 onClick={() => setActiveTab('profile')}
-                className={`flex items-center gap-2 rounded-xl border p-1 transition-all ${
+                className={`flex items-center gap-2 rounded-xl border p-1 transition-all cursor-pointer ${
                   activeTab === 'profile'
                     ? 'border-purple-400 bg-purple-600/30 ring-1 ring-purple-400'
                     : 'border-purple-500/30 bg-purple-950/30 hover:border-purple-400'
@@ -282,20 +282,46 @@ export const Navbar: React.FC<NavbarProps> = ({
               </button>
               <button
                 onClick={signOutUser}
-                className="hidden sm:flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-400 hover:text-red-400 hover:border-red-900 transition-all"
+                className="hidden sm:flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-400 hover:text-red-400 hover:border-red-900 transition-all cursor-pointer"
                 title="Sign Out"
+                aria-label="Sign Out"
               >
                 <LogOut className="h-3.5 w-3.5" />
               </button>
             </div>
           ) : (
-            <button
-              onClick={signInWithGoogle}
-              className="flex items-center gap-1 rounded-xl bg-gradient-to-r from-purple-600 to-fuchsia-600 px-2.5 py-1.5 text-xs font-semibold text-white shadow-md shadow-purple-900/30 hover:from-purple-500 hover:to-fuchsia-500 transition-all"
-            >
-              <LogIn className="h-3.5 w-3.5" />
-              <span className="hidden sm:inline">Sign In</span>
-            </button>
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => setActiveTab('profile')}
+                className={`flex items-center gap-1.5 rounded-xl border px-2 py-1 transition-all cursor-pointer ${
+                  activeTab === 'profile'
+                    ? 'border-purple-400 bg-purple-600/30 ring-1 ring-purple-400 text-purple-100'
+                    : 'border-purple-500/30 bg-purple-950/30 text-purple-200 hover:border-purple-400'
+                }`}
+                title="View & Customize Your Profile"
+                aria-label="Profile"
+              >
+                {profile?.avatarUrl ? (
+                  <img
+                    src={profile.avatarUrl}
+                    alt={profile.displayName || 'Profile'}
+                    className="h-6 w-6 rounded-lg object-cover"
+                  />
+                ) : (
+                  <User className="h-3.5 w-3.5 text-purple-300" />
+                )}
+                <span className="hidden md:inline text-xs font-bold max-w-[68px] truncate">
+                  {profile?.displayName || 'Profile'}
+                </span>
+              </button>
+              <button
+                onClick={signInWithGoogle}
+                className="flex items-center gap-1 rounded-xl bg-gradient-to-r from-purple-600 to-fuchsia-600 px-2.5 py-1.5 text-xs font-semibold text-white shadow-md shadow-purple-900/30 hover:from-purple-500 hover:to-fuchsia-500 transition-all cursor-pointer"
+              >
+                <LogIn className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">Sign In</span>
+              </button>
+            </div>
           )}
         </div>
       </div>

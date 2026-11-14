@@ -12,20 +12,27 @@ import {
   Copy,
   Tag,
   Shield,
+  Edit3,
+  Trash2,
 } from 'lucide-react';
 import { SharedPersona } from '../types/index.ts';
+import { isOwnedByRequester } from '../utils/ownership.ts';
 import { useAuth } from '../context/AuthContext.tsx';
 
 interface PersonaGalleryProps {
   onSelectPersona: (persona: { name: string; bio: string }) => void;
   onOpenCreateModal: () => void;
+  onEditPersona?: (persona: SharedPersona) => void;
+  refreshKey?: number;
 }
 
 export const PersonaGallery: React.FC<PersonaGalleryProps> = ({
   onSelectPersona,
   onOpenCreateModal,
+  onEditPersona,
+  refreshKey = 0,
 }) => {
-  const { persona: activePersona, setPersona, savePersonaToCloud, guestId, user } = useAuth();
+  const { persona: activePersona, setPersona, savePersonaToCloud, guestId, user, getIdToken } = useAuth();
 
   const [personas, setPersonas] = useState<SharedPersona[]>([]);
   const [loading, setLoading] = useState(true);
@@ -33,6 +40,7 @@ export const PersonaGallery: React.FC<PersonaGalleryProps> = ({
   const [sortOrder, setSortOrder] = useState<'popular' | 'latest' | 'used'>('popular');
   const [copiedId, setCopiedId] = useState<number | null>(null);
   const [appliedId, setAppliedId] = useState<number | null>(null);
+  const [confirmDeleteUuid, setConfirmDeleteUuid] = useState<string | null>(null);
 
   const fetchPersonas = async () => {
     try {
@@ -55,7 +63,7 @@ export const PersonaGallery: React.FC<PersonaGalleryProps> = ({
 
   useEffect(() => {
     fetchPersonas();
-  }, [searchQuery, sortOrder]);
+  }, [searchQuery, sortOrder, refreshKey]);
 
   const handleLike = async (personaId: number) => {
     try {
@@ -67,6 +75,30 @@ export const PersonaGallery: React.FC<PersonaGalleryProps> = ({
       }
     } catch (err) {
       console.error('Failed to like persona:', err);
+    }
+  };
+
+  const handleDelete = async (p: SharedPersona) => {
+    if (confirmDeleteUuid !== p.uuid) {
+      setConfirmDeleteUuid(p.uuid);
+      setTimeout(() => setConfirmDeleteUuid((curr) => (curr === p.uuid ? null : curr)), 3500);
+      return;
+    }
+    setConfirmDeleteUuid(null);
+    try {
+      const token = await getIdToken();
+      const headers: Record<string, string> = {};
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
+      const res = await fetch(`/api/personas/${p.uuid}?guestId=${encodeURIComponent(guestId)}`, {
+        method: 'DELETE',
+        headers,
+      });
+      if (res.ok) {
+        setPersonas((prev) => prev.filter((item) => item.uuid !== p.uuid));
+      }
+    } catch (err) {
+      console.error('Failed to delete persona:', err);
     }
   };
 
@@ -259,8 +291,8 @@ export const PersonaGallery: React.FC<PersonaGalleryProps> = ({
                   )}
                 </div>
 
-                {/* Footer Controls: Likes, Uses, Adopt */}
-                <div className="flex items-center justify-between pt-3 border-t border-zinc-800/80 text-xs">
+                {/* Footer Controls: Likes, Uses, Edit/Delete, Adopt */}
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-3 border-t border-zinc-800/80 text-xs">
                   <div className="flex items-center gap-2">
                     <button
                       onClick={() => handleLike(p.id)}
@@ -275,33 +307,64 @@ export const PersonaGallery: React.FC<PersonaGalleryProps> = ({
                     </span>
                   </div>
 
-                  <button
-                    onClick={() => handleUsePersona(p)}
-                    className={`flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-bold transition-all shadow-sm ${
-                      isCurrent
-                        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                        : appliedId === p.id
-                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                        : 'bg-gradient-to-r from-purple-600 to-fuchsia-600 text-white hover:from-purple-500 hover:to-fuchsia-500'
-                    }`}
-                  >
-                    {isCurrent ? (
+                  <div className="flex items-center gap-1.5">
+                    {isOwnedByRequester(p.userId, { userUid: user?.uid, guestId }) && (
                       <>
-                        <Check className="h-3.5 w-3.5 text-amber-400" />
-                        <span>Active</span>
-                      </>
-                    ) : appliedId === p.id ? (
-                      <>
-                        <Check className="h-3.5 w-3.5 text-emerald-400" />
-                        <span>Applied!</span>
-                      </>
-                    ) : (
-                      <>
-                        <User className="h-3.5 w-3.5" />
-                        <span>Use Persona</span>
+                        {onEditPersona && (
+                          <button
+                            type="button"
+                            onClick={() => onEditPersona(p)}
+                            className="flex items-center gap-1 rounded-xl border border-amber-500/40 bg-amber-500/15 px-2.5 py-1.5 text-xs font-bold text-amber-200 hover:bg-amber-500/30 transition-all"
+                            title="Edit your persona"
+                          >
+                            <Edit3 className="h-3.5 w-3.5" />
+                            <span>Edit</span>
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => handleDelete(p)}
+                          className={`flex items-center gap-1 rounded-xl border px-2.5 py-1.5 text-xs font-bold transition-all ${
+                            confirmDeleteUuid === p.uuid
+                              ? 'border-rose-500 bg-rose-600 text-white'
+                              : 'border-rose-500/40 bg-rose-950/30 text-rose-300 hover:bg-rose-900/40'
+                          }`}
+                          title={confirmDeleteUuid === p.uuid ? 'Click again to delete persona' : 'Delete your persona'}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                          <span>{confirmDeleteUuid === p.uuid ? 'Confirm' : 'Delete'}</span>
+                        </button>
                       </>
                     )}
-                  </button>
+
+                    <button
+                      onClick={() => handleUsePersona(p)}
+                      className={`flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-bold transition-all shadow-sm ${
+                        isCurrent
+                          ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                          : appliedId === p.id
+                          ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                          : 'bg-gradient-to-r from-purple-600 to-fuchsia-600 text-white hover:from-purple-500 hover:to-fuchsia-500'
+                      }`}
+                    >
+                      {isCurrent ? (
+                        <>
+                          <Check className="h-3.5 w-3.5 text-amber-400" />
+                          <span>Active</span>
+                        </>
+                      ) : appliedId === p.id ? (
+                        <>
+                          <Check className="h-3.5 w-3.5 text-emerald-400" />
+                          <span>Applied!</span>
+                        </>
+                      ) : (
+                        <>
+                          <User className="h-3.5 w-3.5" />
+                          <span>Use Persona</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
                 </div>
               </div>
             );

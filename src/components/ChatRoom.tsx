@@ -85,6 +85,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   const [isAllChatsOpen, setIsAllChatsOpen] = useState(false);
   const [allSessions, setAllSessions] = useState<ChatSession[]>([]);
   const [preview3dPose, setPreview3dPose] = useState<string | null>(null);
+  const [confirmReset, setConfirmReset] = useState(false);
 
   // Chub Chat Settings
   const [chubSettings, setChubSettings] = useState<ChubChatSettings>(() => {
@@ -94,6 +95,41 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     } catch {}
     return DEFAULT_CHUB_SETTINGS;
   });
+
+  const getEffectiveApiPayload = () => {
+    let presetsData: any = {};
+    try {
+      const raw = localStorage.getItem('palace_generation_presets');
+      if (raw) presetsData = JSON.parse(raw);
+    } catch {}
+
+    let latestSettings = chubSettings;
+    try {
+      const rawSettings = localStorage.getItem('palace_chub_chat_settings');
+      if (rawSettings) latestSettings = { ...DEFAULT_CHUB_SETTINGS, ...JSON.parse(rawSettings) };
+    } catch {}
+
+    const chubApiKey = (presetsData.chubApiKey || '').trim() || undefined;
+    const chubApiUrl =
+      (latestSettings.apiProvider && latestSettings.apiProvider !== 'gemini'
+        ? latestSettings.stagingUrl || presetsData.chubApiUrl
+        : presetsData.apiProvider && presetsData.apiProvider !== 'gemini'
+          ? presetsData.chubApiUrl
+          : undefined) || undefined;
+
+    const mergedSettings: ChubChatSettings = {
+      ...latestSettings,
+      contextSize: latestSettings.contextSize || presetsData.maxContextTokens || 8192,
+      ...(presetsData.apiProvider && !latestSettings.apiProvider
+        ? { apiProvider: presetsData.apiProvider }
+        : {}),
+      ...(presetsData.customModel && !latestSettings.model
+        ? { model: presetsData.customModel }
+        : {}),
+    };
+
+    return { chubApiKey, chubApiUrl, mergedSettings };
+  };
 
   // Scenario AI Images Toggle
   const [showAiImages, setShowAiImages] = useState<boolean>(() => {
@@ -475,6 +511,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (token) headers['Authorization'] = `Bearer ${token}`;
 
+      const { chubApiKey, chubApiUrl, mergedSettings } = getEffectiveApiPayload();
+
       const res = await fetch('/api/chat/message', {
         method: 'POST',
         headers,
@@ -483,7 +521,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           content: userText,
           userPersona: `${persona.name}: ${persona.bio}`,
           parentId: lastMsg ? lastMsg.id : null,
-          chatSettings: chubSettings,
+          chatSettings: mergedSettings,
+          chubApiKey,
+          chubApiUrl,
           showAiImages,
         }),
       });
@@ -552,6 +592,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       if (currentIdx >= swipesList.length - 1) {
         try {
           setSwipingId(messageId);
+          const { chubApiKey, chubApiUrl, mergedSettings } = getEffectiveApiPayload();
           const res = await fetch('/api/chat/swipe', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -559,6 +600,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
               sessionUuid: session.uuid,
               messageId,
               generateNew: true,
+              chatSettings: mergedSettings,
+              chubApiKey,
+              chubApiUrl,
             }),
           });
           if (res.ok) {
@@ -597,9 +641,32 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
   // TTS Audio Narration
   const handlePlayTTS = async (message: ChatMessage) => {
+    if (chubSettings.ttsApi === 'none') return;
+
     if (activeAudioMessageId === message.id) {
       currentAudioRef.current?.pause();
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+      }
       setActiveAudioMessageId(null);
+      return;
+    }
+
+    const speakWithBrowserFallback = () => {
+      if (typeof window === 'undefined' || !('speechSynthesis' in window)) return false;
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(
+        message.content.replace(/\*([^*]+)\*/g, '$1').slice(0, 450)
+      );
+      utterance.onend = () => setActiveAudioMessageId(null);
+      utterance.onerror = () => setActiveAudioMessageId(null);
+      setActiveAudioMessageId(message.id);
+      window.speechSynthesis.speak(utterance);
+      return true;
+    };
+
+    if (chubSettings.ttsApi === 'browser_speech') {
+      speakWithBrowserFallback();
       return;
     }
 
@@ -614,8 +681,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           text: message.content.slice(0, 450),
-          voiceName: selectedVoice,
+          voiceName: selectedVoice || chubSettings.defaultVoice,
           voiceStyle: character.voiceStyle || 'Expressive roleplay dialogue',
+          ttsApi: chubSettings.ttsApi,
         }),
       });
 
@@ -630,8 +698,10 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       audio.onerror = () => setActiveAudioMessageId(null);
       await audio.play();
     } catch (err) {
-      console.error('Error playing TTS:', err);
-      setActiveAudioMessageId(null);
+      console.warn('Cloud TTS unavailable, using browser speech synthesis:', err);
+      if (!speakWithBrowserFallback()) {
+        setActiveAudioMessageId(null);
+      }
     } finally {
       setAudioLoadingId(null);
     }
@@ -639,7 +709,12 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
   const handleResetChat = async () => {
     if (!session) return;
-    if (!window.confirm('Reset this chat back to the beginning?')) return;
+    if (!confirmReset) {
+      setConfirmReset(true);
+      setTimeout(() => setConfirmReset(false), 3500);
+      return;
+    }
+    setConfirmReset(false);
 
     try {
       const res = await fetch(`/api/chat/reset/${session.uuid}`, { method: 'POST' });
@@ -680,24 +755,56 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     `*Quietly observing you, waiting for your next move*`,
   ];
 
-  const backdropImage = activeStage?.imageUrl || character.backgroundImage;
+  const useAvatarBg =
+    Boolean(chubSettings.useAvatarAsBackground) || activeStage?.id === 'use-character-avatar';
+  const backdropImage = useAvatarBg
+    ? character.avatar
+    : activeStage?.imageUrl || character.backgroundImage;
+  const isUncroppedAvatarBg = useAvatarBg && (chubSettings.avatarBackgroundFit || 'contain') === 'contain';
+
+  const handleToggleAvatarBackground = () => {
+    const nextValue = !chubSettings.useAvatarAsBackground;
+    const updated: ChubChatSettings = {
+      ...chubSettings,
+      useAvatarAsBackground: nextValue,
+      avatarBackgroundFit: chubSettings.avatarBackgroundFit || 'contain',
+    };
+    setChubSettings(updated);
+    localStorage.setItem('palace_chub_chat_settings', JSON.stringify(updated));
+  };
 
   return (
     <div className="relative flex h-[calc(100vh-4rem)] w-full flex-col bg-zinc-950 text-zinc-100 overflow-hidden">
       {/* Background Stage Canvas */}
       {backdropImage && (
-        <div className="absolute inset-0 pointer-events-none z-0 overflow-hidden">
+        <div
+          data-testid="chat-background-layer"
+          data-avatar-bg={useAvatarBg ? 'true' : 'false'}
+          className="absolute inset-0 pointer-events-none z-0 overflow-hidden"
+        >
+          {isUncroppedAvatarBg && (
+            <img
+              src={backdropImage}
+              alt=""
+              aria-hidden="true"
+              referrerPolicy="no-referrer"
+              className="absolute inset-0 h-full w-full object-cover blur-2xl scale-110 opacity-45"
+            />
+          )}
           <img
             src={backdropImage}
-            alt="Atmospheric Stage Backdrop"
-            className="h-full w-full object-cover transition-all duration-700"
+            alt="Chat Background"
+            referrerPolicy="no-referrer"
+            className={`relative h-full w-full transition-all duration-700 ${
+              isUncroppedAvatarBg ? 'object-contain' : 'object-cover'
+            }`}
             style={{
-              filter: `blur(${activeStage?.blurLevel ?? 2}px)`,
+              filter: useAvatarBg ? 'blur(0px)' : `blur(${activeStage?.blurLevel ?? 2}px)`,
             }}
           />
           <div
             className="absolute inset-0 bg-zinc-950"
-            style={{ opacity: activeStage?.overlayOpacity ?? 0.72 }}
+            style={{ opacity: useAvatarBg ? 0.58 : activeStage?.overlayOpacity ?? 0.72 }}
           />
         </div>
       )}
@@ -800,6 +907,22 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             <Settings2 className="h-4 w-4 text-purple-400" />
           </button>
 
+          {/* Avatar as Chat Background Quick Toggle */}
+          <button
+            type="button"
+            onClick={handleToggleAvatarBackground}
+            className={`flex items-center gap-1 rounded-xl px-2.5 py-1.5 text-xs font-semibold border transition-all cursor-pointer ${
+              useAvatarBg
+                ? 'border-fuchsia-400 bg-fuchsia-600/30 text-fuchsia-100 shadow-sm'
+                : 'border-zinc-800 bg-zinc-900/90 text-zinc-300 hover:border-purple-500/50 hover:bg-zinc-800'
+            }`}
+            title="Use Character's Avatar as Chat Background"
+            aria-pressed={useAvatarBg}
+          >
+            <ImageIcon className="h-3.5 w-3.5 text-fuchsia-400" />
+            <span className="hidden lg:inline">Avatar BG</span>
+          </button>
+
           {/* Stages Quick Switcher */}
           {onOpenStages && (
             <button
@@ -862,10 +985,16 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           {/* Reset Chat */}
           <button
             onClick={handleResetChat}
-            className="flex h-9 w-9 items-center justify-center rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-amber-400 hover:border-amber-500/40 transition-all"
-            title="Reset Chat to Initial State"
+            className={`flex items-center justify-center rounded-xl border transition-all cursor-pointer ${
+              confirmReset
+                ? 'h-9 px-2.5 gap-1 bg-rose-600 border-rose-500 text-white text-xs font-bold'
+                : 'h-9 w-9 bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-amber-400 hover:border-amber-500/40'
+            }`}
+            title={confirmReset ? 'Click again to confirm chat reset' : 'Reset Chat to Initial State'}
+            aria-label={confirmReset ? 'Confirm Reset Chat' : 'Reset Chat'}
           >
             <RotateCcw className="h-4 w-4" />
+            {confirmReset && <span>Confirm</span>}
           </button>
         </div>
       </div>

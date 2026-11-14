@@ -1,4 +1,4 @@
-import { ContentRating } from '../types/index.ts';
+import type { ContentRating } from '../types/index.ts';
 
 export interface TavernCardV2 {
   spec: 'chara_card_v2';
@@ -50,6 +50,9 @@ export interface NormalizedCharacter {
   rating: ContentRating;
   creatorName: string;
   voiceName: string;
+  voiceStyle?: string;
+  gender?: string;
+  pronouns?: string;
   lorebook: Array<{ key: string; content: string }>;
 }
 
@@ -109,10 +112,16 @@ export const CHUB_ALL_TAGS = [
   'NSFL',
 ];
 
+const DEFAULT_PLACEHOLDER_AVATAR =
+  'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=600&q=80';
+
 /**
- * Parses and normalizes Chub.ai / Janitor.ai / TavernAI character JSON specs
+ * Parses and normalizes Chub.ai / Janitor.ai / TavernAI V1, V2, and V3 character JSON specs
  */
-export function parseTavernCard(jsonInput: string | object): NormalizedCharacter {
+export function parseTavernCard(
+  jsonInput: string | object,
+  fallbackAvatarUrl?: string
+): NormalizedCharacter {
   let parsed: any;
   if (typeof jsonInput === 'string') {
     try {
@@ -128,8 +137,15 @@ export function parseTavernCard(jsonInput: string | object): NormalizedCharacter
     throw new Error('Card data is empty or invalid');
   }
 
-  // Handle Character Card V2 format (Chub / Tavern V2)
-  if (parsed.spec === 'chara_card_v2' && parsed.data) {
+  const resolvedFallbackAvatar = fallbackAvatarUrl?.trim() || DEFAULT_PLACEHOLDER_AVATAR;
+
+  // Handle Character Card V2 / V3 format (Chub / Tavern V2 / CCv3)
+  const isWrappedCard =
+    (parsed.spec === 'chara_card_v2' || parsed.spec === 'chara_card_v3' || Boolean(parsed.data)) &&
+    parsed.data &&
+    typeof parsed.data === 'object';
+
+  if (isWrappedCard) {
     const d = parsed.data;
     const lorebookEntries: Array<{ key: string; content: string }> = [];
 
@@ -144,14 +160,41 @@ export function parseTavernCard(jsonInput: string | object): NormalizedCharacter
       }
     }
 
-    const ratingVal = d.extensions?.rating || (d.tags?.includes('NSFL') ? 'NSFL' : d.tags?.includes('NSFW') ? 'NSFW' : 'SFW');
+    const rawTags: string[] = Array.isArray(d.tags)
+      ? d.tags.filter((t: unknown) => typeof t === 'string' && t.trim().length > 0)
+      : [];
+    const upperTags = rawTags.map((t) => t.toUpperCase());
+    const ratingVal =
+      d.extensions?.rating ||
+      (upperTags.includes('NSFL') && upperTags.includes('NSFW')
+        ? 'NSFW + NSFL'
+        : upperTags.includes('NSFL')
+        ? 'NSFL'
+        : upperTags.includes('NSFW')
+        ? 'NSFW'
+        : 'SFW');
     const validRating: ContentRating =
       ratingVal === 'NSFL' || ratingVal === 'NSFW + NSFL' || ratingVal === 'NSFW' ? ratingVal : 'SFW';
 
+    const extAvatar =
+      typeof d.extensions?.avatar_url === 'string' && /^https?:\/\//i.test(d.extensions.avatar_url)
+        ? d.extensions.avatar_url
+        : typeof d.extensions?.chub?.avatar_url === 'string' && /^https?:\/\//i.test(d.extensions.chub.avatar_url)
+        ? d.extensions.chub.avatar_url
+        : typeof parsed.avatar_url === 'string' && /^https?:\/\//i.test(parsed.avatar_url)
+        ? parsed.avatar_url
+        : '';
+
+    const chubTagline = typeof d.extensions?.chub?.tagline === 'string' ? d.extensions.chub.tagline.trim() : '';
+
     return {
       name: d.name?.trim() || 'Unnamed Character',
-      tagline: d.creator_notes?.trim() || d.description?.slice(0, 120)?.trim() || 'A mysterious persona',
-      avatar: d.extensions?.avatar_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=600&q=80',
+      tagline:
+        chubTagline ||
+        d.creator_notes?.trim()?.slice(0, 140) ||
+        d.description?.slice(0, 120)?.trim() ||
+        'Imported character card',
+      avatar: extAvatar || resolvedFallbackAvatar,
       backgroundImage: d.extensions?.background_image || '',
       description: d.description || 'No description provided.',
       personality: d.personality || '',
@@ -163,39 +206,69 @@ export function parseTavernCard(jsonInput: string | object): NormalizedCharacter
       characterVersion: d.character_version || '1.0',
       scenario: d.scenario?.trim() || '',
       exampleDialogues: d.mes_example?.trim() || '',
-      tags: Array.isArray(d.tags) && d.tags.length > 0 ? d.tags : ['Original', 'RPG'],
+      tags: rawTags.length > 0 ? rawTags : ['Original', 'RPG'],
       rating: validRating,
       creatorName: d.creator?.trim() || 'Community',
       voiceName: d.extensions?.voiceName || 'Puck',
+      voiceStyle: d.extensions?.voiceStyle || undefined,
+      gender: d.extensions?.gender || undefined,
+      pronouns: d.extensions?.pronouns || undefined,
       lorebook: lorebookEntries,
     };
   }
 
-  // Handle Legacy V1 / Janitor format
+  // Handle Legacy V1 / Chub API node / Janitor format
   const name = parsed.name?.trim() || 'Unnamed Character';
+  const rawTags: string[] = Array.isArray(parsed.tags)
+    ? parsed.tags.filter((t: unknown) => typeof t === 'string' && t.trim().length > 0)
+    : Array.isArray(parsed.topics)
+    ? parsed.topics.filter((t: unknown) => typeof t === 'string' && t.trim().length > 0)
+    : [];
   const legacyRating: ContentRating =
-    parsed.rating === 'NSFL' || parsed.rating === 'NSFW + NSFL' || parsed.rating === 'NSFW' ? parsed.rating : 'SFW';
+    parsed.rating === 'NSFL' || parsed.rating === 'NSFW + NSFL' || parsed.rating === 'NSFW'
+      ? parsed.rating
+      : parsed.nsfw_image || rawTags.some((t) => t.toUpperCase() === 'NSFW')
+      ? 'NSFW'
+      : 'SFW';
+
+  const legacyAvatar =
+    (typeof parsed.max_res_url === 'string' && /^https?:\/\//i.test(parsed.max_res_url) && parsed.max_res_url) ||
+    (typeof parsed.avatar_url === 'string' && /^https?:\/\//i.test(parsed.avatar_url) && parsed.avatar_url) ||
+    (typeof parsed.avatar === 'string' && /^https?:\/\//i.test(parsed.avatar) && parsed.avatar) ||
+    resolvedFallbackAvatar;
 
   return {
     name,
-    tagline: parsed.tagline?.trim() || parsed.description?.slice(0, 120)?.trim() || 'A unique character',
-    avatar: parsed.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=600&q=80',
+    tagline:
+      parsed.tagline?.trim() ||
+      parsed.creator_notes?.trim()?.slice(0, 140) ||
+      parsed.description?.slice(0, 120)?.trim() ||
+      'A unique character',
+    avatar: legacyAvatar,
     backgroundImage: parsed.backgroundImage || parsed.background || '',
-    description: parsed.description || 'No description provided.',
-    personality: parsed.personality || '',
-    greeting: parsed.first_mes || parsed.greeting || '*Looks at you attentively.* Hello.',
+    description: parsed.description || parsed.definition?.description || 'No description provided.',
+    personality: parsed.personality || parsed.definition?.personality || '',
+    greeting:
+      parsed.first_mes ||
+      parsed.greeting ||
+      parsed.definition?.first_mes ||
+      '*Looks at you attentively.* Hello.',
     alternateGreetings: Array.isArray(parsed.alternate_greetings || parsed.alternateGreetings)
       ? parsed.alternate_greetings || parsed.alternateGreetings
       : [],
-    systemPrompt: parsed.system_prompt || parsed.prompt || `You are ${name}. Maintain character immersion.`,
+    systemPrompt:
+      parsed.system_prompt ||
+      parsed.prompt ||
+      parsed.definition?.system_prompt ||
+      `You are ${name}. Maintain character immersion.`,
     postHistoryInstructions: parsed.post_history_instructions || parsed.postHistoryInstructions || '',
     creatorNotes: parsed.creator_notes || parsed.creatorNotes || '',
     characterVersion: parsed.character_version || '1.0',
-    scenario: parsed.scenario || '',
-    exampleDialogues: parsed.mes_example || parsed.exampleDialogues || '',
-    tags: Array.isArray(parsed.tags) ? parsed.tags : ['Roleplay', 'Fantasy'],
+    scenario: parsed.scenario || parsed.definition?.scenario || '',
+    exampleDialogues: parsed.mes_example || parsed.exampleDialogues || parsed.definition?.mes_example || '',
+    tags: rawTags.length > 0 ? rawTags : ['Roleplay', 'Fantasy'],
     rating: legacyRating,
-    creatorName: parsed.creator || 'Community',
+    creatorName: parsed.creator || parsed.fullPath?.split('/')?.[0] || 'Community',
     voiceName: parsed.voiceName || 'Puck',
     lorebook: Array.isArray(parsed.lorebook) ? parsed.lorebook : [],
   };
@@ -328,7 +401,7 @@ export function formatRoleplaySegments(content: string): RoleplaySegment[] {
 }
 
 /**
- * Parses and identifies character identifiers from Chub.ai, Janitor.ai, or SpicyChat.ai URLs
+ * Parses and identifies character identifiers from Chub.ai, Janitor.ai, SpicyChat.ai, or Fandom/Miraheze URLs
  */
 export function parseCharacterUrl(url: string): {
   source: 'chub' | 'janitor' | 'spicychat' | 'fandom' | 'unknown';
@@ -339,13 +412,22 @@ export function parseCharacterUrl(url: string): {
   // Fandom & Miraheze Wikis (e.g. dandysworldcreepypasta.fandom.com/wiki/Nextor,w%C6%B4x or peppafanon.miraheze.org)
   const wikiMatch = clean.match(/(?:fandom\.com|miraheze\.org)\/wiki\/([^?#\s]+)/i);
   if (wikiMatch) {
-    return { source: 'fandom', idOrPath: decodeURIComponent(wikiMatch[1]) };
+    try {
+      return { source: 'fandom', idOrPath: decodeURIComponent(wikiMatch[1]) };
+    } catch {
+      return { source: 'fandom', idOrPath: wikiMatch[1] };
+    }
   }
 
-  // Chub.ai / Characterhub: https://chub.ai/characters/username/bot-name or https://characterhub.org/characters/...
-  const chubMatch = clean.match(/(?:chub\.ai|characterhub\.org)\/characters\/([^\/\s]+\/[^\/\s\?#]+)/i);
+  // Chub.ai / Characterhub / Venus.chub.ai:
+  // e.g. https://chub.ai/characters/username/bot-name, https://www.chub.ai/characters/user/slug/?foo=bar, etc.
+  const chubMatch = clean.match(
+    /(?:www\.|venus\.)?(?:chub\.ai|characterhub\.org)\/characters\/([^\/\s?#]+)\/([^\/\s?#]+)/i
+  );
   if (chubMatch) {
-    return { source: 'chub', idOrPath: chubMatch[1] };
+    const creator = chubMatch[1].replace(/\/+$/, '');
+    const slug = chubMatch[2].replace(/\/+$/, '');
+    return { source: 'chub', idOrPath: `${creator}/${slug}` };
   }
 
   // JanitorAI: https://janitorai.com/characters/uuid_or_name or https://janitor.ai/characters/...
@@ -562,10 +644,22 @@ export function calculateTokenBreakdown(character: {
   };
 }
 
+function decodeBase64Utf8(b64: string): string {
+  const binary = atob(b64.trim());
+  const utf8Bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    utf8Bytes[i] = binary.charCodeAt(i);
+  }
+  return new TextDecoder('utf-8').decode(utf8Bytes);
+}
+
 /**
- * Attempts to extract a Chub/Tavern V2 JSON card embedded inside a PNG tEXt ('chara') chunk
+ * Extracts a Chub/Tavern V1/V2/V3 JSON card embedded inside a PNG tEXt or iTXt ('chara' or 'ccv3') chunk
  */
-export function extractChubPngCard(buffer: ArrayBuffer): NormalizedCharacter | null {
+export function extractChubPngCard(
+  buffer: ArrayBuffer,
+  fallbackAvatarUrl?: string
+): NormalizedCharacter | null {
   try {
     const bytes = new Uint8Array(buffer);
     // Check PNG signature: 89 50 4E 47
@@ -573,8 +667,11 @@ export function extractChubPngCard(buffer: ArrayBuffer): NormalizedCharacter | n
       return null;
     }
 
+    const candidates: { ccv3?: string; chara?: string } = {};
     let offset = 8;
-    const decoder = new TextDecoder('latin1');
+    const latin1Decoder = new TextDecoder('latin1');
+    const utf8Decoder = new TextDecoder('utf-8');
+
     while (offset + 8 <= bytes.length) {
       const length =
         ((bytes[offset] << 24) |
@@ -582,7 +679,7 @@ export function extractChubPngCard(buffer: ArrayBuffer): NormalizedCharacter | n
           (bytes[offset + 2] << 8) |
           bytes[offset + 3]) >>>
         0;
-      const type = decoder.decode(bytes.subarray(offset + 4, offset + 8));
+      const type = latin1Decoder.decode(bytes.subarray(offset + 4, offset + 8));
       const dataStart = offset + 8;
       const dataEnd = dataStart + length;
       if (dataEnd > bytes.length) break;
@@ -591,16 +688,32 @@ export function extractChubPngCard(buffer: ArrayBuffer): NormalizedCharacter | n
         const chunkBytes = bytes.subarray(dataStart, dataEnd);
         const nullIdx = chunkBytes.indexOf(0);
         if (nullIdx !== -1) {
-          const keyword = decoder.decode(chunkBytes.subarray(0, nullIdx));
-          if (keyword.toLowerCase() === 'chara') {
-            const b64 = decoder.decode(chunkBytes.subarray(nullIdx + 1));
-            const binary = atob(b64.trim());
-            const utf8Bytes = new Uint8Array(binary.length);
-            for (let i = 0; i < binary.length; i++) {
-              utf8Bytes[i] = binary.charCodeAt(i);
+          const keyword = latin1Decoder.decode(chunkBytes.subarray(0, nullIdx)).toLowerCase();
+          if (keyword === 'chara' || keyword === 'ccv3') {
+            const b64 = latin1Decoder.decode(chunkBytes.subarray(nullIdx + 1));
+            const jsonText = decodeBase64Utf8(b64);
+            if (keyword === 'ccv3') candidates.ccv3 = jsonText;
+            else candidates.chara = jsonText;
+          }
+        }
+      } else if (type === 'iTXt') {
+        const chunkBytes = bytes.subarray(dataStart, dataEnd);
+        const nullIdx = chunkBytes.indexOf(0);
+        if (nullIdx !== -1) {
+          const keyword = latin1Decoder.decode(chunkBytes.subarray(0, nullIdx)).toLowerCase();
+          if ((keyword === 'chara' || keyword === 'ccv3') && nullIdx + 3 < chunkBytes.length) {
+            const compressionFlag = chunkBytes[nullIdx + 1];
+            if (compressionFlag === 0) {
+              // Skip language tag (\0) and translated keyword (\0)
+              const langEnd = chunkBytes.indexOf(0, nullIdx + 3);
+              const transEnd = langEnd !== -1 ? chunkBytes.indexOf(0, langEnd + 1) : -1;
+              if (transEnd !== -1) {
+                const rawText = utf8Decoder.decode(chunkBytes.subarray(transEnd + 1)).trim();
+                const jsonText = rawText.startsWith('{') ? rawText : decodeBase64Utf8(rawText);
+                if (keyword === 'ccv3') candidates.ccv3 = jsonText;
+                else candidates.chara = jsonText;
+              }
             }
-            const jsonText = new TextDecoder('utf-8').decode(utf8Bytes);
-            return parseTavernCard(jsonText);
           }
         }
       }
@@ -608,9 +721,15 @@ export function extractChubPngCard(buffer: ArrayBuffer): NormalizedCharacter | n
       offset = dataEnd + 4; // skip 4-byte CRC
       if (type === 'IEND') break;
     }
+
+    const chosenJson = candidates.ccv3 || candidates.chara;
+    if (chosenJson) {
+      return parseTavernCard(chosenJson, fallbackAvatarUrl);
+    }
   } catch {
     return null;
   }
   return null;
 }
+
 

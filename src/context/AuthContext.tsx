@@ -3,6 +3,49 @@ import { User, onAuthStateChanged, signInWithPopup, signOut } from 'firebase/aut
 import { auth, googleAuthProvider } from '../lib/firebase.ts';
 import { UserProfile } from '../types/index.ts';
 
+const GUEST_PROFILE_STORAGE_KEY = 'palace_guest_profile';
+
+export const DEFAULT_GUEST_PROFILE: UserProfile = {
+  uid: 'guest',
+  email: 'guest@palace.ai',
+  username: 'guest_wanderer',
+  displayName: 'Guest Wanderer',
+  avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=600&q=80',
+  bannerUrl: 'https://images.unsplash.com/photo-1579546929518-9e396f3cc809?auto=format&fit=crop&w=1600&q=80',
+  bio: 'Explorer in the Palace multiverse crafting immersive characters and worlds.',
+  pronouns: 'They/Them',
+  gender: 'Non-Binary',
+  theme: 'purple',
+  customCss: '',
+  statusMessage: 'Venturing through new realms 🌌',
+  featuredQuote: 'Every prompt opens a doorway to another universe.',
+  badges: ['Palace Explorer', 'Guest'],
+  socialLinks: {
+    __customization: {
+      profileBackgroundUrl:
+        'https://images.unsplash.com/photo-1462331940025-496dfbfc7564?auto=format&fit=crop&w=1800&q=80',
+      backgroundBlur: 4,
+      backgroundDim: 0.65,
+      avatarFrame: 'neon_ring',
+      cardEffect: 'glass',
+      fontStyle: 'sans',
+    },
+  } as any,
+};
+
+function loadSavedGuestProfile(): UserProfile {
+  try {
+    const raw = localStorage.getItem(GUEST_PROFILE_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return { ...DEFAULT_GUEST_PROFILE, ...parsed, uid: 'guest' };
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return DEFAULT_GUEST_PROFILE;
+}
+
 interface AuthContextType {
   user: User | null;
   profile: UserProfile | null;
@@ -22,7 +65,7 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
-  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [profile, setProfile] = useState<UserProfile | null>(() => loadSavedGuestProfile());
   const [loading, setLoading] = useState(true);
   const [guestId, setGuestId] = useState<string>('guest_' + Math.random().toString(36).substring(2, 9));
   const [persona, setPersona] = useState<{ name: string; bio: string }>({
@@ -81,7 +124,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           console.error('Error syncing user with backend:', err);
         }
       } else {
-        setProfile(null);
+        setProfile(loadSavedGuestProfile());
       }
       setLoading(false);
     });
@@ -101,7 +144,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const signOutUser = async () => {
     try {
       await signOut(auth);
-      setProfile(null);
+      setProfile(loadSavedGuestProfile());
     } catch (error) {
       console.error('Sign-Out failed:', error);
     }
@@ -136,9 +179,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const refreshProfile = async () => {
     try {
       const token = await getIdToken();
-      const headers: Record<string, string> = {};
-      if (token) headers['Authorization'] = `Bearer ${token}`;
-      const res = await fetch('/api/user/profile', { headers });
+      if (!token) {
+        setProfile(loadSavedGuestProfile());
+        return;
+      }
+      const res = await fetch('/api/user/profile', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
       if (res.ok) {
         const data = await res.json();
         if (data.user) {
@@ -152,12 +199,24 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const updateProfile = async (data: Partial<UserProfile>): Promise<UserProfile> => {
     const token = await getIdToken();
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (token) headers['Authorization'] = `Bearer ${token}`;
+    if (!token) {
+      const current = loadSavedGuestProfile();
+      const merged: UserProfile = {
+        ...current,
+        ...data,
+        uid: 'guest',
+      };
+      localStorage.setItem(GUEST_PROFILE_STORAGE_KEY, JSON.stringify(merged));
+      setProfile(merged);
+      return merged;
+    }
 
     const res = await fetch('/api/user/profile', {
       method: 'PUT',
-      headers,
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
       body: JSON.stringify(data),
     });
 
