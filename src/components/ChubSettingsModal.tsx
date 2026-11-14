@@ -24,6 +24,17 @@ import {
   CHUB_ACTIVE_MODELS,
   CHUB_PROMPT_STRUCTURES,
 } from '../utils/chubOptions.ts';
+import {
+  CHUB_CREATE_TOKEN_URL,
+  CHUB_SUBSCRIPTIONS_URL,
+  getProviderApiKeyInfo,
+} from '../utils/promptBudget.ts';
+import {
+  type ApiConnectionTestResult,
+  fetchEndpointModels,
+  isChubUrlOrProvider,
+  runSmartConnectionTest,
+} from '../utils/apiErrorUtils.ts';
 
 export const DEFAULT_CHUB_SETTINGS: ChubChatSettings = {
   promptStructure: 'tavern_v2',
@@ -58,7 +69,7 @@ export const DEFAULT_CHUB_SETTINGS: ChubChatSettings = {
   defaultVoice: 'Puck',
   autoGeneration: false,
   restrictNarration: false,
-  stagingUrl: 'https://api.chub.ai/v1',
+  stagingUrl: 'https://mars.chub.ai/v1',
   characterViewStyle: 'chub',
   useAvatarAsBackground: false,
   avatarBackgroundFit: 'contain',
@@ -93,7 +104,9 @@ export const ChubSettingsModal: React.FC<ChubSettingsModalProps> = ({
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [testingConn, setTestingConn] = useState(false);
-  const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [liveModels, setLiveModels] = useState<string[]>([]);
+  const [testResult, setTestResult] = useState<ApiConnectionTestResult | null>(null);
 
   useEffect(() => {
     if (isOpen) {
@@ -102,6 +115,7 @@ export const ChubSettingsModal: React.FC<ChubSettingsModalProps> = ({
         ...settings,
       });
       setTestResult(null);
+      setLiveModels([]);
       try {
         const rawPresets = localStorage.getItem('palace_generation_presets');
         if (rawPresets) {
@@ -116,24 +130,71 @@ export const ChubSettingsModal: React.FC<ChubSettingsModalProps> = ({
 
   if (!isOpen) return null;
 
-  const handleTestConnection = async () => {
+  const handleFetchModels = async () => {
+    setFetchingModels(true);
+    setTestResult(null);
     try {
-      setTestingConn(true);
-      setTestResult(null);
-      const res = await fetch('/api/config/test-connection', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          apiProvider: current.apiProvider,
-          apiUrl: current.stagingUrl,
-          apiKey: apiKeyInput,
-          model: current.model,
-        }),
+      const res = await fetchEndpointModels({
+        apiUrl: current.stagingUrl || '',
+        apiKey: apiKeyInput,
+        apiProvider: current.apiProvider,
       });
-      const data = await res.json();
-      setTestResult({ ok: Boolean(data.ok), message: data.message || 'Checked.' });
-    } catch (err: any) {
-      setTestResult({ ok: false, message: err?.message || 'Test failed.' });
+      if (res.models.length > 0) {
+        setLiveModels(res.models);
+        const firstModel = res.models[0];
+        setCurrent((prev) => ({
+          ...prev,
+          model: res.models.includes(prev.model) ? prev.model : firstModel,
+        }));
+        setTestResult({
+          ok: true,
+          status: res.status || 200,
+          code: 'MODELS_LOADED',
+          endpoint: res.modelsUrl,
+          testedFrom: 'browser',
+          availableModels: res.models,
+          message: `Found ${res.models.length} live model(s) on ${res.modelsUrl}!`,
+        });
+      } else {
+        setTestResult(
+          res.error || {
+            ok: false,
+            status: res.status || 404,
+            code: 'NO_MODELS',
+            endpoint: res.modelsUrl,
+            testedFrom: 'browser',
+            message: `No models listed at ${res.modelsUrl}.`,
+            hint: 'Try picking one of the model-specific Chub Gateways above (Inference Soji, Mars Asha, Mars Soji, Mix /v1).',
+          }
+        );
+      }
+    } finally {
+      setFetchingModels(false);
+    }
+  };
+
+  const handleTestConnection = async () => {
+    setTestingConn(true);
+    setTestResult(null);
+    try {
+      const result = await runSmartConnectionTest({
+        apiProvider: current.apiProvider,
+        apiUrl: current.stagingUrl,
+        apiKey: apiKeyInput,
+        model: current.model,
+      });
+      if (result.availableModels?.length) {
+        setLiveModels(result.availableModels);
+      }
+      if (result.ok) {
+        const cleanBase = result.endpoint.replace(/\/chat\/completions\/?$/i, '');
+        setCurrent((prev) => ({
+          ...prev,
+          ...(cleanBase ? { stagingUrl: cleanBase } : {}),
+          ...(result.resolvedModel ? { model: result.resolvedModel } : {}),
+        }));
+      }
+      setTestResult(result);
     } finally {
       setTestingConn(false);
     }
@@ -189,7 +250,7 @@ export const ChubSettingsModal: React.FC<ChubSettingsModalProps> = ({
         JSON.stringify({
           ...existingPresets,
           apiProvider: current.apiProvider,
-          chubApiUrl: current.stagingUrl || existingPresets.chubApiUrl || 'https://api.chub.ai/v1',
+          chubApiUrl: current.stagingUrl || existingPresets.chubApiUrl || 'https://mars.chub.ai/v1',
           chubApiKey: apiKeyInput,
           customModel: current.model,
           promptStructure: current.promptStructure,
@@ -326,15 +387,29 @@ export const ChubSettingsModal: React.FC<ChubSettingsModalProps> = ({
                   </p>
                   <div className="mt-2 flex flex-wrap items-center gap-2">
                     <a
-                      href="https://chub.ai/profile"
+                      href={getProviderApiKeyInfo(current.apiProvider).url}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-purple-600/30 to-fuchsia-600/30 border border-purple-500/40 px-2.5 py-1 text-[11px] font-bold text-purple-200 hover:bg-purple-600/50 transition-all"
                     >
                       <Key className="h-3 w-3 text-amber-300" />
-                      <span>Create Chub.ai API Key</span>
+                      <span>
+                        {current.apiProvider === 'gemini'
+                          ? 'Create Chub.ai Token'
+                          : getProviderApiKeyInfo(current.apiProvider).label.replace(/^🔑\s*/, '')}
+                      </span>
                       <ExternalLink className="h-3 w-3" />
                     </a>
+                    {current.apiProvider === 'gemini' && (
+                      <a
+                        href={CHUB_CREATE_TOKEN_URL}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="sr-only"
+                      >
+                        Chub.ai Tokens
+                      </a>
+                    )}
                     <button
                       type="button"
                       onClick={() => setActiveSection('staging')}
@@ -766,21 +841,32 @@ export const ChubSettingsModal: React.FC<ChubSettingsModalProps> = ({
                 <div>
                   <h4 className="text-xs font-bold text-purple-200 flex items-center gap-1.5">
                     <Key className="h-4 w-4 text-amber-300" />
-                    <span>Chub.ai Mars / Mercury API Key</span>
+                    <span>Chub.ai Tokens, Mars &amp; External Keys</span>
                   </h4>
                   <p className="text-[11px] text-zinc-400 mt-0.5">
-                    Generate or manage your Chub.ai account secrets &amp; subscription API access on Chub.ai.
+                    {getProviderApiKeyInfo(current.apiProvider).helperText}
                   </p>
                 </div>
-                <a
-                  href="https://chub.ai/profile"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-purple-600 to-fuchsia-600 px-4 py-2 text-xs font-bold text-white shadow-md hover:from-purple-500 hover:to-fuchsia-500 transition-all shrink-0"
-                >
-                  <span>🔑 Create Chub.ai API Key</span>
-                  <ExternalLink className="h-3.5 w-3.5" />
-                </a>
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  <a
+                    href={CHUB_CREATE_TOKEN_URL}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-purple-600 to-fuchsia-600 px-3.5 py-2 text-xs font-bold text-white shadow-md hover:from-purple-500 hover:to-fuchsia-500 transition-all"
+                  >
+                    <span>🔑 Create Chub.ai Token</span>
+                    <ExternalLink className="h-3.5 w-3.5" />
+                  </a>
+                  <a
+                    href={CHUB_SUBSCRIPTIONS_URL}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-fuchsia-500/40 bg-zinc-900/80 px-3 py-2 text-xs font-bold text-fuchsia-200 hover:bg-zinc-800 transition-all"
+                  >
+                    <span>🪐 Mars Subscription</span>
+                    <ExternalLink className="h-3.5 w-3.5" />
+                  </a>
+                </div>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -792,24 +878,52 @@ export const ChubSettingsModal: React.FC<ChubSettingsModalProps> = ({
                     type="url"
                     value={current.stagingUrl || ''}
                     onChange={(e) => setCurrent({ ...current, stagingUrl: e.target.value })}
-                    placeholder="https://api.chub.ai/v1"
+                    placeholder="https://mars.chub.ai/v1"
                     className="w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3.5 py-2.5 text-xs text-zinc-100 focus:border-purple-500 focus:outline-none font-mono"
                   />
-                  <span className="text-[10px] text-zinc-500">Default Chub API base: https://api.chub.ai/v1</span>
+                  <span className="text-[10px] text-zinc-500">Recommended Chub gateway: https://mars.chub.ai/v1 (browser direct + CH-API-KEY)</span>
+                  {isChubUrlOrProvider(current.apiProvider, current.stagingUrl) && (
+                    <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                      {[
+                        { label: 'Mars /v1', url: 'https://mars.chub.ai/v1' },
+                        { label: 'Inference Soji', url: 'https://inference.chub.ai/soji/v1' },
+                        { label: 'Mars Asha', url: 'https://mars.chub.ai/chub/asha/v1' },
+                        { label: 'Mars Soji', url: 'https://mars.chub.ai/chub/soji/v1' },
+                        { label: 'Mix /v1', url: 'https://api.chub.ai/mix/v1' },
+                        { label: 'api.chub.ai', url: 'https://api.chub.ai/v1' },
+                      ].map((gw) => (
+                        <button
+                          key={gw.url}
+                          type="button"
+                          onClick={() => {
+                            setCurrent({ ...current, stagingUrl: gw.url });
+                            setTestResult(null);
+                          }}
+                          className={`rounded-md border px-2 py-0.5 text-[10px] font-mono transition-colors cursor-pointer ${
+                            current.stagingUrl === gw.url
+                              ? 'border-purple-400 bg-purple-600/30 text-purple-100'
+                              : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-purple-500/50 hover:text-zinc-200'
+                          }`}
+                        >
+                          {gw.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
 
                 <div>
                   <label className="block text-xs font-bold uppercase tracking-wider text-purple-400 mb-1">
-                    API Key (Chub / OpenRouter / OpenAI)
+                    API Key (Chub CH-API-KEY / OpenRouter / OpenAI)
                   </label>
                   <input
                     type="password"
                     value={apiKeyInput}
                     onChange={(e) => setApiKeyInput(e.target.value)}
-                    placeholder="Paste your Chub / external API key..."
+                    placeholder="Paste your Chub Mars/Mercury Token or external API key..."
                     className="w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3.5 py-2.5 text-xs text-zinc-100 focus:border-purple-500 focus:outline-none font-mono"
                   />
-                  <span className="text-[10px] text-zinc-500">Synced with Presets &amp; used when API Provider is not Gemini</span>
+                  <span className="text-[10px] text-zinc-500">Synced with Presets &amp; sends CH-API-KEY + Bearer on Chub.ai</span>
                 </div>
               </div>
 
@@ -832,19 +946,65 @@ export const ChubSettingsModal: React.FC<ChubSettingsModalProps> = ({
                 </select>
               </div>
 
-              <div className="flex items-center gap-3">
-                <button
-                  type="button"
-                  onClick={handleTestConnection}
-                  disabled={testingConn}
-                  className="rounded-xl border border-purple-500/40 bg-purple-600/20 px-4 py-2 text-xs font-bold text-purple-200 hover:bg-purple-600/40 disabled:opacity-50 cursor-pointer"
-                >
-                  {testingConn ? 'Testing Connection...' : 'Test API Connection'}
-                </button>
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={handleFetchModels}
+                    disabled={fetchingModels || testingConn}
+                    className="rounded-xl border border-fuchsia-500/40 bg-fuchsia-600/20 px-4 py-2 text-xs font-bold text-fuchsia-200 hover:bg-fuchsia-600/40 disabled:opacity-50 cursor-pointer"
+                  >
+                    {fetchingModels ? 'Fetching Live Models...' : 'Fetch Live Models'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleTestConnection}
+                    disabled={testingConn || fetchingModels}
+                    className="rounded-xl border border-purple-500/40 bg-purple-600/20 px-4 py-2 text-xs font-bold text-purple-200 hover:bg-purple-600/40 disabled:opacity-50 cursor-pointer"
+                  >
+                    {testingConn ? 'Testing Connection...' : 'Test API Connection'}
+                  </button>
+                </div>
+                {liveModels.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5 rounded-xl border border-emerald-500/30 bg-emerald-950/20 px-3 py-2">
+                    <span className="text-[11px] font-bold text-emerald-300 mr-1">Live Models:</span>
+                    {liveModels.slice(0, 12).map((m) => (
+                      <button
+                        key={m}
+                        type="button"
+                        onClick={() => setCurrent({ ...current, model: m })}
+                        className={`rounded-md border px-2 py-0.5 text-[10px] font-mono cursor-pointer transition-colors ${
+                          current.model === m
+                            ? 'border-emerald-400 bg-emerald-600/30 text-emerald-100'
+                            : 'border-zinc-700 bg-zinc-900 text-zinc-300 hover:border-emerald-500/60'
+                        }`}
+                      >
+                        {m}
+                      </button>
+                    ))}
+                  </div>
+                )}
                 {testResult && (
-                  <span className={`text-xs font-semibold ${testResult.ok ? 'text-emerald-400' : 'text-amber-300'}`}>
-                    {testResult.message}
-                  </span>
+                  <div
+                    data-testid="chub-test-result"
+                    className={`rounded-xl border px-3.5 py-2.5 text-xs space-y-1 ${
+                      testResult.ok
+                        ? 'border-emerald-500/40 bg-emerald-950/30 text-emerald-200'
+                        : 'border-amber-500/40 bg-amber-950/30 text-amber-100'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2 font-bold">
+                      <span>{testResult.message}</span>
+                      {testResult.code && (
+                        <span className="rounded bg-black/40 px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-wider shrink-0">
+                          {testResult.code}
+                        </span>
+                      )}
+                    </div>
+                    {testResult.hint && (
+                      <p className="text-[11px] opacity-85 leading-relaxed">{testResult.hint}</p>
+                    )}
+                  </div>
                 )}
               </div>
             </div>

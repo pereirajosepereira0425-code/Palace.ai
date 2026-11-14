@@ -5,6 +5,15 @@ import {
   normalizeChatCompletionsUrl,
   shouldUseHighThinking,
 } from '../utils/promptBudget.ts';
+import {
+  type ApiConnectionTestResult,
+  buildExternalAuthHeaders,
+  classifyHttpApiError,
+  classifyNetworkError,
+  getChubEndpointCandidates,
+  looksLikeHtmlResponse,
+  validateConnectionInputs,
+} from '../utils/apiErrorUtils.ts';
 
 // Initialize server-side GoogleGenAI client with telemetry User-Agent header
 const ai = new GoogleGenAI({
@@ -119,35 +128,24 @@ export async function testExternalApiConnection(options: {
   apiUrl?: string;
   apiKey?: string;
   model?: string;
-}): Promise<{ ok: boolean; status: number; endpoint: string; message: string }> {
+}): Promise<ApiConnectionTestResult> {
+  const validationErr = validateConnectionInputs(options);
+  if (validationErr) {
+    return validationErr;
+  }
+
   const providerMeta = CHUB_API_PROVIDERS.find((p) => p.id === options.apiProvider);
-  const rawUrl = (options.apiUrl || providerMeta?.defaultUrl || '').trim();
+  const rawUrl = (
+    options.apiUrl !== undefined ? options.apiUrl : providerMeta?.defaultUrl || ''
+  ).trim();
   const endpoint = normalizeChatCompletionsUrl(rawUrl);
 
-  if (!endpoint) {
-    return {
-      ok: false,
-      status: 400,
-      endpoint: '',
-      message: 'API Base URL is empty. Select a provider or enter an endpoint URL.',
-    };
-  }
-  if (!options.apiKey?.trim()) {
-    return {
-      ok: false,
-      status: 400,
-      endpoint,
-      message: 'API Key is empty. Click "Create / Get Chub.ai API Key" and paste your key first.',
-    };
-  }
-
   try {
+    const headers = buildExternalAuthHeaders(options.apiKey, endpoint, options.apiProvider);
+
     const res = await fetch(endpoint, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${options.apiKey.trim()}`,
-      },
+      headers,
       body: JSON.stringify({
         model: options.model || providerMeta?.defaultModel || 'chub-mars',
         messages: [{ role: 'user', content: 'Ping' }],
@@ -156,29 +154,47 @@ export async function testExternalApiConnection(options: {
       signal: AbortSignal.timeout(10000),
     });
 
+    const contentType = res.headers.get('content-type') || '';
+    const rawBody = await res.text().catch(() => '');
+
     if (res.ok) {
+      if (looksLikeHtmlResponse(rawBody, contentType)) {
+        return {
+          ...classifyHttpApiError({
+            status: res.status,
+            statusText: res.statusText,
+            rawBody,
+            contentType,
+            endpoint,
+            apiProvider: options.apiProvider,
+          }),
+          testedFrom: 'server',
+        };
+      }
+
       return {
         ok: true,
         status: res.status,
+        code: 'OK',
         endpoint,
+        testedFrom: 'server',
         message: `Connected cleanly to ${endpoint} (${res.status} OK)!`,
       };
     }
 
-    const errText = await res.text().catch(() => '');
     return {
-      ok: false,
-      status: res.status,
-      endpoint,
-      message: `Endpoint responded with ${res.status}: ${errText.slice(0, 180) || res.statusText}`,
+      ...classifyHttpApiError({
+        status: res.status,
+        statusText: res.statusText,
+        rawBody,
+        contentType,
+        endpoint,
+        apiProvider: options.apiProvider,
+      }),
+      testedFrom: 'server',
     };
   } catch (err: any) {
-    return {
-      ok: false,
-      status: 0,
-      endpoint,
-      message: `Connection failed (${err?.name === 'TimeoutError' ? 'Timed out after 10s' : err?.message || 'Network error'})`,
-    };
+    return classifyNetworkError(err, endpoint, 'server');
   }
 }
 
@@ -310,42 +326,64 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
           providerMeta?.defaultModel ||
           'chub-mars';
 
-        const chubRes = await fetch(completionsUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${options.chubApiKey.trim()}`,
-          },
-          body: JSON.stringify({
-            model: targetExternalModel,
-            messages: messagesPayload,
-            temperature: chatSettings.temperature ?? 0.85,
-            top_p: chatSettings.topP ?? 0.95,
-            max_tokens: chatSettings.maxNewTokens ?? 450,
-            frequency_penalty: chatSettings.frequencyPenalty ?? 0,
-            presence_penalty: chatSettings.presencePenalty ?? 0,
-            ...(stopArray && stopArray.length > 0 ? { stop: stopArray.slice(0, 4) } : {}),
-          }),
-          signal: AbortSignal.timeout(22000),
-        });
+        const candidateUrls = getChubEndpointCandidates(rawExternalUrl, targetExternalModel, activeProvider);
+        for (const candidateUrl of candidateUrls.slice(0, 3)) {
+          try {
+            const chubRes = await fetch(candidateUrl, {
+              method: 'POST',
+              headers: buildExternalAuthHeaders(options.chubApiKey, candidateUrl, activeProvider),
+              body: JSON.stringify({
+                model: targetExternalModel,
+                messages: messagesPayload,
+                temperature: chatSettings.temperature ?? 0.85,
+                top_p: chatSettings.topP ?? 0.95,
+                max_tokens: chatSettings.maxNewTokens ?? 450,
+                frequency_penalty: chatSettings.frequencyPenalty ?? 0,
+                presence_penalty: chatSettings.presencePenalty ?? 0,
+                ...(stopArray && stopArray.length > 0 ? { stop: stopArray.slice(0, 4) } : {}),
+              }),
+              signal: AbortSignal.timeout(22000),
+            });
 
-        if (chubRes.ok) {
-          const chubData = await chubRes.json();
-          const reply = chubData.choices?.[0]?.message?.content || chubData.choices?.[0]?.text || '...';
-          return {
-            reply,
-            groundingSources: [],
-            modelUsed: `${providerMeta?.label || activeProvider || 'Chub.ai'} (${targetExternalModel})`,
-          };
-        } else {
-          const errText = await chubRes.text().catch(() => '');
-          console.warn(
-            `External API (${completionsUrl}) returned ${chubRes.status}, falling back to fast Gemini:`,
-            errText.slice(0, 200)
-          );
+            const chubCt = chubRes.headers.get('content-type') || '';
+            const chubRaw = await chubRes.text().catch(() => '');
+
+            if (chubRes.ok && !looksLikeHtmlResponse(chubRaw, chubCt)) {
+              try {
+                const chubData = JSON.parse(chubRaw);
+                const reply = chubData.choices?.[0]?.message?.content || chubData.choices?.[0]?.text || '';
+                if (reply.trim()) {
+                  return {
+                    reply,
+                    groundingSources: [],
+                    modelUsed: `${providerMeta?.label || activeProvider || 'Chub.ai'} (${targetExternalModel})`,
+                  };
+                }
+              } catch {
+                console.warn(`External API (${candidateUrl}) returned invalid JSON, trying next or falling back.`);
+              }
+            } else {
+              const classified = classifyHttpApiError({
+                status: chubRes.status,
+                statusText: chubRes.statusText,
+                rawBody: chubRaw,
+                contentType: chubCt,
+                endpoint: candidateUrl,
+                apiProvider: activeProvider,
+              });
+              console.warn(`External API fallback [${classified.code}]: ${classified.message}`);
+              if (classified.code === 'UNAUTHORIZED' || classified.code === 'PAYMENT_REQUIRED') {
+                break;
+              }
+            }
+          } catch (innerErr: any) {
+            const netErr = classifyNetworkError(innerErr, candidateUrl, 'server');
+            console.warn(`External API network fallback [${netErr.code}]: ${netErr.message}`);
+          }
         }
       } catch (chubErr: any) {
-        console.warn('External Chub/Provider API request failed, falling back to fast Gemini:', chubErr?.message || chubErr);
+        const netErr = classifyNetworkError(chubErr, completionsUrl, 'server');
+        console.warn(`External API network fallback [${netErr.code}]: ${netErr.message}`);
       }
     }
   }

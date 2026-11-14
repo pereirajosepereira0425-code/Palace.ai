@@ -740,7 +740,18 @@ apiRouter.post('/chat/summary', optionalAuth, async (req: AuthRequest, res) => {
 
 apiRouter.post('/chat/message', optionalAuth, async (req: AuthRequest, res) => {
   try {
-    const { sessionUuid, content, userPersona, chubApiKey, chubApiUrl, parentId, chatSettings: reqChatSettings, showAiImages: reqShowImages } = req.body;
+    const {
+      sessionUuid,
+      content,
+      userPersona,
+      chubApiKey,
+      chubApiUrl,
+      parentId,
+      chatSettings: reqChatSettings,
+      showAiImages: reqShowImages,
+      preGeneratedReply,
+      preGeneratedModelUsed,
+    } = req.body;
     if (!sessionUuid || !content?.trim()) {
       return res.status(400).json({ error: 'sessionUuid and content are required' });
     }
@@ -774,31 +785,41 @@ apiRouter.post('/chat/message', optionalAuth, async (req: AuthRequest, res) => {
       content: m.content,
     }));
 
-    // 3. Generate Character Reply with AI (Gemini or Chub.ai API)
+    // 3. Generate Character Reply (or persist browser-direct Chub.ai / local completion)
     const effectivePersona = userPersona || session.userPersona || (req.user ? `${req.user.name || 'User'}` : null);
-    const aiResult = await generateCharacterReply({
-      character: {
-        name: character.name,
-        tagline: character.tagline,
-        description: character.description,
-        personality: character.personality,
-        systemPrompt: character.systemPrompt,
-        postHistoryInstructions: character.postHistoryInstructions,
-        scenario: character.scenario,
-        exampleDialogues: character.exampleDialogues,
-        lorebook: character.lorebook,
-        userPersona: effectivePersona,
-      },
-      history,
-      userMessage: content.trim(),
-      modelPreference: parsedSettings.model || session.modelPreference,
-      thinkingLevel: session.thinkingLevel as 'HIGH' | 'OFF',
-      searchGrounding: session.searchGrounding,
-      chubApiKey,
-      chubApiUrl,
-      chatSummary: session.summary,
-      chatSettings: parsedSettings,
-    });
+    const aiResult =
+      typeof preGeneratedReply === 'string' && preGeneratedReply.trim()
+        ? {
+            reply: preGeneratedReply.trim(),
+            thinkingProcess: undefined,
+            groundingSources: [] as Array<{ title: string; uri: string }>,
+            modelUsed: typeof preGeneratedModelUsed === 'string' && preGeneratedModelUsed.trim()
+              ? preGeneratedModelUsed.trim()
+              : 'Chub.ai / Direct Browser API',
+          }
+        : await generateCharacterReply({
+            character: {
+              name: character.name,
+              tagline: character.tagline,
+              description: character.description,
+              personality: character.personality,
+              systemPrompt: character.systemPrompt,
+              postHistoryInstructions: character.postHistoryInstructions,
+              scenario: character.scenario,
+              exampleDialogues: character.exampleDialogues,
+              lorebook: character.lorebook,
+              userPersona: effectivePersona,
+            },
+            history,
+            userMessage: content.trim(),
+            modelPreference: parsedSettings.model || session.modelPreference,
+            thinkingLevel: session.thinkingLevel as 'HIGH' | 'OFF',
+            searchGrounding: session.searchGrounding,
+            chubApiKey,
+            chubApiUrl,
+            chatSummary: session.summary,
+            chatSettings: parsedSettings,
+          });
 
     const isImageRequested = reqShowImages !== undefined ? reqShowImages : session.showAiImages;
     let sceneImageUrl: string | null = null;
@@ -867,7 +888,16 @@ apiRouter.post('/config/test-connection', optionalAuth, async (req: AuthRequest,
 // Swipe / Alternative generation (Core Chub.ai / Janitor / SpicyChat feature)
 apiRouter.post('/chat/swipe', optionalAuth, async (req: AuthRequest, res) => {
   try {
-    const { sessionUuid, messageId, generateNew, targetIndex, chubApiKey, chubApiUrl, chatSettings: reqChatSettings } = req.body;
+    const {
+      sessionUuid,
+      messageId,
+      generateNew,
+      targetIndex,
+      chubApiKey,
+      chubApiUrl,
+      chatSettings: reqChatSettings,
+      preGeneratedReply,
+    } = req.body;
     if (!sessionUuid || !messageId) {
       return res.status(400).json({ error: 'sessionUuid and messageId are required' });
     }
@@ -886,44 +916,49 @@ apiRouter.post('/chat/swipe', optionalAuth, async (req: AuthRequest, res) => {
     let newIndex = targetMsg.activeSwipeIndex;
 
     if (generateNew) {
-      let parsedSettings: any = {};
-      try {
-        parsedSettings = reqChatSettings || (sessionDetails.session.chatSettings ? JSON.parse(sessionDetails.session.chatSettings) : {});
-      } catch {
-        parsedSettings = {};
+      if (typeof preGeneratedReply === 'string' && preGeneratedReply.trim()) {
+        swipes.push(preGeneratedReply.trim());
+        newIndex = swipes.length - 1;
+      } else {
+        let parsedSettings: any = {};
+        try {
+          parsedSettings = reqChatSettings || (sessionDetails.session.chatSettings ? JSON.parse(sessionDetails.session.chatSettings) : {});
+        } catch {
+          parsedSettings = {};
+        }
+
+        const msgIndex = sessionDetails.messages.findIndex(m => m.id === messageId);
+        const previousHistory = sessionDetails.messages.slice(0, msgIndex).map(m => ({
+          sender: m.sender as 'user' | 'character' | 'system',
+          content: m.content,
+        }));
+
+        const aiResult = await generateCharacterReply({
+          character: {
+            name: sessionDetails.character.name,
+            tagline: sessionDetails.character.tagline,
+            description: sessionDetails.character.description,
+            personality: sessionDetails.character.personality,
+            systemPrompt: sessionDetails.character.systemPrompt,
+            postHistoryInstructions: sessionDetails.character.postHistoryInstructions,
+            scenario: sessionDetails.character.scenario,
+            exampleDialogues: sessionDetails.character.exampleDialogues,
+            lorebook: sessionDetails.character.lorebook,
+            userPersona: sessionDetails.session.userPersona,
+          },
+          history: previousHistory,
+          modelPreference: parsedSettings.model || sessionDetails.session.modelPreference,
+          thinkingLevel: sessionDetails.session.thinkingLevel as 'HIGH' | 'OFF',
+          searchGrounding: sessionDetails.session.searchGrounding,
+          chubApiKey,
+          chubApiUrl,
+          chatSummary: sessionDetails.session.summary,
+          chatSettings: parsedSettings,
+        });
+
+        swipes.push(aiResult.reply);
+        newIndex = swipes.length - 1;
       }
-
-      const msgIndex = sessionDetails.messages.findIndex(m => m.id === messageId);
-      const previousHistory = sessionDetails.messages.slice(0, msgIndex).map(m => ({
-        sender: m.sender as 'user' | 'character' | 'system',
-        content: m.content,
-      }));
-
-      const aiResult = await generateCharacterReply({
-        character: {
-          name: sessionDetails.character.name,
-          tagline: sessionDetails.character.tagline,
-          description: sessionDetails.character.description,
-          personality: sessionDetails.character.personality,
-          systemPrompt: sessionDetails.character.systemPrompt,
-          postHistoryInstructions: sessionDetails.character.postHistoryInstructions,
-          scenario: sessionDetails.character.scenario,
-          exampleDialogues: sessionDetails.character.exampleDialogues,
-          lorebook: sessionDetails.character.lorebook,
-          userPersona: sessionDetails.session.userPersona,
-        },
-        history: previousHistory,
-        modelPreference: parsedSettings.model || sessionDetails.session.modelPreference,
-        thinkingLevel: sessionDetails.session.thinkingLevel as 'HIGH' | 'OFF',
-        searchGrounding: sessionDetails.session.searchGrounding,
-        chubApiKey,
-        chubApiUrl,
-        chatSummary: sessionDetails.session.summary,
-        chatSettings: parsedSettings,
-      });
-
-      swipes.push(aiResult.reply);
-      newIndex = swipes.length - 1;
     } else if (typeof targetIndex === 'number' && targetIndex >= 0 && targetIndex < swipes.length) {
       newIndex = targetIndex;
     }

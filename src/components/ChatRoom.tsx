@@ -43,6 +43,13 @@ import { formatRoleplaySegments, exportTavernCard } from '../utils/characterUtil
 import { Stage } from './StagesManager.tsx';
 import { ChatTreeModal } from './ChatTreeModal.tsx';
 import { ChubSettingsModal, DEFAULT_CHUB_SETTINGS } from './ChubSettingsModal.tsx';
+import {
+  classifyHttpApiError,
+  isChubUrlOrProvider,
+  isLocalProviderOrUrl,
+  safeParseJsonResponse,
+  tryBrowserExternalCompletion,
+} from '../utils/apiErrorUtils.ts';
 import { ThreeAvatarViewer } from './ThreeAvatarViewer.tsx';
 
 interface ChatRoomProps {
@@ -513,6 +520,56 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
       const { chubApiKey, chubApiUrl, mergedSettings } = getEffectiveApiPayload();
 
+      let preGeneratedReply: string | undefined;
+      let preGeneratedModelUsed: string | undefined;
+
+      const shouldTryBrowserDirect =
+        mergedSettings.apiProvider &&
+        mergedSettings.apiProvider !== 'gemini' &&
+        (isChubUrlOrProvider(mergedSettings.apiProvider, chubApiUrl) ||
+          isLocalProviderOrUrl(mergedSettings.apiProvider, chubApiUrl));
+
+      if (shouldTryBrowserDirect) {
+        const directRes = await tryBrowserExternalCompletion({
+          character: {
+            name: character.name,
+            tagline: character.tagline,
+            description: character.description,
+            personality: character.personality,
+            systemPrompt: character.systemPrompt,
+            postHistoryInstructions: character.postHistoryInstructions,
+            scenario: character.scenario,
+            exampleDialogues: character.exampleDialogues,
+            lorebook: character.lorebook,
+            userPersona: `${persona.name}: ${persona.bio}`,
+          },
+          history: messages.map((m) => ({
+            sender: m.sender as 'user' | 'character' | 'system',
+            content: m.content,
+          })),
+          userMessage: userText,
+          chatSummary,
+          apiProvider: mergedSettings.apiProvider,
+          apiUrl: chubApiUrl,
+          apiKey: chubApiKey,
+          model: mergedSettings.model,
+          chatSettings: mergedSettings,
+        });
+
+        if (directRes.ok) {
+          preGeneratedReply = directRes.reply;
+          preGeneratedModelUsed = directRes.modelUsed;
+        } else if (
+          directRes.error.code === 'UNAUTHORIZED' ||
+          directRes.error.code === 'PAYMENT_REQUIRED' ||
+          directRes.error.code === 'BAD_REQUEST' ||
+          directRes.error.code === 'RATE_LIMITED' ||
+          directRes.error.code === 'CONNECTION_REFUSED'
+        ) {
+          throw new Error(directRes.error.message);
+        }
+      }
+
       const res = await fetch('/api/chat/message', {
         method: 'POST',
         headers,
@@ -525,15 +582,27 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           chubApiKey,
           chubApiUrl,
           showAiImages,
+          preGeneratedReply,
+          preGeneratedModelUsed,
         }),
       });
 
-      if (!res.ok) {
-        const errorData = await res.json();
-        throw new Error(errorData.error || 'Failed to send message');
+      const parsed = await safeParseJsonResponse(res);
+      if (!res.ok || !parsed.data) {
+        if (parsed.data?.error) {
+          throw new Error(parsed.data.error);
+        }
+        const classified = classifyHttpApiError({
+          status: res.status,
+          statusText: res.statusText,
+          rawBody: parsed.rawText,
+          contentType: res.headers.get('content-type'),
+          endpoint: '/api/chat/message',
+        });
+        throw new Error(classified.message);
       }
 
-      const data = await res.json();
+      const data = parsed.data;
       setMessages((prev) => [
         ...prev.filter((m) => m.id !== tempUserMsg.id),
         data.userMessage,
@@ -593,6 +662,46 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         try {
           setSwipingId(messageId);
           const { chubApiKey, chubApiUrl, mergedSettings } = getEffectiveApiPayload();
+          let preGeneratedReply: string | undefined;
+
+          const shouldTryBrowserDirect =
+            mergedSettings.apiProvider &&
+            mergedSettings.apiProvider !== 'gemini' &&
+            (isChubUrlOrProvider(mergedSettings.apiProvider, chubApiUrl) ||
+              isLocalProviderOrUrl(mergedSettings.apiProvider, chubApiUrl));
+
+          if (shouldTryBrowserDirect) {
+            const msgIndex = messages.findIndex((m) => m.id === messageId);
+            const previousHistory = (msgIndex >= 0 ? messages.slice(0, msgIndex) : messages).map((m) => ({
+              sender: m.sender as 'user' | 'character' | 'system',
+              content: m.content,
+            }));
+            const directRes = await tryBrowserExternalCompletion({
+              character: {
+                name: character.name,
+                tagline: character.tagline,
+                description: character.description,
+                personality: character.personality,
+                systemPrompt: character.systemPrompt,
+                postHistoryInstructions: character.postHistoryInstructions,
+                scenario: character.scenario,
+                exampleDialogues: character.exampleDialogues,
+                lorebook: character.lorebook,
+                userPersona: `${persona.name}: ${persona.bio}`,
+              },
+              history: previousHistory,
+              chatSummary,
+              apiProvider: mergedSettings.apiProvider,
+              apiUrl: chubApiUrl,
+              apiKey: chubApiKey,
+              model: mergedSettings.model,
+              chatSettings: mergedSettings,
+            });
+            if (directRes.ok) {
+              preGeneratedReply = directRes.reply;
+            }
+          }
+
           const res = await fetch('/api/chat/swipe', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -603,12 +712,13 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
               chatSettings: mergedSettings,
               chubApiKey,
               chubApiUrl,
+              preGeneratedReply,
             }),
           });
-          if (res.ok) {
-            const data = await res.json();
+          const parsedSwipe = await safeParseJsonResponse(res);
+          if (res.ok && parsedSwipe.data?.message) {
             setMessages((prev) =>
-              prev.map((m) => (m.id === messageId ? data.message : m))
+              prev.map((m) => (m.id === messageId ? parsedSwipe.data.message : m))
             );
           }
         } catch (err) {

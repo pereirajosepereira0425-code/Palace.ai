@@ -448,7 +448,7 @@ test('normalizeChatCompletionsUrl and shouldUseHighThinking avoid double paths a
   );
   assert.equal(
     normalizeChatCompletionsUrl('https://chub.ai'),
-    'https://api.chub.ai/v1/chat/completions'
+    'https://mars.chub.ai/v1/chat/completions'
   );
 
   assert.equal(shouldUseHighThinking('OFF', 'gemini-4-argon'), false);
@@ -493,4 +493,121 @@ test('profileCustomization safely serializes visual settings and sanitizes custo
   assert.ok(!safe.includes('@import url(x)'));
 });
 
+test('getProviderApiKeyInfo and Chub URLs point directly to token and API key pages rather than /profile', async () => {
+  const {
+    CHUB_CREATE_TOKEN_URL,
+    CHUB_SUBSCRIPTIONS_URL,
+    getProviderApiKeyInfo,
+  } = await import('./promptBudget.ts');
+
+  assert.equal(CHUB_CREATE_TOKEN_URL, 'https://chub.ai/my_stages?active=tokens');
+  assert.equal(CHUB_SUBSCRIPTIONS_URL, 'https://chub.ai/subscriptions');
+  assert.ok(!CHUB_CREATE_TOKEN_URL.includes('/profile'));
+  assert.equal(getProviderApiKeyInfo('chub_mars').url, CHUB_CREATE_TOKEN_URL);
+  assert.equal(getProviderApiKeyInfo('openrouter').url, 'https://openrouter.ai/keys');
+  assert.equal(getProviderApiKeyInfo('openai').url, 'https://platform.openai.com/api-keys');
+  assert.equal(getProviderApiKeyInfo('anthropic').url, 'https://console.anthropic.com/settings/keys');
+  assert.equal(getProviderApiKeyInfo('unknown_custom').url, CHUB_CREATE_TOKEN_URL);
+});
+
+test('apiErrorUtils scrubs Cloudflare 403 HTML and classifies all HTTP, validation, and network errors cleanly', async () => {
+  const {
+    classifyHttpApiError,
+    classifyNetworkError,
+    sanitizeErrorBody,
+    validateConnectionInputs,
+    isCloudflareOrWafHtml,
+  } = await import('./apiErrorUtils.ts');
+
+  const cfHtml = `<!DOCTYPE html><!--[if lt IE 7]> <html class="no-js ie6 oldie" lang="en-US"> <![endif]--><head><title>Attention Required! | Cloudflare</title></head><body><h1>Sorry, you have been blocked</h1></body></html>`;
+  assert.equal(isCloudflareOrWafHtml(cfHtml, 'text/html; charset=UTF-8'), true);
+
+  const cfResult = classifyHttpApiError({
+    status: 403,
+    rawBody: cfHtml,
+    contentType: 'text/html; charset=UTF-8',
+    endpoint: 'https://api.chub.ai/v1/chat/completions',
+    apiProvider: 'chub_mars',
+  });
+  assert.equal(cfResult.ok, false);
+  assert.equal(cfResult.code, 'CLOUDFLARE_BLOCK');
+  assert.equal(cfResult.isCloudflareBlock, true);
+  assert.ok(!cfResult.message.includes('<!DOCTYPE') && !cfResult.message.includes('<html'));
+  assert.ok(cfResult.hint && cfResult.hint.includes('OpenRouter'));
+
+  const html200 = classifyHttpApiError({
+    status: 200,
+    rawBody: '<!DOCTYPE html><html><body>Home Page</body></html>',
+    contentType: 'text/html',
+    endpoint: 'https://example.com/chat/completions',
+  });
+  assert.equal(html200.code, 'HTML_INSTEAD_OF_JSON');
+
+  assert.equal(classifyHttpApiError({ status: 401, rawBody: '{"error":{"message":"Invalid key"}}', endpoint: 'https://api.openai.com/v1/chat/completions' }).code, 'UNAUTHORIZED');
+  assert.equal(classifyHttpApiError({ status: 402, rawBody: 'Insufficient balance', endpoint: 'https://openrouter.ai/api/v1/chat/completions' }).code, 'PAYMENT_REQUIRED');
+  assert.equal(classifyHttpApiError({ status: 404, endpoint: 'https://api.openai.com/v1/bad' }).code, 'NOT_FOUND');
+  assert.equal(classifyHttpApiError({ status: 413, endpoint: 'https://api.openai.com/v1/chat/completions' }).code, 'PAYLOAD_TOO_LARGE');
+  assert.equal(classifyHttpApiError({ status: 429, rawBody: 'Rate limit reached', endpoint: 'https://api.openai.com/v1/chat/completions' }).code, 'RATE_LIMITED');
+  assert.equal(classifyHttpApiError({ status: 503, endpoint: 'https://api.openai.com/v1/chat/completions' }).code, 'UPSTREAM_SERVER_ERROR');
+
+  assert.equal(sanitizeErrorBody('<script>bad()</script><div>Gateway Bad</div>', 'text/html'), 'Gateway Bad');
+
+  // Validation: missing URL, bad protocol, local server allowed without API key, cloud server requires key
+  assert.equal(validateConnectionInputs({ apiProvider: 'custom_openai', apiUrl: '', apiKey: '' })?.code, 'EMPTY_URL');
+  assert.equal(validateConnectionInputs({ apiProvider: 'custom_openai', apiUrl: 'not a url', apiKey: 'abc' })?.code, 'INVALID_URL');
+  assert.equal(validateConnectionInputs({ apiProvider: 'ollama', apiUrl: 'http://localhost:11434/v1', apiKey: '' }), null);
+  assert.equal(validateConnectionInputs({ apiProvider: 'openrouter', apiUrl: 'https://openrouter.ai/api/v1', apiKey: '' })?.code, 'MISSING_API_KEY');
+
+  // Network errors
+  assert.equal(classifyNetworkError({ name: 'TimeoutError' }, 'https://api.example.com/v1').code, 'TIMEOUT');
+  assert.equal(classifyNetworkError({ code: 'ENOTFOUND', message: 'getaddrinfo ENOTFOUND' }, 'https://bad.invalid/v1').code, 'DNS_NOT_FOUND');
+  assert.equal(classifyNetworkError({ code: 'ECONNREFUSED', message: 'connect ECONNREFUSED' }, 'http://localhost:11434/v1').code, 'CONNECTION_REFUSED');
+  assert.equal(classifyNetworkError({ code: 'CERT_HAS_EXPIRED', message: 'certificate has expired' }, 'https://expired.bad/v1').code, 'TLS_ERROR');
+  assert.equal(classifyNetworkError(new TypeError('Failed to fetch'), 'https://api.chub.ai/v1', 'browser').code, 'CORS_OR_NETWORK_BLOCK');
+});
+
+test('Chub.ai auth helpers inject CH-API-KEY + Bearer headers and prioritize Mars/model gateways', async () => {
+  const {
+    isChubUrlOrProvider,
+    buildExternalAuthHeaders,
+    getChubEndpointCandidates,
+  } = await import('./apiErrorUtils.ts');
+
+  assert.equal(isChubUrlOrProvider('chub_mars', ''), true);
+  assert.equal(isChubUrlOrProvider('custom_openai', 'https://mars.chub.ai/v1'), true);
+  assert.equal(isChubUrlOrProvider('openrouter', 'https://openrouter.ai/api/v1'), false);
+
+  const chubHeaders = buildExternalAuthHeaders('chub-secret-key', 'https://mars.chub.ai/v1/chat/completions', 'chub_mars');
+  assert.equal(chubHeaders.Authorization, 'Bearer chub-secret-key');
+  assert.equal(chubHeaders['CH-API-KEY'], 'chub-secret-key');
+
+  const orHeaders = buildExternalAuthHeaders('or-secret-key', 'https://openrouter.ai/api/v1/chat/completions', 'openrouter');
+  assert.equal(orHeaders.Authorization, 'Bearer or-secret-key');
+  assert.equal(orHeaders['CH-API-KEY'], undefined);
+
+  const ashaCandidates = getChubEndpointCandidates('https://mars.chub.ai/v1', 'asha', 'chub_mars');
+  assert.equal(ashaCandidates[0], 'https://mars.chub.ai/v1/chat/completions');
+  assert.ok(ashaCandidates.includes('https://mars.chub.ai/chub/asha/v1/chat/completions'));
+  assert.ok(ashaCandidates.includes('https://api.chub.ai/mix/v1/chat/completions'));
+
+  const sojiCandidates = getChubEndpointCandidates('https://mars.chub.ai/v1', 'soji', 'chub_mars');
+  assert.ok(sojiCandidates.includes('https://mars.chub.ai/chub/soji/v1/chat/completions'));
+  assert.ok(sojiCandidates.includes('https://inference.chub.ai/soji/v1/chat/completions'));
+});
+
+test('normalizeModelsUrl and pickBestModelForEndpoint resolve Chub /v1/models IDs cleanly', async () => {
+  const { normalizeModelsUrl } = await import('./promptBudget.ts');
+  const { pickBestModelForEndpoint } = await import('./apiErrorUtils.ts');
+
+  assert.equal(normalizeModelsUrl('https://mars.chub.ai/v1'), 'https://mars.chub.ai/v1/models');
+  assert.equal(
+    normalizeModelsUrl('https://inference.chub.ai/soji/v1/chat/completions'),
+    'https://inference.chub.ai/soji/v1/models'
+  );
+
+  assert.equal(pickBestModelForEndpoint('chub-sojourn', ['asha', 'soji']), 'soji');
+  assert.equal(pickBestModelForEndpoint('chub-asha', ['soji', 'asha']), 'asha');
+  assert.equal(pickBestModelForEndpoint('chub-mars', ['mistralai/mixtral-8x22b', 'soji']), 'soji');
+  assert.equal(pickBestModelForEndpoint('unknown-model', ['default-live-model']), 'default-live-model');
+});
 

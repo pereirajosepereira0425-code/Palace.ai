@@ -20,6 +20,17 @@ import {
   CHUB_PROMPT_STRUCTURES,
   CHUB_TTS_APIS,
 } from '../utils/chubOptions.ts';
+import {
+  CHUB_CREATE_TOKEN_URL,
+  CHUB_SUBSCRIPTIONS_URL,
+  getProviderApiKeyInfo,
+} from '../utils/promptBudget.ts';
+import {
+  type ApiConnectionTestResult,
+  fetchEndpointModels,
+  isChubUrlOrProvider,
+  runSmartConnectionTest,
+} from '../utils/apiErrorUtils.ts';
 
 export interface GenerationPresets {
   apiProvider: string;
@@ -38,7 +49,7 @@ export interface GenerationPresets {
 
 export const DEFAULT_PRESETS: GenerationPresets = {
   apiProvider: 'gemini',
-  chubApiUrl: 'https://api.chub.ai/v1',
+  chubApiUrl: 'https://mars.chub.ai/v1',
   chubApiKey: '',
   customModel: 'gemini-3.8-flash',
   promptStructure: 'tavern_v2',
@@ -67,11 +78,14 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
   const [formData, setFormData] = useState<GenerationPresets>(presets);
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [testingConn, setTestingConn] = useState(false);
-  const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [liveModels, setLiveModels] = useState<string[]>([]);
+  const [testResult, setTestResult] = useState<ApiConnectionTestResult | null>(null);
 
   useEffect(() => {
     setFormData(presets);
     setTestResult(null);
+    setLiveModels([]);
   }, [presets, isOpen]);
 
   if (!isOpen) return null;
@@ -85,26 +99,74 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
       customModel: prov?.defaultModel || formData.customModel,
     });
     setTestResult(null);
+    setLiveModels([]);
+  };
+
+  const handleFetchModels = async () => {
+    setFetchingModels(true);
+    setTestResult(null);
+    try {
+      const res = await fetchEndpointModels({
+        apiUrl: formData.chubApiUrl,
+        apiKey: formData.chubApiKey,
+        apiProvider: formData.apiProvider,
+      });
+      if (res.models.length > 0) {
+        setLiveModels(res.models);
+        const firstModel = res.models[0];
+        setFormData((prev) => ({
+          ...prev,
+          customModel: res.models.includes(prev.customModel) ? prev.customModel : firstModel,
+        }));
+        setTestResult({
+          ok: true,
+          status: res.status || 200,
+          code: 'MODELS_LOADED',
+          endpoint: res.modelsUrl,
+          testedFrom: 'browser',
+          availableModels: res.models,
+          message: `Found ${res.models.length} live model(s) on ${res.modelsUrl}!`,
+        });
+      } else {
+        setTestResult(
+          res.error || {
+            ok: false,
+            status: res.status || 404,
+            code: 'NO_MODELS',
+            endpoint: res.modelsUrl,
+            testedFrom: 'browser',
+            message: `No models listed at ${res.modelsUrl}.`,
+            hint: 'Try picking one of the model-specific Chub Gateways below (Inference Soji, Mars Asha, Mars Soji, Mix /v1).',
+          }
+        );
+      }
+    } finally {
+      setFetchingModels(false);
+    }
   };
 
   const handleTestConnection = async () => {
+    setTestingConn(true);
+    setTestResult(null);
     try {
-      setTestingConn(true);
-      setTestResult(null);
-      const res = await fetch('/api/config/test-connection', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          apiProvider: formData.apiProvider,
-          apiUrl: formData.chubApiUrl,
-          apiKey: formData.chubApiKey,
-          model: formData.customModel,
-        }),
+      const result = await runSmartConnectionTest({
+        apiProvider: formData.apiProvider,
+        apiUrl: formData.chubApiUrl,
+        apiKey: formData.chubApiKey,
+        model: formData.customModel,
       });
-      const data = await res.json();
-      setTestResult({ ok: Boolean(data.ok), message: data.message || 'Checked connection.' });
-    } catch (err: any) {
-      setTestResult({ ok: false, message: err?.message || 'Connection test failed.' });
+      if (result.availableModels?.length) {
+        setLiveModels(result.availableModels);
+      }
+      if (result.ok) {
+        const cleanBase = result.endpoint.replace(/\/chat\/completions\/?$/i, '');
+        setFormData((prev) => ({
+          ...prev,
+          ...(cleanBase ? { chubApiUrl: cleanBase } : {}),
+          ...(result.resolvedModel ? { customModel: result.resolvedModel } : {}),
+        }));
+      }
+      setTestResult(result);
     } finally {
       setTestingConn(false);
     }
@@ -189,13 +251,13 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
             <div className="space-y-0.5">
               <div className="font-bold text-purple-200 flex items-center gap-1.5">
                 <Key className="h-3.5 w-3.5 text-amber-300" />
-                <span>Chub.ai API &amp; Secrets</span>
+                <span>Chub.ai Tokens, Mars &amp; Provider Keys</span>
               </div>
               <p className="text-[11px] text-zinc-400">
-                Create or copy your Chub.ai Mars/Mercury key directly from your Chub account settings.
+                Create Chub tokens at <span className="font-mono text-zinc-300">my_stages?active=tokens</span>, or get Mars/OpenRouter/OpenAI keys directly.
               </p>
             </div>
-            <div className="flex items-center gap-2 shrink-0">
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
               {formData.apiProvider === 'gemini' && (
                 <button
                   type="button"
@@ -206,13 +268,22 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
                 </button>
               )}
               <a
-                href="https://chub.ai/profile"
+                href={CHUB_CREATE_TOKEN_URL}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-purple-600 to-fuchsia-600 px-3.5 py-2 text-[11px] font-bold text-white shadow-md hover:from-purple-500 hover:to-fuchsia-500 transition-all"
               >
-                <span>🔑 Create Chub.ai API Key</span>
+                <span>🔑 Create Chub.ai Token</span>
                 <ExternalLink className="h-3.5 w-3.5" />
+              </a>
+              <a
+                href={CHUB_SUBSCRIPTIONS_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1 rounded-xl border border-fuchsia-500/35 bg-zinc-900/80 px-2.5 py-2 text-[11px] font-semibold text-fuchsia-200 hover:bg-zinc-800 transition-all"
+              >
+                <span>🪐 Mars Plan</span>
+                <ExternalLink className="h-3 w-3" />
               </a>
             </div>
           </div>
@@ -280,9 +351,28 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
                 type="text"
                 value={formData.customModel}
                 onChange={(e) => setFormData({ ...formData, customModel: e.target.value })}
-                placeholder="e.g. chub-mars, chub-mercury, gemini-3.8-flash"
+                placeholder="e.g. soji, asha, chub-mars, gemini-3.8-flash"
                 className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-1.5 text-[11px] font-mono text-zinc-200 focus:border-purple-500 focus:outline-none"
               />
+              {liveModels.length > 0 && (
+                <div className="pt-1 flex flex-wrap items-center gap-1" data-testid="live-models-list">
+                  <span className="text-[10px] text-emerald-300 font-semibold mr-1">Live Models:</span>
+                  {liveModels.slice(0, 10).map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      onClick={() => setFormData({ ...formData, customModel: m })}
+                      className={`rounded-md border px-2 py-0.5 text-[10px] font-mono cursor-pointer transition-colors ${
+                        formData.customModel === m
+                          ? 'border-emerald-400 bg-emerald-600/30 text-emerald-100'
+                          : 'border-zinc-700 bg-zinc-900 text-zinc-300 hover:border-emerald-500/60'
+                      }`}
+                    >
+                      {m}
+                    </button>
+                  ))}
+                </div>
+              )}
               <div className="pt-1">
                 <label className="block font-bold text-purple-300 mb-1">
                   Max Context Window (Speed vs Memory)
@@ -347,22 +437,30 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
                   <Key className="h-4 w-4" />
                   Provider Endpoint Credentials ({formData.apiProvider})
                 </span>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleFetchModels}
+                    disabled={fetchingModels || testingConn}
+                    className="rounded-lg border border-fuchsia-500/40 bg-fuchsia-600/20 px-2.5 py-1 text-[11px] font-bold text-fuchsia-200 hover:bg-fuchsia-600/40 disabled:opacity-50 cursor-pointer"
+                  >
+                    {fetchingModels ? 'Fetching...' : 'Fetch Models'}
+                  </button>
                   <button
                     type="button"
                     onClick={handleTestConnection}
-                    disabled={testingConn}
+                    disabled={testingConn || fetchingModels}
                     className="rounded-lg border border-purple-500/40 bg-purple-600/20 px-2.5 py-1 text-[11px] font-bold text-purple-200 hover:bg-purple-600/40 disabled:opacity-50 cursor-pointer"
                   >
                     {testingConn ? 'Testing...' : 'Test Connection'}
                   </button>
                   <a
-                    href="https://chub.ai/profile"
+                    href={getProviderApiKeyInfo(formData.apiProvider).url}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="flex items-center gap-1 rounded-lg bg-purple-600/30 border border-purple-400/40 px-2.5 py-1 text-[11px] font-bold text-purple-200 hover:bg-purple-600/50"
                   >
-                    <span>Get Chub API Key</span>
+                    <span>{getProviderApiKeyInfo(formData.apiProvider).label}</span>
                     <ExternalLink className="h-3 w-3" />
                   </a>
                 </div>
@@ -370,13 +468,24 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
 
               {testResult && (
                 <div
-                  className={`rounded-xl border px-3 py-2 text-[11px] font-semibold ${
+                  data-testid="presets-test-result"
+                  className={`rounded-xl border px-3.5 py-2.5 text-[11px] space-y-1 ${
                     testResult.ok
-                      ? 'border-emerald-500/40 bg-emerald-950/30 text-emerald-300'
-                      : 'border-amber-500/40 bg-amber-950/30 text-amber-200'
+                      ? 'border-emerald-500/40 bg-emerald-950/30 text-emerald-200'
+                      : 'border-amber-500/40 bg-amber-950/30 text-amber-100'
                   }`}
                 >
-                  {testResult.message}
+                  <div className="flex items-center justify-between gap-2 font-bold">
+                    <span>{testResult.message}</span>
+                    {testResult.code && (
+                      <span className="rounded bg-black/40 px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider shrink-0">
+                        {testResult.code}
+                      </span>
+                    )}
+                  </div>
+                  {testResult.hint && (
+                    <p className="text-[10px] opacity-85 leading-relaxed">{testResult.hint}</p>
+                  )}
                 </div>
               )}
 
@@ -385,19 +494,48 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
                   API Base URL
                 </label>
                 <input
-                  type="url"
+                  type="text"
                   value={formData.chubApiUrl}
                   onChange={(e) =>
                     setFormData({ ...formData, chubApiUrl: e.target.value })
                   }
-                  placeholder="https://api.chub.ai/v1"
+                  placeholder="https://mars.chub.ai/v1"
                   className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3.5 py-2 text-xs text-zinc-100 placeholder-zinc-600 focus:border-purple-500 focus:outline-none font-mono"
                 />
+                {isChubUrlOrProvider(formData.apiProvider, formData.chubApiUrl) && (
+                  <div className="mt-2 flex flex-wrap items-center gap-1.5" data-testid="chub-gateway-chips">
+                    <span className="text-[10px] text-zinc-400 mr-1">Chub Gateways:</span>
+                    {[
+                      { label: 'Mars /v1', url: 'https://mars.chub.ai/v1' },
+                      { label: 'Inference Soji', url: 'https://inference.chub.ai/soji/v1' },
+                      { label: 'Mars Asha', url: 'https://mars.chub.ai/chub/asha/v1' },
+                      { label: 'Mars Soji', url: 'https://mars.chub.ai/chub/soji/v1' },
+                      { label: 'Mix /v1', url: 'https://api.chub.ai/mix/v1' },
+                      { label: 'api.chub.ai', url: 'https://api.chub.ai/v1' },
+                    ].map((gw) => (
+                      <button
+                        key={gw.url}
+                        type="button"
+                        onClick={() => {
+                          setFormData({ ...formData, chubApiUrl: gw.url });
+                          setTestResult(null);
+                        }}
+                        className={`rounded-md border px-2 py-0.5 text-[10px] font-mono transition-colors cursor-pointer ${
+                          formData.chubApiUrl === gw.url
+                            ? 'border-purple-400 bg-purple-600/30 text-purple-100'
+                            : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-purple-500/50 hover:text-zinc-200'
+                        }`}
+                      >
+                        {gw.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
 
               <div>
                 <label className="block text-zinc-300 font-semibold mb-1">
-                  API Key
+                  API Key (CH-API-KEY / Bearer Token)
                 </label>
                 <input
                   type="password"
@@ -405,7 +543,7 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
                   onChange={(e) =>
                     setFormData({ ...formData, chubApiKey: e.target.value })
                   }
-                  placeholder="Paste your Chub Mars/Mercury, OpenAI, Anthropic, or OpenRouter Key..."
+                  placeholder="Paste your Chub Mars/Mercury Token (CH-API-KEY), OpenAI, Anthropic, or OpenRouter Key..."
                   className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3.5 py-2 text-xs text-zinc-100 placeholder-zinc-600 focus:border-purple-500 focus:outline-none font-mono"
                 />
               </div>

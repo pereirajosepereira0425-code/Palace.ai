@@ -257,9 +257,27 @@ export function normalizeChatCompletionsUrl(rawUrl: string): string {
   }
   // If user pasted root chub.ai or custom base without /v1
   if (/^https?:\/\/(www\.)?(api\.)?chub\.ai$/i.test(cleaned)) {
-    return 'https://api.chub.ai/v1/chat/completions';
+    return 'https://mars.chub.ai/v1/chat/completions';
   }
   return `${cleaned}/chat/completions`;
+}
+
+/**
+ * Maps an API base URL or /chat/completions endpoint to its corresponding /models discovery URL.
+ */
+export function normalizeModelsUrl(rawUrl: string): string {
+  const cleaned = rawUrl.trim().replace(/\/+$/, '');
+  if (!cleaned) return '';
+  if (cleaned.endsWith('/models')) {
+    return cleaned;
+  }
+  if (cleaned.endsWith('/chat/completions')) {
+    return `${cleaned.slice(0, -'/chat/completions'.length)}/models`;
+  }
+  if (/^https?:\/\/(www\.)?(api\.)?chub\.ai$/i.test(cleaned)) {
+    return 'https://mars.chub.ai/v1/models';
+  }
+  return `${cleaned}/models`;
 }
 
 /**
@@ -274,3 +292,80 @@ export function shouldUseHighThinking(
   if (thinkingLevel === 'OFF') return false;
   return modelPreference === 'gemini-4-argon';
 }
+
+export const CHUB_CREATE_TOKEN_URL = 'https://chub.ai/my_stages?active=tokens';
+export const CHUB_SUBSCRIPTIONS_URL = 'https://chub.ai/subscriptions';
+export const CHUB_SETTINGS_URL = 'https://chub.ai/settings';
+
+export interface ProviderApiKeyInfo {
+  label: string;
+  url: string;
+  helperText: string;
+}
+
+const PROVIDER_KEY_PORTALS: Record<string, ProviderApiKeyInfo> = {
+  chub_mars: {
+    label: '🔑 Create Chub.ai Token',
+    url: CHUB_CREATE_TOKEN_URL,
+    helperText: 'Generate Chub account/stage tokens at chub.ai/my_stages?active=tokens or manage Mars/Mercury plans at chub.ai/subscriptions.',
+  },
+  openrouter: {
+    label: '🔑 Create OpenRouter Key',
+    url: 'https://openrouter.ai/keys',
+    helperText: 'Create a free or pay-as-you-go OpenRouter API key to unlock 300+ models.',
+  },
+  openai: {
+    label: '🔑 Create OpenAI Key',
+    url: 'https://platform.openai.com/api-keys',
+    helperText: 'Generate an OpenAI secret key from your OpenAI developer platform dashboard.',
+  },
+  anthropic: {
+    label: '🔑 Create Anthropic Key',
+    url: 'https://console.anthropic.com/settings/keys',
+    helperText: 'Create a Claude API key in the Anthropic Console.',
+  },
+  deepseek: {
+    label: '🔑 Create DeepSeek Key',
+    url: 'https://platform.deepseek.com/api_keys',
+    helperText: 'Create a DeepSeek V3 / R1 API key in the DeepSeek Platform console.',
+  },
+  mistral: {
+    label: '🔑 Create Mistral Key',
+    url: 'https://console.mistral.ai/api-keys',
+    helperText: 'Generate a Mistral AI API key in La Plateforme.',
+  },
+  groq: {
+    label: '🔑 Create Groq Key',
+    url: 'https://console.groq.com/keys',
+    helperText: 'Create an ultra-fast Groq Cloud API key.',
+  },
+  xai: {
+    label: '🔑 Create xAI Grok Key',
+    url: 'https://console.x.ai/',
+    helperText: 'Manage your Grok API keys inside the xAI Cloud Console.',
+  },
+  novelai: {
+    label: '🔑 NovelAI Account Key',
+    url: 'https://novelai.net/account',
+    helperText: 'Generate a Persistent API Token in your NovelAI Account settings.',
+  },
+  gemini: {
+    label: '🔑 Google AI Studio Key',
+    url: 'https://aistudio.google.com/app/apikey',
+    helperText: 'Gemini runs natively on Palace.ai — or create Chub.ai tokens & Mars keys below.',
+  },
+};
+
+export function getProviderApiKeyInfo(providerId?: string | null): ProviderApiKeyInfo {
+  if (!providerId) {
+    return PROVIDER_KEY_PORTALS.chub_mars;
+  }
+  return (
+    PROVIDER_KEY_PORTALS[providerId] || {
+      label: '🔑 Create Chub.ai Token',
+      url: CHUB_CREATE_TOKEN_URL,
+      helperText: 'Generate Chub tokens at chub.ai/my_stages?active=tokens or manage Chub settings.',
+    }
+  );
+}
+

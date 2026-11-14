@@ -110,7 +110,7 @@ export const CHUB_API_PROVIDERS: ChubOptionItem[] = [
     label: 'Chub AI (Mars / Mercury / Sojourn)',
     badge: 'Chub.ai Native',
     description: 'Chub.ai subscription inference engine (Mars 70B, Mercury, Asha, Sojourn).',
-    defaultUrl: 'https://api.chub.ai/v1',
+    defaultUrl: 'https://mars.chub.ai/v1',
     defaultModel: 'chub-mars',
   },
   {
