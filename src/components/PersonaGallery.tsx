@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   User,
   Heart,
@@ -18,6 +18,7 @@ import {
 import { SharedPersona } from '../types/index.ts';
 import { isOwnedByRequester } from '../utils/ownership.ts';
 import { useAuth } from '../context/AuthContext.tsx';
+import { ViewportSlot } from './ViewportSlot.tsx';
 
 interface PersonaGalleryProps {
   onSelectPersona: (persona: { name: string; bio: string }) => void;
@@ -25,6 +26,8 @@ interface PersonaGalleryProps {
   onEditPersona?: (persona: SharedPersona) => void;
   refreshKey?: number;
 }
+
+const PERSONA_PAGE_SIZE = 24;
 
 export const PersonaGallery: React.FC<PersonaGalleryProps> = ({
   onSelectPersona,
@@ -36,34 +39,92 @@ export const PersonaGallery: React.FC<PersonaGalleryProps> = ({
 
   const [personas, setPersonas] = useState<SharedPersona[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [sortOrder, setSortOrder] = useState<'popular' | 'latest' | 'used'>('popular');
   const [copiedId, setCopiedId] = useState<number | null>(null);
   const [appliedId, setAppliedId] = useState<number | null>(null);
   const [confirmDeleteUuid, setConfirmDeleteUuid] = useState<string | null>(null);
 
-  const fetchPersonas = async () => {
-    try {
-      setLoading(true);
-      const params = new URLSearchParams();
-      if (searchQuery) params.append('search', searchQuery);
-      params.append('sort', sortOrder);
-
-      const res = await fetch(`/api/personas?${params.toString()}`);
-      if (res.ok) {
-        const data = await res.json();
-        setPersonas(data.personas || []);
-      }
-    } catch (err) {
-      console.error('Failed to load personas:', err);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const nextOffsetRef = useRef(0);
+  const fetchingMoreRef = useRef(false);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    fetchPersonas();
-  }, [searchQuery, sortOrder, refreshKey]);
+    const t = setTimeout(() => setDebouncedSearch(searchQuery.trim()), 180);
+    return () => clearTimeout(t);
+  }, [searchQuery]);
+
+  const fetchPersonas = useCallback(
+    async (offset: number = 0, append: boolean = false) => {
+      if (append && fetchingMoreRef.current) return;
+      try {
+        if (append) {
+          fetchingMoreRef.current = true;
+          setLoadingMore(true);
+        } else {
+          setLoading(true);
+        }
+        const params = new URLSearchParams();
+        if (debouncedSearch) params.append('search', debouncedSearch);
+        params.append('sort', sortOrder);
+        params.append('limit', String(PERSONA_PAGE_SIZE));
+        params.append('offset', String(offset));
+
+        const res = await fetch(`/api/personas?${params.toString()}`);
+        if (res.ok) {
+          const data = await res.json();
+          const incoming: SharedPersona[] = data.personas || [];
+          setPersonas((prev) => {
+            if (!append) return incoming;
+            const seen = new Set(prev.map((p) => p.id));
+            const merged = [...prev];
+            for (const p of incoming) {
+              if (!seen.has(p.id)) {
+                seen.add(p.id);
+                merged.push(p);
+              }
+            }
+            return merged;
+          });
+          setHasMore(Boolean(data.hasMore));
+          nextOffsetRef.current =
+            typeof data.nextOffset === 'number' ? data.nextOffset : offset + incoming.length;
+        }
+      } catch (err) {
+        console.error('Failed to load personas:', err);
+      } finally {
+        fetchingMoreRef.current = false;
+        setLoadingMore(false);
+        setLoading(false);
+      }
+    },
+    [debouncedSearch, sortOrder]
+  );
+
+  useEffect(() => {
+    nextOffsetRef.current = 0;
+    fetchPersonas(0, false);
+  }, [fetchPersonas, refreshKey]);
+
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    if (!sentinel || !hasMore || loading) return;
+    if (typeof IntersectionObserver === 'undefined') return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting && hasMore && !fetchingMoreRef.current) {
+          fetchPersonas(nextOffsetRef.current, true);
+        }
+      },
+      { rootMargin: '450px 0px', threshold: 0 }
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [hasMore, loading, fetchPersonas]);
 
   const handleLike = async (personaId: number) => {
     try {
@@ -230,34 +291,43 @@ export const PersonaGallery: React.FC<PersonaGalleryProps> = ({
           </button>
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-          {personas.map((p) => {
-            let tagsList: string[] = [];
-            try {
-              tagsList = JSON.parse(p.tags || '[]');
-            } catch {
-              tagsList = [];
-            }
+        <>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+            {personas.map((p, idx) => {
+              let tagsList: string[] = [];
+              try {
+                tagsList = JSON.parse(p.tags || '[]');
+              } catch {
+                tagsList = [];
+              }
 
-            const isCurrent = activePersona.name === p.name;
+              const isCurrent = activePersona.name === p.name;
 
-            return (
-              <div
-                key={p.id}
-                className={`relative flex flex-col justify-between rounded-2xl border p-5 transition-all backdrop-blur-md ${
-                  isCurrent
-                    ? 'border-amber-500/50 bg-amber-950/15 shadow-lg shadow-amber-950/30'
-                    : 'border-zinc-800/80 bg-zinc-900/60 hover:border-purple-500/40 hover:bg-zinc-900/90'
-                }`}
-              >
-                <div>
-                  {/* Avatar + Top details */}
-                  <div className="flex items-start gap-3.5 mb-3">
-                    <img
-                      src={p.avatar}
-                      alt={p.name}
-                      className="h-13 w-13 rounded-xl object-cover border border-purple-500/40 shadow-sm"
-                    />
+              return (
+                <ViewportSlot
+                  key={p.id}
+                  estimatedHeight={240}
+                  rootMargin="500px 0px"
+                  initialVisible={idx < 6}
+                  testId="persona-slot"
+                >
+                  <div
+                    className={`relative flex h-full flex-col justify-between rounded-2xl border p-5 transition-all backdrop-blur-md ${
+                      isCurrent
+                        ? 'border-amber-500/50 bg-amber-950/15 shadow-lg shadow-amber-950/30'
+                        : 'border-zinc-800/80 bg-zinc-900/60 hover:border-purple-500/40 hover:bg-zinc-900/90'
+                    }`}
+                  >
+                    <div>
+                      {/* Avatar + Top details */}
+                      <div className="flex items-start gap-3.5 mb-3">
+                        <img
+                          src={p.avatar}
+                          alt={p.name}
+                          loading="lazy"
+                          decoding="async"
+                          className="h-13 w-13 rounded-xl object-cover border border-purple-500/40 shadow-sm"
+                        />
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center justify-between gap-1">
                         <h3 className="font-bold text-sm text-zinc-100 truncate">{p.name}</h3>
@@ -365,11 +435,26 @@ export const PersonaGallery: React.FC<PersonaGalleryProps> = ({
                       )}
                     </button>
                   </div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
+                    </div>
+                  </div>
+                </ViewportSlot>
+              );
+            })}
+          </div>
+
+          {hasMore && (
+            <div ref={sentinelRef} className="flex justify-center pt-5">
+              <button
+                type="button"
+                onClick={() => fetchPersonas(nextOffsetRef.current, true)}
+                disabled={loadingMore}
+                className="rounded-xl border border-purple-500/40 bg-zinc-900/90 px-5 py-2 text-xs font-bold text-purple-200 hover:bg-purple-900/40 transition-all"
+              >
+                {loadingMore ? 'Loading more personas...' : 'Load More Personas'}
+              </button>
+            </div>
+          )}
+        </>
       )}
     </div>
   );

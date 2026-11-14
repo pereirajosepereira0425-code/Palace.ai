@@ -80,17 +80,18 @@ export async function ensureSeedTags() {
 /**
  * Fetch tags from the Cloud SQL tag database, ordered by usageCount desc & name asc
  */
-export async function getTags(options?: { search?: string; limit?: number }) {
+export async function getTags(options?: { search?: string; limit?: number; offset?: number }) {
   try {
     await ensureSeedTags();
     const search = options?.search?.trim();
     const limit = options?.limit ?? 200;
+    const offset = options?.offset ?? 0;
 
     let query = db.select().from(tags).$dynamic();
     if (search) {
       query = query.where(ilike(tags.name, `%${search}%`));
     }
-    return await query.orderBy(desc(tags.usageCount), tags.name).limit(limit);
+    return await query.orderBy(desc(tags.usageCount), tags.name).limit(limit).offset(offset);
   } catch (error) {
     console.error('getTags failed:', error);
     return [];

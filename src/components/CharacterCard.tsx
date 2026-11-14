@@ -25,7 +25,7 @@ interface CharacterCardProps {
   onDeleteCharacter?: (char: Character) => void;
 }
 
-export const CharacterCard: React.FC<CharacterCardProps> = ({
+const CharacterCardInner: React.FC<CharacterCardProps> = ({
   character,
   isLiked = false,
   canEdit = false,
@@ -39,13 +39,25 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
   const [liked, setLiked] = useState(isLiked);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
-  // Parse tags
-  let tagList: string[] = [];
-  try {
-    tagList = Array.isArray(character.tags) ? character.tags : JSON.parse(character.tags || '[]');
-  } catch {
-    tagList = [character.tags];
-  }
+  React.useEffect(() => {
+    setLiked(isLiked);
+  }, [isLiked]);
+
+  React.useEffect(() => {
+    setLikeCount(character.likeCount);
+  }, [character.likeCount]);
+
+  // Parse tags once per tags value
+  const tagList = React.useMemo<string[]>(() => {
+    try {
+      const parsed = Array.isArray(character.tags)
+        ? character.tags
+        : JSON.parse(character.tags || '[]');
+      return Array.isArray(parsed) ? parsed : [String(parsed)];
+    } catch {
+      return character.tags ? [character.tags] : [];
+    }
+  }, [character.tags]);
 
   const handleLike = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -80,6 +92,8 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
           alt=""
           aria-hidden="true"
           referrerPolicy="no-referrer"
+          loading="lazy"
+          decoding="async"
           className="absolute inset-0 h-full w-full object-cover blur-xl scale-110 opacity-35 pointer-events-none"
         />
         <img
@@ -88,6 +102,7 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
           referrerPolicy="no-referrer"
           className="relative z-10 h-full w-full object-contain transition-transform duration-500 group-hover:scale-105"
           loading="lazy"
+          decoding="async"
           onError={(e) => {
             // fallback if avatar link breaks
             (e.target as HTMLImageElement).src =
@@ -286,3 +301,5 @@ export const CharacterCard: React.FC<CharacterCardProps> = ({
     </div>
   );
 };
+
+export const CharacterCard = React.memo(CharacterCardInner);

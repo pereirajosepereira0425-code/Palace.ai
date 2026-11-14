@@ -4,7 +4,6 @@ import {
   Sparkles,
   Check,
   Copy,
-  Globe,
   Edit3,
   ExternalLink,
   ArrowLeft,
@@ -14,8 +13,20 @@ import {
   Pin,
   MessageSquare,
   Heart,
+  UserPlus,
+  UserCheck,
+  Users,
+  BookOpen,
+  Palette,
 } from 'lucide-react';
-import { UserProfile, Character, SharedPersona } from '../types/index.ts';
+import {
+  UserProfile,
+  Character,
+  SharedPersona,
+  SharedStageRecord,
+  SharedLorebookRecord,
+  UserFollowSummary,
+} from '../types/index.ts';
 import { useAuth } from '../context/AuthContext.tsx';
 import { CharacterCard } from './CharacterCard.tsx';
 import { renderWikiMarkup } from '../utils/characterUtils.ts';
@@ -25,6 +36,8 @@ import {
   parseSocialAndCustomization,
   sanitizeCustomCss,
 } from '../utils/profileCustomization.ts';
+import { ViewportSlot } from './ViewportSlot.tsx';
+import { parseLorebookEntries } from '../utils/communityUtils.ts';
 
 interface UserProfileViewProps {
   targetUsername?: string;
@@ -33,9 +46,18 @@ interface UserProfileViewProps {
   onEditCharacter?: (char: Character) => void;
   onDeleteCharacter?: (char: Character) => void;
   onEditPersona?: (persona: SharedPersona) => void;
+  onNavigateProfile?: (username: string) => void;
   onOpenEditModal: () => void;
   onBack?: () => void;
 }
+
+const EMPTY_FOLLOW_SUMMARY: UserFollowSummary = {
+  followerCount: 0,
+  followingCount: 0,
+  isFollowing: false,
+  followers: [],
+  following: [],
+};
 
 export const UserProfileView: React.FC<UserProfileViewProps> = ({
   targetUsername,
@@ -44,6 +66,7 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({
   onEditCharacter,
   onDeleteCharacter,
   onEditPersona,
+  onNavigateProfile,
   onOpenEditModal,
   onBack,
 }) => {
@@ -53,9 +76,16 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({
   const [profileData, setProfileData] = useState<UserProfile | null>(null);
   const [createdBots, setCreatedBots] = useState<Character[]>([]);
   const [userPersonas, setUserPersonas] = useState<SharedPersona[]>([]);
+  const [userStages, setUserStages] = useState<SharedStageRecord[]>([]);
+  const [userLorebooks, setUserLorebooks] = useState<SharedLorebookRecord[]>([]);
+  const [followSummary, setFollowSummary] = useState<UserFollowSummary>(EMPTY_FOLLOW_SUMMARY);
+  const [togglingFollow, setTogglingFollow] = useState(false);
+
   const [pinnedBot, setPinnedBot] = useState<Character | null>(null);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'bots' | 'personas' | 'about' | 'wall'>('bots');
+  const [activeTab, setActiveTab] = useState<
+    'bots' | 'personas' | 'creations' | 'followers' | 'following' | 'about' | 'wall'
+  >('bots');
   const [copiedLink, setCopiedLink] = useState(false);
 
   // Guestbook Wall state
@@ -83,12 +113,19 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({
   const fetchProfile = async () => {
     try {
       setLoading(true);
-      // If viewing own guest profile without targetUsername, show myProfile and also load user's created bots/personas
+      const token = await getIdToken();
+      const headers: Record<string, string> = {};
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
+      // If viewing own guest profile without signed-in Firebase account
       if (!authUser && isOwner && myProfile) {
         setProfileData(myProfile);
-        const [charsRes, personasRes] = await Promise.all([
+        const [charsRes, personasRes, stagesRes, lorebooksRes, followsRes] = await Promise.all([
           fetch('/api/characters'),
           fetch(`/api/personas/me?guestId=${encodeURIComponent(guestId)}`),
+          fetch(`/api/stages/me?guestId=${encodeURIComponent(guestId)}`),
+          fetch(`/api/lorebooks/me?guestId=${encodeURIComponent(guestId)}`),
+          fetch(`/api/users/${encodeURIComponent(guestId)}/follows?guestId=${encodeURIComponent(guestId)}`),
         ]);
         if (charsRes.ok) {
           const cData = await charsRes.json();
@@ -106,15 +143,41 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({
           const pData = await personasRes.json();
           setUserPersonas(pData.personas || []);
         }
+        if (stagesRes.ok) {
+          const sData = await stagesRes.json();
+          setUserStages(sData.stages || []);
+        }
+        if (lorebooksRes.ok) {
+          const lData = await lorebooksRes.json();
+          setUserLorebooks(lData.lorebooks || []);
+        }
+        if (followsRes.ok) {
+          const fData = await followsRes.json();
+          setFollowSummary(fData);
+        }
         return;
       }
 
-      const res = await fetch(`/api/users/${encodeURIComponent(effectiveHandle)}`);
+      const res = await fetch(
+        `/api/users/${encodeURIComponent(effectiveHandle)}?guestId=${encodeURIComponent(guestId)}`,
+        { headers }
+      );
       if (res.ok) {
         const data = await res.json();
         setProfileData(data.user);
         setCreatedBots(data.createdBots || []);
         setUserPersonas(data.userPersonas || []);
+        setUserStages(data.userStages || []);
+        setUserLorebooks(data.userLorebooks || []);
+        if (data.followSummary) {
+          setFollowSummary(data.followSummary);
+        } else if (data.user?.uid) {
+          const fRes = await fetch(
+            `/api/users/${encodeURIComponent(data.user.uid)}/follows?guestId=${encodeURIComponent(guestId)}`,
+            { headers }
+          );
+          if (fRes.ok) setFollowSummary(await fRes.json());
+        }
         if (data.user?.pinnedCharacterUuid) {
           const match = (data.createdBots || []).find(
             (c: Character) => c.uuid === data.user.pinnedCharacterUuid
@@ -122,7 +185,9 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({
           if (match) {
             setPinnedBot(match);
           } else {
-            const cRes = await fetch(`/api/characters/${encodeURIComponent(data.user.pinnedCharacterUuid)}`);
+            const cRes = await fetch(
+              `/api/characters/${encodeURIComponent(data.user.pinnedCharacterUuid)}`
+            );
             if (cRes.ok) {
               const cJson = await cRes.json();
               setPinnedBot(cJson.character || null);
@@ -143,8 +208,41 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({
   };
 
   useEffect(() => {
+    setActiveTab('bots');
     fetchProfile();
   }, [effectiveHandle, myProfile, authUser, guestId]);
+
+  const handleToggleFollow = async () => {
+    const targetUid = profileData?.uid;
+    if (!targetUid || isOwner || togglingFollow) return;
+    setTogglingFollow(true);
+    try {
+      const token = await getIdToken();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
+      const res = await fetch(`/api/users/${encodeURIComponent(targetUid)}/follow`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          guestId,
+          followerUsername: myProfile?.username || 'guest_wanderer',
+          followerName: myProfile?.displayName || authUser?.displayName || 'Guest Wanderer',
+          followerAvatar: myProfile?.avatarUrl || authUser?.photoURL || '',
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.summary) {
+          setFollowSummary(data.summary);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to toggle follow:', err);
+    } finally {
+      setTogglingFollow(false);
+    }
+  };
 
   const handleCopyProfileLink = () => {
     const url = `${window.location.origin}/users/${profileData?.username || effectiveHandle}`;
@@ -255,7 +353,7 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({
 
       <div className="relative z-10 mx-auto max-w-6xl px-4 py-8 animate-in fade-in duration-300 space-y-6">
         {/* Top Breadcrumb & Actions */}
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-3">
           <button
             onClick={onBack}
             className="flex items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-900/90 px-3.5 py-2 text-xs font-semibold text-zinc-300 hover:bg-zinc-800 hover:text-white transition-all shadow-sm backdrop-blur-md cursor-pointer"
@@ -277,6 +375,32 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({
               <span>{copiedLink ? 'Link Copied!' : 'Share Profile'}</span>
             </button>
 
+            {!isOwner && profileData?.uid && (
+              <button
+                type="button"
+                data-testid="follow-profile-btn"
+                onClick={handleToggleFollow}
+                disabled={togglingFollow}
+                className={`flex items-center gap-1.5 rounded-xl px-4 py-2 text-xs font-bold shadow-lg transition-all cursor-pointer disabled:opacity-60 ${
+                  followSummary.isFollowing
+                    ? 'border border-emerald-500/50 bg-emerald-950/60 text-emerald-200 hover:bg-rose-950/50 hover:text-rose-200 hover:border-rose-500/40'
+                    : `${theme.primaryButton} text-white`
+                }`}
+              >
+                {followSummary.isFollowing ? (
+                  <>
+                    <UserCheck className="h-3.5 w-3.5" />
+                    <span>Following</span>
+                  </>
+                ) : (
+                  <>
+                    <UserPlus className="h-3.5 w-3.5" />
+                    <span>Follow @{p.username}</span>
+                  </>
+                )}
+              </button>
+            )}
+
             {isOwner && (
               <button
                 onClick={onOpenEditModal}
@@ -289,7 +413,7 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({
           </div>
         </div>
 
-        {/* Main Profile Header Card (Chub biguswigus style with active Theme) */}
+        {/* Main Profile Header Card */}
         <div
           className={`palace-profile-header-card relative rounded-3xl overflow-hidden border ${theme.accentBorder} ${cardSurfaceClass} shadow-2xl ${theme.glowShadow}`}
         >
@@ -427,17 +551,45 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({
                 )}
               </div>
 
-              {/* Stats Row */}
-              <div className="flex items-center gap-3 text-xs bg-zinc-900/90 border border-zinc-800 px-4 py-2 rounded-2xl backdrop-blur-md">
-                <div className="text-center">
+              {/* Stats Row (Followers & Following clickable!) */}
+              <div className="flex flex-wrap items-center justify-center gap-3 text-xs bg-zinc-900/90 border border-zinc-800 px-4 py-2 rounded-2xl backdrop-blur-md">
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('bots')}
+                  className="text-center hover:opacity-80 cursor-pointer"
+                >
                   <div className="font-bold text-white text-sm">{createdBots.length}</div>
                   <div className="text-[10px] text-zinc-400 uppercase font-semibold">Bots</div>
-                </div>
+                </button>
                 <div className="h-6 w-px bg-zinc-800" />
-                <div className="text-center">
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('personas')}
+                  className="text-center hover:opacity-80 cursor-pointer"
+                >
                   <div className={`font-bold text-sm ${theme.statAccent}`}>{userPersonas.length}</div>
                   <div className="text-[10px] text-zinc-400 uppercase font-semibold">Personas</div>
-                </div>
+                </button>
+                <div className="h-6 w-px bg-zinc-800" />
+                <button
+                  type="button"
+                  data-testid="stat-followers-btn"
+                  onClick={() => setActiveTab('followers')}
+                  className="text-center hover:opacity-80 cursor-pointer"
+                >
+                  <div className="font-bold text-emerald-300 text-sm">{followSummary.followerCount}</div>
+                  <div className="text-[10px] text-zinc-400 uppercase font-semibold">Followers</div>
+                </button>
+                <div className="h-6 w-px bg-zinc-800" />
+                <button
+                  type="button"
+                  data-testid="stat-following-btn"
+                  onClick={() => setActiveTab('following')}
+                  className="text-center hover:opacity-80 cursor-pointer"
+                >
+                  <div className="font-bold text-fuchsia-300 text-sm">{followSummary.followingCount}</div>
+                  <div className="text-[10px] text-zinc-400 uppercase font-semibold">Following</div>
+                </button>
                 <div className="h-6 w-px bg-zinc-800" />
                 <div className="text-center">
                   <div className="font-bold text-amber-300 text-sm">
@@ -518,11 +670,15 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({
             {[
               { id: 'bots', label: `Characters (${createdBots.length})` },
               { id: 'personas', label: `Personas (${userPersonas.length})` },
+              { id: 'creations', label: `Stages & Lorebooks (${userStages.length + userLorebooks.length})` },
+              { id: 'followers', label: `Followers (${followSummary.followerCount})` },
+              { id: 'following', label: `Following (${followSummary.followingCount})` },
               { id: 'about', label: 'About & Wiki Lore' },
               { id: 'wall', label: `Profile Wall (${wallComments.length})` },
             ].map((tab) => (
               <button
                 key={tab.id}
+                data-testid={`profile-tab-${tab.id}`}
                 onClick={() => setActiveTab(tab.id as any)}
                 className={`rounded-xl px-4 py-2 text-xs font-bold transition-all whitespace-nowrap cursor-pointer ${
                   activeTab === tab.id
@@ -555,26 +711,33 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({
               </div>
             ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
-                {createdBots.map((char) => (
-                  <CharacterCard
+                {createdBots.map((char, idx) => (
+                  <ViewportSlot
                     key={char.id}
-                    character={char}
-                    canEdit={isOwnedByRequester(char.creatorId, {
-                      userUid: authUser?.uid,
-                      guestId,
-                    })}
-                    onEditCharacter={onEditCharacter}
-                    onDeleteCharacter={
-                      onDeleteCharacter
-                        ? (c) => {
-                            onDeleteCharacter(c);
-                            setCreatedBots((prev) => prev.filter((item) => item.uuid !== c.uuid));
-                          }
-                        : undefined
-                    }
-                    onSelectCharacter={onSelectCharacter}
-                    onQuickView={onQuickViewCharacter || onSelectCharacter}
-                  />
+                    estimatedHeight={440}
+                    rootMargin="550px 0px"
+                    initialVisible={idx < 8}
+                    testId="profile-character-slot"
+                  >
+                    <CharacterCard
+                      character={char}
+                      canEdit={isOwnedByRequester(char.creatorId, {
+                        userUid: authUser?.uid,
+                        guestId,
+                      })}
+                      onEditCharacter={onEditCharacter}
+                      onDeleteCharacter={
+                        onDeleteCharacter
+                          ? (c) => {
+                              onDeleteCharacter(c);
+                              setCreatedBots((prev) => prev.filter((item) => item.uuid !== c.uuid));
+                            }
+                          : undefined
+                      }
+                      onSelectCharacter={onSelectCharacter}
+                      onQuickView={onQuickViewCharacter || onSelectCharacter}
+                    />
+                  </ViewportSlot>
                 ))}
               </div>
             )}
@@ -593,88 +756,278 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {userPersonas.map((persona) => {
+                {userPersonas.map((persona, idx) => {
                   const canModifyPersona = isOwnedByRequester(persona.userId, {
                     userUid: authUser?.uid,
                     guestId,
                   });
                   return (
-                    <div
+                    <ViewportSlot
                       key={persona.id}
-                      className={`rounded-2xl border ${theme.accentBorder} ${cardSurfaceClass} p-4 space-y-3`}
+                      estimatedHeight={200}
+                      rootMargin="450px 0px"
+                      initialVisible={idx < 6}
+                      testId="profile-persona-slot"
                     >
-                      <div className="flex items-center gap-3">
-                        <img
-                          src={persona.avatar}
-                          alt={persona.name}
-                          className="h-12 w-12 rounded-xl object-cover border border-purple-500/40"
-                        />
-                        <div className="flex-1 min-w-0">
-                          <h4 className="text-sm font-bold text-white truncate">{persona.name}</h4>
-                          <div className={`text-[11px] ${theme.statAccent}`}>{persona.pronouns}</div>
+                      <div
+                        className={`rounded-2xl border ${theme.accentBorder} ${cardSurfaceClass} p-4 space-y-3 h-full`}
+                      >
+                        <div className="flex items-center gap-3">
+                          <img
+                            src={persona.avatar}
+                            alt={persona.name}
+                            loading="lazy"
+                            decoding="async"
+                            className="h-12 w-12 rounded-xl object-cover border border-purple-500/40"
+                          />
+                          <div className="flex-1 min-w-0">
+                            <h4 className="text-sm font-bold text-white truncate">{persona.name}</h4>
+                            <div className={`text-[11px] ${theme.statAccent}`}>{persona.pronouns}</div>
+                          </div>
                         </div>
-                      </div>
-                      <p className="text-xs text-zinc-300 line-clamp-3 italic bg-zinc-950/60 p-2.5 rounded-xl border border-zinc-800/60">
-                        &quot;{persona.bio}&quot;
-                      </p>
-                      {canModifyPersona && (
-                        <div className="flex items-center justify-end gap-1.5 pt-2 border-t border-zinc-800/80">
-                          {onEditPersona && (
+                        <p className="text-xs text-zinc-300 line-clamp-3 italic bg-zinc-950/60 p-2.5 rounded-xl border border-zinc-800/60">
+                          &quot;{persona.bio}&quot;
+                        </p>
+                        {canModifyPersona && (
+                          <div className="flex items-center justify-end gap-1.5 pt-2 border-t border-zinc-800/80">
+                            {onEditPersona && (
+                              <button
+                                type="button"
+                                onClick={() => onEditPersona(persona)}
+                                className="flex items-center gap-1 rounded-xl border border-amber-500/40 bg-amber-500/15 px-2.5 py-1.5 text-xs font-bold text-amber-200 hover:bg-amber-500/30 transition-all"
+                              >
+                                <Edit3 className="h-3.5 w-3.5" />
+                                <span>Edit</span>
+                              </button>
+                            )}
                             <button
                               type="button"
-                              onClick={() => onEditPersona(persona)}
-                              className="flex items-center gap-1 rounded-xl border border-amber-500/40 bg-amber-500/15 px-2.5 py-1.5 text-xs font-bold text-amber-200 hover:bg-amber-500/30 transition-all"
+                              onClick={async () => {
+                                if (confirmDeletePersonaUuid !== persona.uuid) {
+                                  setConfirmDeletePersonaUuid(persona.uuid);
+                                  setTimeout(
+                                    () =>
+                                      setConfirmDeletePersonaUuid((c) =>
+                                        c === persona.uuid ? null : c
+                                      ),
+                                    3500
+                                  );
+                                  return;
+                                }
+                                setConfirmDeletePersonaUuid(null);
+                                const token = await getIdToken();
+                                const headers: Record<string, string> = {};
+                                if (token) headers['Authorization'] = `Bearer ${token}`;
+                                const res = await fetch(
+                                  `/api/personas/${persona.uuid}?guestId=${encodeURIComponent(guestId)}`,
+                                  { method: 'DELETE', headers }
+                                );
+                                if (res.ok) {
+                                  setUserPersonas((prev) =>
+                                    prev.filter((item) => item.uuid !== persona.uuid)
+                                  );
+                                }
+                              }}
+                              className={`flex items-center gap-1 rounded-xl border px-2.5 py-1.5 text-xs font-bold transition-all ${
+                                confirmDeletePersonaUuid === persona.uuid
+                                  ? 'border-rose-500 bg-rose-600 text-white'
+                                  : 'border-rose-500/40 bg-rose-950/30 text-rose-300 hover:bg-rose-900/40'
+                              }`}
                             >
-                              <Edit3 className="h-3.5 w-3.5" />
-                              <span>Edit</span>
+                              <Trash2 className="h-3.5 w-3.5" />
+                              <span>
+                                {confirmDeletePersonaUuid === persona.uuid ? 'Confirm' : 'Delete'}
+                              </span>
                             </button>
-                          )}
-                          <button
-                            type="button"
-                            onClick={async () => {
-                              if (confirmDeletePersonaUuid !== persona.uuid) {
-                                setConfirmDeletePersonaUuid(persona.uuid);
-                                setTimeout(
-                                  () =>
-                                    setConfirmDeletePersonaUuid((c) =>
-                                      c === persona.uuid ? null : c
-                                    ),
-                                  3500
-                                );
-                                return;
-                              }
-                              setConfirmDeletePersonaUuid(null);
-                              const token = await getIdToken();
-                              const headers: Record<string, string> = {};
-                              if (token) headers['Authorization'] = `Bearer ${token}`;
-                              const res = await fetch(
-                                `/api/personas/${persona.uuid}?guestId=${encodeURIComponent(guestId)}`,
-                                { method: 'DELETE', headers }
-                              );
-                              if (res.ok) {
-                                setUserPersonas((prev) =>
-                                  prev.filter((item) => item.uuid !== persona.uuid)
-                                );
-                              }
-                            }}
-                            className={`flex items-center gap-1 rounded-xl border px-2.5 py-1.5 text-xs font-bold transition-all ${
-                              confirmDeletePersonaUuid === persona.uuid
-                                ? 'border-rose-500 bg-rose-600 text-white'
-                                : 'border-rose-500/40 bg-rose-950/30 text-rose-300 hover:bg-rose-900/40'
-                            }`}
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                            <span>
-                              {confirmDeletePersonaUuid === persona.uuid ? 'Confirm' : 'Delete'}
-                            </span>
-                          </button>
-                        </div>
-                      )}
-                    </div>
+                          </div>
+                        )}
+                      </div>
+                    </ViewportSlot>
                   );
                 })}
               </div>
             )}
+          </div>
+        )}
+
+        {activeTab === 'creations' && (
+          <div className="space-y-6">
+            <div className="space-y-3">
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <Palette className="h-4 w-4 text-purple-400" />
+                <span>Shared Stages ({userStages.length})</span>
+              </h3>
+              {userStages.length === 0 ? (
+                <div className={`rounded-2xl border ${theme.accentBorder} ${cardSurfaceClass} p-6 text-center text-xs text-zinc-400`}>
+                  No community stages shared yet.
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {userStages.map((stage, idx) => (
+                    <ViewportSlot
+                      key={stage.uuid}
+                      estimatedHeight={190}
+                      rootMargin="400px 0px"
+                      initialVisible={idx < 6}
+                      testId="profile-stage-slot"
+                    >
+                      <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/80">
+                        <div className="relative h-32 w-full bg-zinc-950">
+                          <img
+                            src={stage.imageUrl}
+                            alt={stage.name}
+                            loading="lazy"
+                            decoding="async"
+                            className="h-full w-full object-cover"
+                            style={{ filter: `blur(${stage.blurLevel}px)` }}
+                          />
+                          <div
+                            className="absolute inset-0 bg-zinc-950"
+                            style={{ opacity: stage.overlayOpacity }}
+                          />
+                          <div className="absolute bottom-2.5 left-3 right-3">
+                            <div className="text-xs font-bold text-white truncate">{stage.name}</div>
+                            <div className="text-[10px] text-zinc-300">{stage.category}</div>
+                          </div>
+                        </div>
+                        <div className="flex items-center justify-between px-3 py-2 text-[11px] text-zinc-400">
+                          <span>{stage.useCount} uses</span>
+                          <span>{stage.likeCount} likes</span>
+                        </div>
+                      </div>
+                    </ViewportSlot>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-3">
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <BookOpen className="h-4 w-4 text-amber-400" />
+                <span>Shared Lorebooks ({userLorebooks.length})</span>
+              </h3>
+              {userLorebooks.length === 0 ? (
+                <div className={`rounded-2xl border ${theme.accentBorder} ${cardSurfaceClass} p-6 text-center text-xs text-zinc-400`}>
+                  No community lorebooks shared yet.
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {userLorebooks.map((lb, idx) => {
+                    const entryCount = parseLorebookEntries(lb.entries).length;
+                    return (
+                      <ViewportSlot
+                        key={lb.uuid}
+                        estimatedHeight={120}
+                        rootMargin="400px 0px"
+                        initialVisible={idx < 6}
+                        testId="profile-lorebook-slot"
+                      >
+                        <div className={`rounded-2xl border ${theme.accentBorder} ${cardSurfaceClass} p-4 space-y-2`}>
+                          <div className="flex items-center justify-between gap-2">
+                            <h4 className="text-sm font-bold text-white truncate">{lb.name}</h4>
+                            <span className="text-[10px] font-bold text-purple-300 shrink-0">
+                              {entryCount} entries
+                            </span>
+                          </div>
+                          <p className="text-xs text-zinc-400 line-clamp-2">{lb.description}</p>
+                          <div className="text-[11px] text-zinc-500">
+                            {lb.useCount} uses &bull; {lb.likeCount} likes
+                          </div>
+                        </div>
+                      </ViewportSlot>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {(activeTab === 'followers' || activeTab === 'following') && (
+          <div className={`rounded-3xl border ${theme.accentBorder} ${cardSurfaceClass} p-6 space-y-4`}>
+            <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <Users className="h-4 w-4 text-purple-400" />
+                <span>
+                  {activeTab === 'followers'
+                    ? `People Following @${p.username} (${followSummary.followerCount})`
+                    : `People Followed by @${p.username} (${followSummary.followingCount})`}
+                </span>
+              </h3>
+            </div>
+
+            {(() => {
+              const list =
+                activeTab === 'followers' ? followSummary.followers : followSummary.following;
+              if (list.length === 0) {
+                return (
+                  <div className="py-10 text-center text-zinc-400 space-y-1.5">
+                    <Users className="h-9 w-9 text-purple-400/50 mx-auto" />
+                    <p className="text-sm font-bold text-white">
+                      {activeTab === 'followers'
+                        ? 'No Followers Yet'
+                        : 'Not Following Anyone Yet'}
+                    </p>
+                    <p className="text-xs text-zinc-400">
+                      {activeTab === 'followers'
+                        ? 'Creators and readers who follow this profile will appear right here!'
+                        : 'Visit other creators on the Palace and click Follow to connect with them.'}
+                    </p>
+                  </div>
+                );
+              }
+
+              return (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {list.map((person, idx) => (
+                    <ViewportSlot
+                      key={`${activeTab}-${person.uid}-${idx}`}
+                      estimatedHeight={110}
+                      rootMargin="400px 0px"
+                      initialVisible={idx < 9}
+                      testId={`profile-${activeTab}-slot`}
+                    >
+                      <div
+                        onClick={() => {
+                          if (person.username && onNavigateProfile) {
+                            onNavigateProfile(person.username);
+                          }
+                        }}
+                        className={`flex items-center gap-3 rounded-2xl border border-zinc-800 bg-zinc-950/75 p-4 transition-all ${
+                          person.username && onNavigateProfile
+                            ? 'hover:border-purple-500/60 cursor-pointer'
+                            : ''
+                        }`}
+                      >
+                        <img
+                          src={
+                            person.avatarUrl ||
+                            'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=600&q=80'
+                          }
+                          alt={person.displayName}
+                          loading="lazy"
+                          decoding="async"
+                          className="h-12 w-12 rounded-2xl object-cover border border-purple-500/40 shrink-0"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="text-xs font-bold text-white truncate">
+                            {person.displayName}
+                          </div>
+                          <div className={`text-[11px] font-semibold truncate ${theme.statAccent}`}>
+                            {person.username ? `@${person.username}` : 'Guest Explorer'}
+                          </div>
+                          {person.bio && (
+                            <p className="text-[11px] text-zinc-400 line-clamp-1 mt-0.5">
+                              {person.bio}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    </ViewportSlot>
+                  ))}
+                </div>
+              );
+            })()}
           </div>
         )}
 
@@ -725,16 +1078,21 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({
 
             <div className="space-y-3">
               {wallComments.map((comment, idx) => (
-                <div
+                <ViewportSlot
                   key={idx}
-                  className="rounded-2xl border border-zinc-800 bg-zinc-950/70 p-4 space-y-1"
+                  estimatedHeight={82}
+                  rootMargin="450px 0px"
+                  initialVisible={idx < 10}
+                  testId="profile-wall-slot"
                 >
-                  <div className="flex items-center justify-between text-xs">
-                    <span className={`font-bold ${theme.statAccent}`}>{comment.name}</span>
-                    <span className="text-[10px] text-zinc-500">{comment.date}</span>
+                  <div className="rounded-2xl border border-zinc-800 bg-zinc-950/70 p-4 space-y-1">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className={`font-bold ${theme.statAccent}`}>{comment.name}</span>
+                      <span className="text-[10px] text-zinc-500">{comment.date}</span>
+                    </div>
+                    <p className="text-xs text-zinc-200 leading-relaxed">{comment.message}</p>
                   </div>
-                  <p className="text-xs text-zinc-200 leading-relaxed">{comment.message}</p>
-                </div>
+                </ViewportSlot>
               ))}
             </div>
           </div>

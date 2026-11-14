@@ -1,6 +1,8 @@
 import { db } from './index.ts';
-import { users, characters, personas } from './schema.ts';
-import { eq, sql, and, ne } from 'drizzle-orm';
+import { users, characters, personas, sharedStages, sharedLorebooks, userFollows } from './schema.ts';
+import { eq, sql, and, ne, desc, inArray } from 'drizzle-orm';
+import type { FollowUserSummary, UserFollowSummary } from '../types/index.ts';
+import { canFollowTarget } from '../utils/communityUtils.ts';
 
 export async function getOrCreateUser(uid: string, email: string, displayName?: string, avatarUrl?: string) {
   try {
@@ -73,7 +75,137 @@ export async function isUsernameAvailable(username: string, excludeUid?: string)
   }
 }
 
-export async function getUserByUsername(username: string) {
+export async function getUserFollowSummary(
+  targetUid: string,
+  viewerFollowerIds: string[] = []
+): Promise<UserFollowSummary> {
+  try {
+    if (!targetUid) {
+      return { followerCount: 0, followingCount: 0, isFollowing: false, followers: [], following: [] };
+    }
+
+    const followerRows = await db
+      .select()
+      .from(userFollows)
+      .where(eq(userFollows.followingUid, targetUid))
+      .orderBy(desc(userFollows.createdAt));
+
+    const followingRows = await db
+      .select()
+      .from(userFollows)
+      .where(eq(userFollows.followerId, targetUid))
+      .orderBy(desc(userFollows.createdAt));
+
+    const lookupUids = Array.from(
+      new Set([
+        ...followerRows.map((r) => r.followerId),
+        ...followingRows.map((r) => r.followingUid),
+      ])
+    ).filter(Boolean);
+
+    const userMap = new Map<string, typeof users.$inferSelect>();
+    if (lookupUids.length > 0) {
+      const matchedUsers = await db.select().from(users).where(inArray(users.uid, lookupUids));
+      for (const u of matchedUsers) {
+        userMap.set(u.uid, u);
+      }
+    }
+
+    const defaultAvatar =
+      'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=600&q=80';
+
+    const followers: FollowUserSummary[] = followerRows.map((row) => {
+      const u = userMap.get(row.followerId);
+      return {
+        uid: row.followerId,
+        username: u?.username || row.followerUsername || null,
+        displayName: u?.displayName || row.followerName || 'Palace Explorer',
+        avatarUrl: u?.avatarUrl || row.followerAvatar || defaultAvatar,
+        bio: u?.bio || null,
+        followedAt: row.createdAt ? row.createdAt.toISOString() : null,
+      };
+    });
+
+    const following: FollowUserSummary[] = followingRows.map((row) => {
+      const u = userMap.get(row.followingUid);
+      return {
+        uid: row.followingUid,
+        username: u?.username || null,
+        displayName: u?.displayName || row.followingUid,
+        avatarUrl: u?.avatarUrl || defaultAvatar,
+        bio: u?.bio || null,
+        followedAt: row.createdAt ? row.createdAt.toISOString() : null,
+      };
+    });
+
+    const viewerSet = new Set(viewerFollowerIds.filter(Boolean));
+    const isFollowing = followerRows.some((r) => viewerSet.has(r.followerId));
+
+    return {
+      followerCount: followers.length,
+      followingCount: following.length,
+      isFollowing,
+      followers,
+      following,
+    };
+  } catch (error) {
+    console.error('getUserFollowSummary failed:', error);
+    return { followerCount: 0, followingCount: 0, isFollowing: false, followers: [], following: [] };
+  }
+}
+
+export async function toggleUserFollow(params: {
+  followerId: string;
+  followerUsername?: string | null;
+  followerName?: string | null;
+  followerAvatar?: string | null;
+  targetUid: string;
+}): Promise<{ isFollowing: boolean; summary: UserFollowSummary }> {
+  const check = canFollowTarget(params.followerId, params.targetUid);
+  if (!check.allowed) {
+    throw new Error(check.reason || 'Invalid follow request');
+  }
+
+  const existing = await db
+    .select()
+    .from(userFollows)
+    .where(
+      and(
+        eq(userFollows.followerId, params.followerId),
+        eq(userFollows.followingUid, params.targetUid)
+      )
+    )
+    .limit(1);
+
+  let isFollowing: boolean;
+  if (existing.length > 0) {
+    await db
+      .delete(userFollows)
+      .where(
+        and(
+          eq(userFollows.followerId, params.followerId),
+          eq(userFollows.followingUid, params.targetUid)
+        )
+      );
+    isFollowing = false;
+  } else {
+    await db.insert(userFollows).values({
+      followerId: params.followerId,
+      followerUsername: params.followerUsername || null,
+      followerName: params.followerName || 'Palace Explorer',
+      followerAvatar:
+        params.followerAvatar ||
+        'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=600&q=80',
+      followingUid: params.targetUid,
+    });
+    isFollowing = true;
+  }
+
+  const summary = await getUserFollowSummary(params.targetUid, [params.followerId]);
+  return { isFollowing, summary };
+}
+
+export async function getUserByUsername(username: string, viewerIds: string[] = []) {
   try {
     const cleanHandle = username.toLowerCase().trim().replace(/^@/, '');
     let res = await db.select().from(users).where(sql`LOWER(${users.username}) = ${cleanHandle}`).limit(1);
@@ -107,16 +239,26 @@ export async function getUserByUsername(username: string) {
 
     const user = res[0];
 
-    // Fetch user's created characters
-    const createdBots = await db.select().from(characters).where(eq(characters.creatorId, user.uid));
-    
-    // Fetch user's personas
-    const userPersonas = await db.select().from(personas).where(eq(personas.userId, user.uid));
+    const [createdBots, userPersonas, userStagesRows, userLorebooksRows, followSummary] = await Promise.all([
+      db.select().from(characters).where(eq(characters.creatorId, user.uid)),
+      db.select().from(personas).where(eq(personas.userId, user.uid)),
+      db.select().from(sharedStages).where(eq(sharedStages.userId, user.uid)).orderBy(desc(sharedStages.createdAt)),
+      db.select().from(sharedLorebooks).where(eq(sharedLorebooks.userId, user.uid)).orderBy(desc(sharedLorebooks.createdAt)),
+      getUserFollowSummary(user.uid, viewerIds),
+    ]);
+
+    const userStages = userStagesRows.map((row) => ({
+      ...row,
+      overlayOpacity: Number(((row.overlayOpacityPct ?? 65) / 100).toFixed(2)),
+    }));
 
     return {
       user,
       createdBots,
       userPersonas,
+      userStages,
+      userLorebooks: userLorebooksRows,
+      followSummary,
     };
   } catch (error) {
     console.error('Database getUserByUsername failed:', error);

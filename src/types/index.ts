@@ -189,3 +189,66 @@ export interface ChatSession {
   updatedAt: string;
   character?: Character;
 }
+
+export interface LorebookEntryItem {
+  id: string;
+  keys: string;
+  secondaryKeys?: string;
+  content: string;
+  insertionOrder: number;
+  enabled: boolean;
+  constant: boolean;
+  caseSensitive: boolean;
+}
+
+export interface SharedStageRecord {
+  id: number;
+  uuid: string;
+  userId: string;
+  creatorName: string;
+  name: string;
+  category: string;
+  imageUrl: string;
+  description: string;
+  blurLevel: number;
+  overlayOpacity: number;
+  tags?: string;
+  isPublic: boolean;
+  likeCount: number;
+  useCount: number;
+  createdAt?: string;
+}
+
+export interface SharedLorebookRecord {
+  id: number;
+  uuid: string;
+  userId: string;
+  creatorName: string;
+  name: string;
+  description: string;
+  scanDepth: number;
+  entries: string | LorebookEntryItem[];
+  tags?: string;
+  isPublic: boolean;
+  likeCount: number;
+  useCount: number;
+  createdAt?: string;
+}
+
+export interface FollowUserSummary {
+  uid: string;
+  username?: string | null;
+  displayName: string;
+  avatarUrl: string;
+  bio?: string | null;
+  followedAt?: string | null;
+}
+
+export interface UserFollowSummary {
+  followerCount: number;
+  followingCount: number;
+  isFollowing: boolean;
+  followers: FollowUserSummary[];
+  following: FollowUserSummary[];
+}
+

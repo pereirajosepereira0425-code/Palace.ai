@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { MessageSquare, Trash2, Clock, BrainCircuit, Globe, Volume2, ArrowRight } from 'lucide-react';
 import { Character, ChatSession } from '../types/index.ts';
 import { useAuth } from '../context/AuthContext.tsx';
+import { ViewportSlot } from './ViewportSlot.tsx';
 
 interface UserChatsViewProps {
   onSelectCharacter: (char: Character) => void;
@@ -11,6 +12,7 @@ export const UserChatsView: React.FC<UserChatsViewProps> = ({ onSelectCharacter 
   const { user, guestId, getIdToken } = useAuth();
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [loading, setLoading] = useState(true);
+  const [confirmDeleteUuid, setConfirmDeleteUuid] = useState<string | null>(null);
 
   const fetchChats = async () => {
     try {
@@ -37,7 +39,12 @@ export const UserChatsView: React.FC<UserChatsViewProps> = ({ onSelectCharacter 
 
   const handleDeleteSession = async (e: React.MouseEvent, sessionUuid: string) => {
     e.stopPropagation();
-    if (!window.confirm('Delete this chat history?')) return;
+    if (confirmDeleteUuid !== sessionUuid) {
+      setConfirmDeleteUuid(sessionUuid);
+      setTimeout(() => setConfirmDeleteUuid((curr) => (curr === sessionUuid ? null : curr)), 3500);
+      return;
+    }
+    setConfirmDeleteUuid(null);
 
     try {
       await fetch(`/api/chat/session/${sessionUuid}`, { method: 'DELETE' });
@@ -77,76 +84,90 @@ export const UserChatsView: React.FC<UserChatsViewProps> = ({ onSelectCharacter 
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {sessions.map((sess) => {
+          {sessions.map((sess, idx) => {
             const char = sess.character;
             if (!char) return null;
 
             return (
-              <div
+              <ViewportSlot
                 key={sess.id}
-                onClick={() => onSelectCharacter(char)}
-                className="group flex items-center gap-4 rounded-2xl border border-zinc-800/80 bg-zinc-900/60 p-4 hover:border-purple-500/50 hover:bg-zinc-900/90 hover:shadow-lg transition-all cursor-pointer"
+                estimatedHeight={100}
+                rootMargin="450px 0px"
+                initialVisible={idx < 8}
+                testId="user-chat-slot"
               >
-                {/* Character Avatar */}
-                <div className="relative h-16 w-16 shrink-0 overflow-hidden rounded-xl border border-purple-500/40 shadow-sm">
-                  <img
-                    src={char.avatar}
-                    alt={char.name}
-                    className="h-full w-full object-cover object-top transition-transform group-hover:scale-105"
-                  />
-                </div>
-
-                {/* Info */}
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between">
-                    <h3 className="font-bold text-sm text-zinc-100 group-hover:text-purple-300 transition-colors truncate">
-                      {char.name}
-                    </h3>
-                    <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[9px] font-bold text-zinc-400">
-                      {char.rating}
-                    </span>
+                <div
+                  onClick={() => onSelectCharacter(char)}
+                  className="group flex items-center gap-4 rounded-2xl border border-zinc-800/80 bg-zinc-900/60 p-4 hover:border-purple-500/50 hover:bg-zinc-900/90 hover:shadow-lg transition-all cursor-pointer"
+                >
+                  {/* Character Avatar */}
+                  <div className="relative h-16 w-16 shrink-0 overflow-hidden rounded-xl border border-purple-500/40 shadow-sm">
+                    <img
+                      src={char.avatar}
+                      alt={char.name}
+                      loading="lazy"
+                      decoding="async"
+                      className="h-full w-full object-cover object-top transition-transform group-hover:scale-105"
+                    />
                   </div>
 
-                  <p className="text-xs text-zinc-400 line-clamp-1 mt-0.5">
-                    {char.tagline}
-                  </p>
-
-                  <div className="flex items-center gap-2 mt-2 text-[10px] text-zinc-500">
-                    <span className="flex items-center gap-1 text-zinc-400">
-                      <Clock className="h-3 w-3" />
-                      {new Date(sess.updatedAt).toLocaleDateString()}
-                    </span>
-
-                    {sess.thinkingLevel === 'HIGH' && (
-                      <span className="flex items-center gap-0.5 text-purple-400 font-medium">
-                        <BrainCircuit className="h-3 w-3" />
-                        Thinking
+                  {/* Info */}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between">
+                      <h3 className="font-bold text-sm text-zinc-100 group-hover:text-purple-300 transition-colors truncate">
+                        {char.name}
+                      </h3>
+                      <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[9px] font-bold text-zinc-400">
+                        {char.rating}
                       </span>
-                    )}
+                    </div>
 
-                    {sess.searchGrounding && (
-                      <span className="flex items-center gap-0.5 text-sky-400 font-medium">
-                        <Globe className="h-3 w-3" />
-                        Search
+                    <p className="text-xs text-zinc-400 line-clamp-1 mt-0.5">
+                      {char.tagline}
+                    </p>
+
+                    <div className="flex items-center gap-2 mt-2 text-[10px] text-zinc-500">
+                      <span className="flex items-center gap-1 text-zinc-400">
+                        <Clock className="h-3 w-3" />
+                        {new Date(sess.updatedAt).toLocaleDateString()}
                       </span>
-                    )}
-                  </div>
-                </div>
 
-                {/* Right Actions */}
-                <div className="flex items-center gap-1">
-                  <button
-                    onClick={(e) => handleDeleteSession(e, sess.uuid)}
-                    className="p-2 text-zinc-500 hover:text-rose-400 transition-colors rounded-lg hover:bg-zinc-800"
-                    title="Delete Chat"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                  <div className="p-2 text-purple-400 group-hover:translate-x-1 transition-transform">
-                    <ArrowRight className="h-4 w-4" />
+                      {sess.thinkingLevel === 'HIGH' && (
+                        <span className="flex items-center gap-0.5 text-purple-400 font-medium">
+                          <BrainCircuit className="h-3 w-3" />
+                          Thinking
+                        </span>
+                      )}
+
+                      {sess.searchGrounding && (
+                        <span className="flex items-center gap-0.5 text-sky-400 font-medium">
+                          <Globe className="h-3 w-3" />
+                          Search
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Right Actions */}
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={(e) => handleDeleteSession(e, sess.uuid)}
+                      className={`p-2 transition-colors rounded-lg flex items-center gap-1 text-xs font-bold ${
+                        confirmDeleteUuid === sess.uuid
+                          ? 'bg-rose-600 text-white px-2.5'
+                          : 'text-zinc-500 hover:text-rose-400 hover:bg-zinc-800'
+                      }`}
+                      title={confirmDeleteUuid === sess.uuid ? 'Click again to delete chat' : 'Delete Chat'}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                      {confirmDeleteUuid === sess.uuid && <span>Confirm</span>}
+                    </button>
+                    <div className="p-2 text-purple-400 group-hover:translate-x-1 transition-transform">
+                      <ArrowRight className="h-4 w-4" />
+                    </div>
                   </div>
                 </div>
-              </div>
+              </ViewportSlot>
             );
           })}
         </div>

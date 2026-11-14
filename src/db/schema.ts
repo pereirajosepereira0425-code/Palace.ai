@@ -150,6 +150,53 @@ export const tags = pgTable('tags', {
   createdAt: timestamp('created_at').defaultNow(),
 });
 
+// Community & User Shared Stages
+export const sharedStages = pgTable('shared_stages', {
+  id: serial('id').primaryKey(),
+  uuid: text('uuid').notNull().unique(),
+  userId: text('user_id').notNull(),
+  creatorName: text('creator_name').notNull().default('Anonymous'),
+  name: text('name').notNull(),
+  category: text('category').notNull().default('Custom'),
+  imageUrl: text('image_url').notNull(),
+  description: text('description').notNull().default(''),
+  blurLevel: integer('blur_level').notNull().default(2),
+  overlayOpacityPct: integer('overlay_opacity_pct').notNull().default(65),
+  tags: text('tags').notNull().default('[]'),
+  isPublic: boolean('is_public').notNull().default(true),
+  likeCount: integer('like_count').notNull().default(0),
+  useCount: integer('use_count').notNull().default(0),
+  createdAt: timestamp('created_at').defaultNow(),
+});
+
+// Community & User Shared Lorebooks
+export const sharedLorebooks = pgTable('shared_lorebooks', {
+  id: serial('id').primaryKey(),
+  uuid: text('uuid').notNull().unique(),
+  userId: text('user_id').notNull(),
+  creatorName: text('creator_name').notNull().default('Anonymous'),
+  name: text('name').notNull(),
+  description: text('description').notNull().default(''),
+  scanDepth: integer('scan_depth').notNull().default(4),
+  entries: text('entries').notNull().default('[]'),
+  tags: text('tags').notNull().default('[]'),
+  isPublic: boolean('is_public').notNull().default(true),
+  likeCount: integer('like_count').notNull().default(0),
+  useCount: integer('use_count').notNull().default(0),
+  createdAt: timestamp('created_at').defaultNow(),
+});
+
+// User Follower / Following relationships
+export const userFollows = pgTable('user_follows', {
+  id: serial('id').primaryKey(),
+  followerId: text('follower_id').notNull(),
+  followerUsername: text('follower_username'),
+  followerName: text('follower_name').notNull().default('Palace Explorer'),
+  followerAvatar: text('follower_avatar'),
+  followingUid: text('following_uid').notNull(),
+  createdAt: timestamp('created_at').defaultNow(),
+});
+
 // Relations
 export const usersRelations = relations(users, ({ many }) => ({
   favorites: many(userFavorites),

@@ -51,6 +51,8 @@ import {
   tryBrowserExternalCompletion,
 } from '../utils/apiErrorUtils.ts';
 import { ThreeAvatarViewer } from './ThreeAvatarViewer.tsx';
+import { ViewportSlot } from './ViewportSlot.tsx';
+import { mergeGlobalActiveLorebook } from '../utils/communityUtils.ts';
 
 interface ChatRoomProps {
   character: Character;
@@ -170,6 +172,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   const [activeAudioMessageId, setActiveAudioMessageId] = useState<number | null>(null);
   const [audioLoadingId, setAudioLoadingId] = useState<number | null>(null);
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+  const messagesContainerRef = useRef<HTMLDivElement | null>(null);
 
   // Expanded thinking boxes
   const [expandedThinking, setExpandedThinking] = useState<Record<number, boolean>>({});
@@ -529,6 +532,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         (isChubUrlOrProvider(mergedSettings.apiProvider, chubApiUrl) ||
           isLocalProviderOrUrl(mergedSettings.apiProvider, chubApiUrl));
 
+      const activeGlobalLoreRaw = localStorage.getItem('palace_active_lorebook');
+      const effectiveLorebook = mergeGlobalActiveLorebook(character.lorebook, activeGlobalLoreRaw);
+
       if (shouldTryBrowserDirect) {
         const directRes = await tryBrowserExternalCompletion({
           character: {
@@ -540,7 +546,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             postHistoryInstructions: character.postHistoryInstructions,
             scenario: character.scenario,
             exampleDialogues: character.exampleDialogues,
-            lorebook: character.lorebook,
+            lorebook: effectiveLorebook,
             userPersona: `${persona.name}: ${persona.bio}`,
           },
           history: messages.map((m) => ({
@@ -582,6 +588,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           chubApiKey,
           chubApiUrl,
           showAiImages,
+          extraLorebook: activeGlobalLoreRaw,
           preGeneratedReply,
           preGeneratedModelUsed,
         }),
@@ -670,6 +677,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             (isChubUrlOrProvider(mergedSettings.apiProvider, chubApiUrl) ||
               isLocalProviderOrUrl(mergedSettings.apiProvider, chubApiUrl));
 
+          const activeGlobalLoreRaw = localStorage.getItem('palace_active_lorebook');
+          const effectiveLorebook = mergeGlobalActiveLorebook(character.lorebook, activeGlobalLoreRaw);
+
           if (shouldTryBrowserDirect) {
             const msgIndex = messages.findIndex((m) => m.id === messageId);
             const previousHistory = (msgIndex >= 0 ? messages.slice(0, msgIndex) : messages).map((m) => ({
@@ -686,7 +696,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 postHistoryInstructions: character.postHistoryInstructions,
                 scenario: character.scenario,
                 exampleDialogues: character.exampleDialogues,
-                lorebook: character.lorebook,
+                lorebook: effectiveLorebook,
                 userPersona: `${persona.name}: ${persona.bio}`,
               },
               history: previousHistory,
@@ -712,6 +722,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
               chatSettings: mergedSettings,
               chubApiKey,
               chubApiUrl,
+              extraLorebook: activeGlobalLoreRaw,
               preGeneratedReply,
             }),
           });
@@ -1169,7 +1180,10 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       </div>
 
       {/* Main Messages Stream */}
-      <div className="relative z-10 flex-1 overflow-y-auto px-4 py-6 sm:px-6 lg:px-8 space-y-6">
+      <div
+        ref={messagesContainerRef}
+        className="relative z-10 flex-1 overflow-y-auto px-4 py-6 sm:px-6 lg:px-8 space-y-6"
+      >
         {loading ? (
           <div className="flex h-full items-center justify-center">
             <div className="flex flex-col items-center gap-3">
@@ -1186,17 +1200,30 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
             const isInitialGreeting = msgIdx === 0 && isCharacter;
             const hasAlternateGreetings = isInitialGreeting && allGreetings.length > 1;
+            const keepMounted =
+              msgIdx >= messages.length - 8 ||
+              isInitialGreeting ||
+              activeAudioMessageId === message.id;
 
             const swipesList = message.swipes || [message.content];
             const currentSwipeIndex = message.activeSwipeIndex || 0;
 
             return (
-              <div
+              <ViewportSlot
                 key={message.id}
-                className={`group flex gap-3.5 max-w-4xl ${
-                  isUser ? 'ml-auto flex-row-reverse' : 'mr-auto'
-                }`}
+                rootRef={messagesContainerRef}
+                rootMargin="650px 0px"
+                estimatedHeight={150}
+                forceMounted={keepMounted}
+                initialVisible={keepMounted}
+                placeholderClassName="rounded-3xl bg-zinc-900/20 border border-zinc-800/20"
+                testId="chat-message-slot"
               >
+                <div
+                  className={`group flex gap-3.5 max-w-4xl ${
+                    isUser ? 'ml-auto flex-row-reverse' : 'mr-auto'
+                  }`}
+                >
                 {/* Avatar */}
                 <div className="shrink-0 mt-0.5">
                   {isCharacter ? (
@@ -1437,7 +1464,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                     </button>
                   </div>
                 </div>
-              </div>
+                </div>
+              </ViewportSlot>
             );
           })
         )}

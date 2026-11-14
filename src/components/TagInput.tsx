@@ -1,8 +1,10 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { Tag, Plus, X, Search, Sparkles, Check } from 'lucide-react';
 import { TagRecord } from '../types/index.ts';
 import { CHUB_ALL_TAGS } from '../utils/characterUtils.ts';
 import { normalizeTagName, parseTagListInput } from '../utils/chubOptions.ts';
+import { chunkItems } from '../utils/viewportUnload.ts';
+import { ViewportSlot } from './ViewportSlot.tsx';
 
 interface TagInputProps {
   selectedTags: string[];
@@ -13,6 +15,9 @@ interface TagInputProps {
   compact?: boolean;
 }
 
+const TAG_PAGE_SIZE = 60;
+const TAG_CHUNK_SIZE = 12;
+
 export const TagInput: React.FC<TagInputProps> = ({
   selectedTags,
   onChange,
@@ -22,29 +27,91 @@ export const TagInput: React.FC<TagInputProps> = ({
   compact = false,
 }) => {
   const [dbTags, setDbTags] = useState<TagRecord[]>([]);
+  const [hasMoreTags, setHasMoreTags] = useState(false);
+  const [loadingMoreTags, setLoadingMoreTags] = useState(false);
   const [inputValue, setInputValue] = useState('');
+  const [debouncedQuery, setDebouncedQuery] = useState('');
   const [savingTag, setSavingTag] = useState(false);
   const [notice, setNotice] = useState('');
 
-  const loadTags = async () => {
+  const tagScrollRef = useRef<HTMLDivElement | null>(null);
+  const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
+  const nextOffsetRef = useRef(0);
+  const fetchingMoreRef = useRef(false);
+
+  // Debounce search query so typing never spams API or blocks rendering
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedQuery(normalizeTagName(inputValue));
+    }, 150);
+    return () => clearTimeout(timer);
+  }, [inputValue]);
+
+  const loadTags = useCallback(async (searchTerm: string, offset: number, append: boolean) => {
+    if (fetchingMoreRef.current && append) return;
     try {
-      const res = await fetch('/api/tags?limit=300');
+      if (append) {
+        fetchingMoreRef.current = true;
+        setLoadingMoreTags(true);
+      }
+      const params = new URLSearchParams();
+      params.set('limit', String(TAG_PAGE_SIZE));
+      params.set('offset', String(offset));
+      if (searchTerm) params.set('search', searchTerm);
+
+      const res = await fetch(`/api/tags?${params.toString()}`);
       if (res.ok) {
         const data = await res.json();
-        if (Array.isArray(data.tags)) {
-          setDbTags(data.tags);
-        }
+        const incoming: TagRecord[] = Array.isArray(data.tags) ? data.tags : [];
+        setDbTags((prev) => {
+          if (!append) return incoming;
+          const seen = new Set(prev.map((t) => t.name.toLowerCase()));
+          const merged = [...prev];
+          for (const item of incoming) {
+            if (!seen.has(item.name.toLowerCase())) {
+              seen.add(item.name.toLowerCase());
+              merged.push(item);
+            }
+          }
+          return merged;
+        });
+        setHasMoreTags(Boolean(data.hasMore));
+        nextOffsetRef.current = typeof data.nextOffset === 'number' ? data.nextOffset : offset + incoming.length;
       }
     } catch (err) {
       console.warn('Failed to fetch tags from database:', err);
+    } finally {
+      fetchingMoreRef.current = false;
+      setLoadingMoreTags(false);
     }
-  };
-
-  useEffect(() => {
-    loadTags();
   }, []);
 
-  // Merge DB tags with fallback CHUB_ALL_TAGS so picker is always richly populated
+  useEffect(() => {
+    nextOffsetRef.current = 0;
+    loadTags(debouncedQuery, 0, false);
+  }, [debouncedQuery, loadTags]);
+
+  // Infinite scroll inside the scrollable tag cloud container
+  useEffect(() => {
+    const rootEl = tagScrollRef.current;
+    const sentinelEl = loadMoreSentinelRef.current;
+    if (!rootEl || !sentinelEl || !hasMoreTags) return;
+    if (typeof IntersectionObserver === 'undefined') return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting && hasMoreTags && !fetchingMoreRef.current) {
+          loadTags(debouncedQuery, nextOffsetRef.current, true);
+        }
+      },
+      { root: rootEl, rootMargin: '120px 0px', threshold: 0 }
+    );
+
+    observer.observe(sentinelEl);
+    return () => observer.disconnect();
+  }, [hasMoreTags, debouncedQuery, loadTags]);
+
+  // Merge DB tags with matching fallback CHUB_ALL_TAGS (kept bounded when unsearched)
   const mergedTagList = useMemo(() => {
     const map = new Map<string, { name: string; usageCount: number; isCustom: boolean }>();
     for (const t of dbTags) {
@@ -54,7 +121,10 @@ export const TagInput: React.FC<TagInputProps> = ({
         isCustom: t.createdBy !== 'system',
       });
     }
+    const q = debouncedQuery.toLowerCase();
     for (const fallback of CHUB_ALL_TAGS) {
+      if (q && !fallback.toLowerCase().includes(q)) continue;
+      if (!q && hasMoreTags && map.size >= TAG_PAGE_SIZE) break;
       if (!map.has(fallback.toLowerCase())) {
         map.set(fallback.toLowerCase(), {
           name: fallback,
@@ -64,13 +134,23 @@ export const TagInput: React.FC<TagInputProps> = ({
       }
     }
     return Array.from(map.values());
-  }, [dbTags]);
+  }, [dbTags, debouncedQuery, hasMoreTags]);
 
   const filteredSuggestions = useMemo(() => {
     const q = normalizeTagName(inputValue).toLowerCase();
     if (!q) return mergedTagList;
     return mergedTagList.filter((item) => item.name.toLowerCase().includes(q));
   }, [mergedTagList, inputValue]);
+
+  const suggestionChunks = useMemo(
+    () => chunkItems(filteredSuggestions, TAG_CHUNK_SIZE),
+    [filteredSuggestions]
+  );
+
+  const selectedLowerSet = useMemo(
+    () => new Set(selectedTags.map((t) => t.toLowerCase())),
+    [selectedTags]
+  );
 
   const exactMatchExists = useMemo(() => {
     const q = normalizeTagName(inputValue).toLowerCase();
@@ -87,7 +167,6 @@ export const TagInput: React.FC<TagInputProps> = ({
     const newlyAdded: string[] = [];
 
     for (const candidate of parsed) {
-      // Match existing canonical capitalization if it exists in DB
       const canonical =
         mergedTagList.find((m) => m.name.toLowerCase() === candidate.toLowerCase())?.name ||
         candidate;
@@ -102,7 +181,6 @@ export const TagInput: React.FC<TagInputProps> = ({
     onChange(nextSelected);
     setInputValue('');
 
-    // Persist any newly typed tags straight into the Cloud SQL tags database
     try {
       setSavingTag(true);
       const res = await fetch('/api/tags', {
@@ -115,7 +193,7 @@ export const TagInput: React.FC<TagInputProps> = ({
         }),
       });
       if (res.ok) {
-        await loadTags();
+        await loadTags('', 0, false);
         if (newlyAdded.length > 0) {
           setNotice(`Saved "${newlyAdded.join(', ')}" to Chub Tag DB`);
           setTimeout(() => setNotice(''), 2500);
@@ -129,7 +207,7 @@ export const TagInput: React.FC<TagInputProps> = ({
   };
 
   const toggleTag = (tagName: string) => {
-    const exists = selectedTags.some((t) => t.toLowerCase() === tagName.toLowerCase());
+    const exists = selectedLowerSet.has(tagName.toLowerCase());
     if (exists) {
       onChange(selectedTags.filter((t) => t.toLowerCase() !== tagName.toLowerCase()));
     } else {
@@ -153,7 +231,8 @@ export const TagInput: React.FC<TagInputProps> = ({
           <label className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-purple-400">
             <Tag className="h-3.5 w-3.5" />
             <span>
-              {title} ({selectedTags.length} selected &bull; {mergedTagList.length} in DB)
+              {title} ({selectedTags.length} selected &bull; {mergedTagList.length}
+              {hasMoreTags ? '+' : ''} loaded)
             </span>
           </label>
           <p className="text-xs text-zinc-400 mt-0.5">{subtitle}</p>
@@ -169,7 +248,7 @@ export const TagInput: React.FC<TagInputProps> = ({
 
       {/* Selected Tags Display */}
       {selectedTags.length > 0 && (
-        <div className="flex flex-wrap gap-1.5 rounded-2xl border border-purple-500/20 bg-zinc-950/70 p-2.5">
+        <div className="flex flex-wrap gap-1.5 rounded-2xl border border-purple-500/20 bg-zinc-950/70 p-2.5 max-h-32 overflow-y-auto">
           {selectedTags.map((tag) => (
             <span
               key={tag}
@@ -229,32 +308,59 @@ export const TagInput: React.FC<TagInputProps> = ({
         </button>
       )}
 
-      {/* Existing Database Tags Cloud */}
-      <div className={`flex flex-wrap gap-1.5 overflow-y-auto p-1 ${compact ? 'max-h-36' : 'max-h-48'}`}>
-        {filteredSuggestions.map((item) => {
-          const isSelected = selectedTags.some(
-            (t) => t.toLowerCase() === item.name.toLowerCase()
-          );
-          return (
+      {/* Windowed Off-Screen Unloading Tag Cloud */}
+      <div
+        ref={tagScrollRef}
+        className={`space-y-1.5 overflow-y-auto p-1 ${compact ? 'max-h-36' : 'max-h-48'}`}
+      >
+        {suggestionChunks.map((chunk, chunkIdx) => (
+          <ViewportSlot
+            key={`chunk-${chunkIdx}-${chunk[0]?.name || ''}`}
+            rootRef={tagScrollRef}
+            rootMargin="48px 0px"
+            estimatedHeight={68}
+            initialVisible={chunkIdx < 2}
+            className="flex flex-wrap gap-1.5"
+            placeholderClassName="rounded-xl bg-zinc-900/30 border border-zinc-800/30"
+            testId="tag-input-chunk"
+          >
+            {chunk.map((item) => {
+              const isSelected = selectedLowerSet.has(item.name.toLowerCase());
+              return (
+                <button
+                  key={item.name}
+                  type="button"
+                  onClick={() => toggleTag(item.name)}
+                  className={`rounded-xl px-2.5 py-1 text-xs font-semibold transition-all border flex items-center gap-1.5 ${
+                    isSelected
+                      ? 'border-purple-500 bg-purple-500/20 text-purple-200 shadow-sm'
+                      : item.isCustom
+                      ? 'border-amber-500/30 bg-amber-950/20 text-amber-200 hover:border-amber-400/60'
+                      : 'border-zinc-800 bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'
+                  }`}
+                >
+                  <span>#{item.name}</span>
+                  {item.usageCount > 0 && (
+                    <span className="text-[10px] opacity-60 font-mono">{item.usageCount}</span>
+                  )}
+                </button>
+              );
+            })}
+          </ViewportSlot>
+        ))}
+
+        {hasMoreTags && (
+          <div ref={loadMoreSentinelRef} className="flex justify-center pt-1">
             <button
-              key={item.name}
               type="button"
-              onClick={() => toggleTag(item.name)}
-              className={`rounded-xl px-2.5 py-1 text-xs font-semibold transition-all border flex items-center gap-1.5 ${
-                isSelected
-                  ? 'border-purple-500 bg-purple-500/20 text-purple-200 shadow-sm'
-                  : item.isCustom
-                  ? 'border-amber-500/30 bg-amber-950/20 text-amber-200 hover:border-amber-400/60'
-                  : 'border-zinc-800 bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'
-              }`}
+              onClick={() => loadTags(debouncedQuery, nextOffsetRef.current, true)}
+              disabled={loadingMoreTags}
+              className="rounded-lg border border-zinc-800 bg-zinc-900/80 px-3 py-1 text-[11px] font-semibold text-zinc-400 hover:text-zinc-200 transition-colors"
             >
-              <span>#{item.name}</span>
-              {item.usageCount > 0 && (
-                <span className="text-[10px] opacity-60 font-mono">{item.usageCount}</span>
-              )}
+              {loadingMoreTags ? 'Loading more tags...' : 'Load more tags'}
             </button>
-          );
-        })}
+          </div>
+        )}
       </div>
     </div>
   );

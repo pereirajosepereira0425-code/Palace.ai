@@ -611,3 +611,94 @@ test('normalizeModelsUrl and pickBestModelForEndpoint resolve Chub /v1/models ID
   assert.equal(pickBestModelForEndpoint('unknown-model', ['default-live-model']), 'default-live-model');
 });
 
+test('viewportUnload helpers correctly paginate, chunk tags, and compute virtual overscan windows', async () => {
+  const {
+    parsePageParams,
+    slicePaginatedRows,
+    chunkItems,
+    computeVirtualWindow,
+    resolveSlotDimension,
+  } = await import('./viewportUnload.ts');
+
+  assert.deepEqual(
+    parsePageParams({ limitParam: '500', offsetParam: '-10', defaultLimit: 24, maxLimit: 100 }),
+    { limit: 100, offset: 0 }
+  );
+  assert.deepEqual(
+    parsePageParams({ limitParam: undefined, offsetParam: '48', defaultLimit: 24, maxLimit: 100 }),
+    { limit: 24, offset: 48 }
+  );
+
+  const pageWithMore = slicePaginatedRows([1, 2, 3, 4], 3, 6);
+  assert.deepEqual(pageWithMore, { items: [1, 2, 3], hasMore: true, nextOffset: 9 });
+
+  const lastPage = slicePaginatedRows([1, 2], 3, 9);
+  assert.deepEqual(lastPage, { items: [1, 2], hasMore: false, nextOffset: 11 });
+
+  const chunks = chunkItems(['a', 'b', 'c', 'd', 'e'], 2);
+  assert.deepEqual(chunks, [['a', 'b'], ['c', 'd'], ['e']]);
+  assert.deepEqual(chunkItems([], 10), []);
+
+  const win = computeVirtualWindow({
+    totalCount: 100,
+    scrollOffset: 2000,
+    viewportSize: 800,
+    itemSize: 100,
+    overscanCount: 3,
+  });
+  assert.equal(win.startIndex, 17);
+  assert.equal(win.endIndex, 31);
+  assert.equal(win.paddingBefore, 1700);
+  assert.equal(win.paddingAfter, 6800);
+
+  assert.equal(resolveSlotDimension(412.6, 300), 413);
+  assert.equal(resolveSlotDimension(0, 300), 300);
+  assert.equal(resolveSlotDimension(null, 250), 250);
+});
+
+test('communityUtils validates follow targets, normalizes stage sliders, and merges global active lorebooks', async () => {
+  const {
+    canFollowTarget,
+    clampBlurLevel,
+    normalizeOverlayOpacity,
+    parseLorebookEntries,
+    mergeGlobalActiveLorebook,
+  } = await import('./communityUtils.ts');
+
+  assert.deepEqual(canFollowTarget('guest_1', 'uid_2'), { allowed: true });
+  assert.equal(canFollowTarget('uid_1', 'uid_1').allowed, false);
+  assert.equal(canFollowTarget('', 'uid_2').allowed, false);
+
+  assert.equal(clampBlurLevel(-5), 0);
+  assert.equal(clampBlurLevel(99), 20);
+  assert.equal(clampBlurLevel(3.6), 4);
+
+  assert.deepEqual(normalizeOverlayOpacity(0.68), { pct: 68, float: 0.68 });
+  assert.deepEqual(normalizeOverlayOpacity(75), { pct: 75, float: 0.75 });
+  assert.deepEqual(normalizeOverlayOpacity(2), { pct: 10, float: 0.1 });
+
+  const parsedEntries = parseLorebookEntries([
+    { keys: 'Citadel, Keep', content: 'Dark stone fortress.', enabled: true },
+    { key: 'Disabled', content: 'Ignored if skipped', enabled: false },
+  ]);
+  assert.equal(parsedEntries.length, 2);
+  assert.equal(parsedEntries[0].keys, 'Citadel, Keep');
+  assert.equal(parsedEntries[1].enabled, false);
+
+  const mergedJson = mergeGlobalActiveLorebook(
+    JSON.stringify([{ key: 'Hero', content: 'Built-in hero lore.' }]),
+    JSON.stringify({
+      name: 'World Codex',
+      entries: [
+        { keys: 'Vespera, Academy', content: 'Floating magic school.', enabled: true },
+        { keys: 'Hidden', content: 'Disabled entry', enabled: false },
+      ],
+    })
+  );
+  const merged = JSON.parse(mergedJson);
+  assert.equal(merged.length, 2);
+  assert.equal(merged[0].key, 'Hero');
+  assert.equal(merged[1].key, 'Vespera, Academy');
+});
+
+

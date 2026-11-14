@@ -30,6 +30,8 @@ import {
   updateUserProfile,
   isUsernameAvailable,
   getUserByUsername,
+  getUserFollowSummary,
+  toggleUserFollow,
 } from '../src/db/users.ts';
 import {
   getPublicPersonas,
@@ -42,6 +44,26 @@ import {
   ensureSeedPersonas,
 } from '../src/db/personas.ts';
 import {
+  getPublicStages,
+  getUserStages,
+  createSharedStage,
+  updateSharedStage,
+  deleteSharedStage,
+  toggleLikeStage,
+  incrementStageUse,
+  ensureSeedStages,
+} from '../src/db/stages.ts';
+import {
+  getPublicLorebooks,
+  getUserLorebooks,
+  createSharedLorebook,
+  updateSharedLorebook,
+  deleteSharedLorebook,
+  toggleLikeLorebook,
+  incrementLorebookUse,
+  ensureSeedLorebooks,
+} from '../src/db/lorebooks.ts';
+import {
   generateCharacterReply,
   generateSpeechTTS,
   generatePersonaReaction,
@@ -50,21 +72,31 @@ import {
 } from '../src/services/aiService.ts';
 import { importCharacterFromUrl, UrlImportError } from './urlImporter.ts';
 import { ensureSeedTags, getTags, upsertTags } from '../src/db/tags.ts';
+import { parsePageParams, slicePaginatedRows } from '../src/utils/viewportUnload.ts';
+import { mergeGlobalActiveLorebook } from '../src/utils/communityUtils.ts';
 
 export const apiRouter = express.Router();
 
-// Ensure initial seed characters, personas, and tags exist on server start
+// Ensure initial seed characters, personas, stages, lorebooks, and tags exist on server start
 ensureSeedCharacters().catch(console.error);
 ensureSeedPersonas().catch(console.error);
+ensureSeedStages().catch(console.error);
+ensureSeedLorebooks().catch(console.error);
 ensureSeedTags().catch(console.error);
 
 // ----------------- TAGS (CHUB.AI DYNAMIC TAXONOMY) -----------------
 apiRouter.get('/tags', async (req, res) => {
   try {
     const search = typeof req.query.search === 'string' ? req.query.search : undefined;
-    const limit = typeof req.query.limit === 'string' ? parseInt(req.query.limit, 10) : 250;
-    const list = await getTags({ search, limit: Number.isFinite(limit) ? limit : 250 });
-    res.json({ tags: list });
+    const { limit, offset } = parsePageParams({
+      limitParam: req.query.limit,
+      offsetParam: req.query.offset,
+      defaultLimit: 120,
+      maxLimit: 300,
+    });
+    const rows = await getTags({ search, limit: limit + 1, offset });
+    const { items, hasMore, nextOffset } = slicePaginatedRows(rows, limit, offset);
+    res.json({ tags: items, hasMore, nextOffset });
   } catch (error: any) {
     console.error('Failed to get tags:', error);
     res.status(500).json({ error: error.message || 'Failed to load tags' });
@@ -97,19 +129,28 @@ apiRouter.post('/tags', optionalAuth, async (req: AuthRequest, res) => {
 apiRouter.get('/characters', optionalAuth, async (req: AuthRequest, res) => {
   try {
     const { search, tag, rating, sort } = req.query;
-    const characters = await getCharacters({
+    const { limit, offset } = parsePageParams({
+      limitParam: req.query.limit,
+      offsetParam: req.query.offset,
+      defaultLimit: 24,
+      maxLimit: 100,
+    });
+    const rows = await getCharacters({
       search: typeof search === 'string' ? search : undefined,
       tag: typeof tag === 'string' ? tag : undefined,
       rating: typeof rating === 'string' ? rating : undefined,
       sort: sort === 'latest' || sort === 'chats' || sort === 'popular' ? sort : 'popular',
+      limit: limit + 1,
+      offset,
     });
+    const { items: characters, hasMore, nextOffset } = slicePaginatedRows(rows, limit, offset);
 
     let likedIds: number[] = [];
     if (req.user?.uid) {
       likedIds = await getUserLikedIds(req.user.uid);
     }
 
-    res.json({ characters, likedIds });
+    res.json({ characters, likedIds, hasMore, nextOffset });
   } catch (error: any) {
     console.error('Failed to get characters:', error);
     res.status(500).json({ error: error.message || 'Failed to get characters' });
@@ -354,11 +395,20 @@ apiRouter.post('/characters/:id/like', requireAuth, async (req: AuthRequest, res
 apiRouter.get('/personas', async (req, res) => {
   try {
     const { search, sort } = req.query;
-    const list = await getPublicPersonas({
+    const { limit, offset } = parsePageParams({
+      limitParam: req.query.limit,
+      offsetParam: req.query.offset,
+      defaultLimit: 24,
+      maxLimit: 100,
+    });
+    const rows = await getPublicPersonas({
       search: typeof search === 'string' ? search : undefined,
       sort: sort === 'latest' || sort === 'used' || sort === 'popular' ? sort : 'popular',
+      limit: limit + 1,
+      offset,
     });
-    res.json({ personas: list });
+    const { items: list, hasMore, nextOffset } = slicePaginatedRows(rows, limit, offset);
+    res.json({ personas: list, hasMore, nextOffset });
   } catch (error: any) {
     console.error('Failed to get public personas:', error);
     res.status(500).json({ error: error.message || 'Failed to get personas' });
@@ -598,10 +648,309 @@ apiRouter.get('/user/check-username', optionalAuth, async (req: AuthRequest, res
   }
 });
 
-// Public Chub User Profile endpoint (e.g. https://chub.ai/users/biguswigus)
-apiRouter.get('/users/:username', async (req, res) => {
+// ----------------- STAGE SHARING SYSTEM -----------------
+apiRouter.get('/stages', async (req, res) => {
   try {
-    const data = await getUserByUsername(req.params.username);
+    const { search, category, sort } = req.query;
+    const { limit, offset } = parsePageParams({
+      limitParam: req.query.limit,
+      offsetParam: req.query.offset,
+      defaultLimit: 24,
+      maxLimit: 100,
+    });
+    const rows = await getPublicStages({
+      search: typeof search === 'string' ? search : undefined,
+      category: typeof category === 'string' ? category : undefined,
+      sort: sort === 'latest' || sort === 'used' || sort === 'popular' ? sort : 'popular',
+      limit: limit + 1,
+      offset,
+    });
+    const { items: stages, hasMore, nextOffset } = slicePaginatedRows(rows, limit, offset);
+    res.json({ stages, hasMore, nextOffset });
+  } catch (error: any) {
+    console.error('Failed to get shared stages:', error);
+    res.status(500).json({ error: error.message || 'Failed to get stages' });
+  }
+});
+
+apiRouter.get('/stages/me', optionalAuth, async (req: AuthRequest, res) => {
+  try {
+    const guestId = (req.query.guestId as string) || '';
+    const ids = Array.from(new Set([req.user?.uid || '', guestId, 'guest'].filter(Boolean)));
+    const stages = await getUserStages(ids);
+    res.json({ stages });
+  } catch (error: any) {
+    console.error('Failed to get user stages:', error);
+    res.status(500).json({ error: error.message || 'Failed to get user stages' });
+  }
+});
+
+apiRouter.post('/stages', optionalAuth, async (req: AuthRequest, res) => {
+  try {
+    const {
+      name,
+      category,
+      imageUrl,
+      description,
+      blurLevel,
+      overlayOpacity,
+      tags,
+      isPublic,
+      creatorName: bodyCreatorName,
+      guestId,
+    } = req.body || {};
+
+    if (!name || !imageUrl) {
+      return res.status(400).json({ error: 'Stage name and image URL are required' });
+    }
+
+    const userId = req.user?.uid || guestId || 'guest';
+    const syncedUser = req.user?.uid ? await getUserProfile(req.user.uid) : null;
+    const creatorName =
+      syncedUser?.username ||
+      syncedUser?.displayName ||
+      req.user?.name ||
+      req.user?.email?.split('@')[0] ||
+      bodyCreatorName ||
+      'Community';
+
+    const stage = await createSharedStage({
+      userId,
+      creatorName,
+      name,
+      category,
+      imageUrl,
+      description,
+      blurLevel,
+      overlayOpacity,
+      tags,
+      isPublic: isPublic ?? true,
+    });
+
+    if (Array.isArray(tags) && tags.length > 0) {
+      upsertTags(tags, userId, true).catch(console.warn);
+    }
+
+    res.json({ stage });
+  } catch (error: any) {
+    console.error('Failed to create shared stage:', error);
+    res.status(500).json({ error: error.message || 'Failed to share stage' });
+  }
+});
+
+apiRouter.put('/stages/:uuid', optionalAuth, async (req: AuthRequest, res) => {
+  try {
+    const requester = {
+      userUid: req.user?.uid || null,
+      guestId: (typeof req.body?.guestId === 'string' && req.body.guestId) || null,
+    };
+    const updated = await updateSharedStage(req.params.uuid, requester, req.body || {});
+    if (!updated) return res.status(404).json({ error: 'Stage not found' });
+    res.json({ stage: updated });
+  } catch (error: any) {
+    if (error?.message === 'FORBIDDEN') {
+      return res.status(403).json({ error: 'You can only edit stages you created' });
+    }
+    console.error('Failed to update shared stage:', error);
+    res.status(500).json({ error: error.message || 'Failed to update stage' });
+  }
+});
+
+apiRouter.delete('/stages/:uuid', optionalAuth, async (req: AuthRequest, res) => {
+  try {
+    const requester = {
+      userUid: req.user?.uid || null,
+      guestId:
+        (typeof req.query.guestId === 'string' && req.query.guestId) ||
+        (typeof req.body?.guestId === 'string' && req.body.guestId) ||
+        null,
+    };
+    const result = await deleteSharedStage(req.params.uuid, requester);
+    if (result.notFound) return res.status(404).json({ error: 'Stage not found' });
+    res.json(result);
+  } catch (error: any) {
+    if (error?.message === 'FORBIDDEN') {
+      return res.status(403).json({ error: 'You can only delete stages you created' });
+    }
+    console.error('Failed to delete shared stage:', error);
+    res.status(500).json({ error: error.message || 'Failed to delete stage' });
+  }
+});
+
+apiRouter.post('/stages/:uuid/like', async (req, res) => {
+  try {
+    const stage = await toggleLikeStage(req.params.uuid);
+    if (!stage) return res.status(404).json({ error: 'Stage not found' });
+    res.json({ stage });
+  } catch (error: any) {
+    console.error('Failed to like stage:', error);
+    res.status(500).json({ error: error.message || 'Failed to like stage' });
+  }
+});
+
+apiRouter.post('/stages/:uuid/use', async (req, res) => {
+  try {
+    const stage = await incrementStageUse(req.params.uuid);
+    if (!stage) return res.status(404).json({ error: 'Stage not found' });
+    res.json({ stage });
+  } catch (error: any) {
+    console.error('Failed to track stage use:', error);
+    res.status(500).json({ error: error.message || 'Failed to increment stage use' });
+  }
+});
+
+// ----------------- LOREBOOK SHARING SYSTEM -----------------
+apiRouter.get('/lorebooks', async (req, res) => {
+  try {
+    const { search, sort } = req.query;
+    const { limit, offset } = parsePageParams({
+      limitParam: req.query.limit,
+      offsetParam: req.query.offset,
+      defaultLimit: 24,
+      maxLimit: 100,
+    });
+    const rows = await getPublicLorebooks({
+      search: typeof search === 'string' ? search : undefined,
+      sort: sort === 'latest' || sort === 'used' || sort === 'popular' ? sort : 'popular',
+      limit: limit + 1,
+      offset,
+    });
+    const { items: lorebooks, hasMore, nextOffset } = slicePaginatedRows(rows, limit, offset);
+    res.json({ lorebooks, hasMore, nextOffset });
+  } catch (error: any) {
+    console.error('Failed to get shared lorebooks:', error);
+    res.status(500).json({ error: error.message || 'Failed to get lorebooks' });
+  }
+});
+
+apiRouter.get('/lorebooks/me', optionalAuth, async (req: AuthRequest, res) => {
+  try {
+    const guestId = (req.query.guestId as string) || '';
+    const ids = Array.from(new Set([req.user?.uid || '', guestId, 'guest'].filter(Boolean)));
+    const lorebooks = await getUserLorebooks(ids);
+    res.json({ lorebooks });
+  } catch (error: any) {
+    console.error('Failed to get user lorebooks:', error);
+    res.status(500).json({ error: error.message || 'Failed to get user lorebooks' });
+  }
+});
+
+apiRouter.post('/lorebooks', optionalAuth, async (req: AuthRequest, res) => {
+  try {
+    const {
+      name,
+      description,
+      scanDepth,
+      entries,
+      tags,
+      isPublic,
+      creatorName: bodyCreatorName,
+      guestId,
+    } = req.body || {};
+
+    if (!name) {
+      return res.status(400).json({ error: 'Lorebook name is required' });
+    }
+
+    const userId = req.user?.uid || guestId || 'guest';
+    const syncedUser = req.user?.uid ? await getUserProfile(req.user.uid) : null;
+    const creatorName =
+      syncedUser?.username ||
+      syncedUser?.displayName ||
+      req.user?.name ||
+      req.user?.email?.split('@')[0] ||
+      bodyCreatorName ||
+      'Community';
+
+    const lorebook = await createSharedLorebook({
+      userId,
+      creatorName,
+      name,
+      description,
+      scanDepth,
+      entries: entries || [],
+      tags,
+      isPublic: isPublic ?? true,
+    });
+
+    if (Array.isArray(tags) && tags.length > 0) {
+      upsertTags(tags, userId, true).catch(console.warn);
+    }
+
+    res.json({ lorebook });
+  } catch (error: any) {
+    console.error('Failed to create shared lorebook:', error);
+    res.status(500).json({ error: error.message || 'Failed to share lorebook' });
+  }
+});
+
+apiRouter.put('/lorebooks/:uuid', optionalAuth, async (req: AuthRequest, res) => {
+  try {
+    const requester = {
+      userUid: req.user?.uid || null,
+      guestId: (typeof req.body?.guestId === 'string' && req.body.guestId) || null,
+    };
+    const updated = await updateSharedLorebook(req.params.uuid, requester, req.body || {});
+    if (!updated) return res.status(404).json({ error: 'Lorebook not found' });
+    res.json({ lorebook: updated });
+  } catch (error: any) {
+    if (error?.message === 'FORBIDDEN') {
+      return res.status(403).json({ error: 'You can only edit lorebooks you created' });
+    }
+    console.error('Failed to update shared lorebook:', error);
+    res.status(500).json({ error: error.message || 'Failed to update lorebook' });
+  }
+});
+
+apiRouter.delete('/lorebooks/:uuid', optionalAuth, async (req: AuthRequest, res) => {
+  try {
+    const requester = {
+      userUid: req.user?.uid || null,
+      guestId:
+        (typeof req.query.guestId === 'string' && req.query.guestId) ||
+        (typeof req.body?.guestId === 'string' && req.body.guestId) ||
+        null,
+    };
+    const result = await deleteSharedLorebook(req.params.uuid, requester);
+    if (result.notFound) return res.status(404).json({ error: 'Lorebook not found' });
+    res.json(result);
+  } catch (error: any) {
+    if (error?.message === 'FORBIDDEN') {
+      return res.status(403).json({ error: 'You can only delete lorebooks you created' });
+    }
+    console.error('Failed to delete shared lorebook:', error);
+    res.status(500).json({ error: error.message || 'Failed to delete lorebook' });
+  }
+});
+
+apiRouter.post('/lorebooks/:uuid/like', async (req, res) => {
+  try {
+    const lorebook = await toggleLikeLorebook(req.params.uuid);
+    if (!lorebook) return res.status(404).json({ error: 'Lorebook not found' });
+    res.json({ lorebook });
+  } catch (error: any) {
+    console.error('Failed to like lorebook:', error);
+    res.status(500).json({ error: error.message || 'Failed to like lorebook' });
+  }
+});
+
+apiRouter.post('/lorebooks/:uuid/use', async (req, res) => {
+  try {
+    const lorebook = await incrementLorebookUse(req.params.uuid);
+    if (!lorebook) return res.status(404).json({ error: 'Lorebook not found' });
+    res.json({ lorebook });
+  } catch (error: any) {
+    console.error('Failed to track lorebook use:', error);
+    res.status(500).json({ error: error.message || 'Failed to increment lorebook use' });
+  }
+});
+
+// Public Chub User Profile endpoint (e.g. https://chub.ai/users/biguswigus)
+apiRouter.get('/users/:username', optionalAuth, async (req: AuthRequest, res) => {
+  try {
+    const guestId = typeof req.query.guestId === 'string' ? req.query.guestId : '';
+    const viewerIds = [req.user?.uid || '', guestId].filter(Boolean);
+    const data = await getUserByUsername(req.params.username, viewerIds);
     if (!data) {
       return res.status(404).json({ error: `User @${req.params.username} not found` });
     }
@@ -609,6 +958,58 @@ apiRouter.get('/users/:username', async (req, res) => {
   } catch (error: any) {
     console.error('Failed to get public user profile:', error);
     res.status(500).json({ error: error.message || 'Failed to get user profile' });
+  }
+});
+
+// Follower & Following Graph endpoints
+apiRouter.get('/users/:targetUid/follows', optionalAuth, async (req: AuthRequest, res) => {
+  try {
+    const guestId = typeof req.query.guestId === 'string' ? req.query.guestId : '';
+    const viewerIds = [req.user?.uid || '', guestId].filter(Boolean);
+    const summary = await getUserFollowSummary(req.params.targetUid, viewerIds);
+    res.json(summary);
+  } catch (error: any) {
+    console.error('Failed to get user follow summary:', error);
+    res.status(500).json({ error: error.message || 'Failed to load followers' });
+  }
+});
+
+apiRouter.post('/users/:targetUid/follow', optionalAuth, async (req: AuthRequest, res) => {
+  try {
+    const targetUid = req.params.targetUid;
+    const guestId = typeof req.body?.guestId === 'string' ? req.body.guestId.trim() : '';
+    const followerId = req.user?.uid || guestId;
+    if (!followerId) {
+      return res.status(400).json({ error: 'Follower identity is required' });
+    }
+
+    const syncedFollower = req.user?.uid ? await getUserProfile(req.user.uid) : null;
+    const followerUsername =
+      syncedFollower?.username ||
+      (typeof req.body?.followerUsername === 'string' ? req.body.followerUsername : null) ||
+      null;
+    const followerName =
+      syncedFollower?.displayName ||
+      req.user?.name ||
+      (typeof req.body?.followerName === 'string' ? req.body.followerName : null) ||
+      'Palace Explorer';
+    const followerAvatar =
+      syncedFollower?.avatarUrl ||
+      req.user?.picture ||
+      (typeof req.body?.followerAvatar === 'string' ? req.body.followerAvatar : null) ||
+      null;
+
+    const result = await toggleUserFollow({
+      followerId,
+      followerUsername,
+      followerName,
+      followerAvatar,
+      targetUid,
+    });
+    res.json(result);
+  } catch (error: any) {
+    console.error('Failed to toggle follow:', error);
+    res.status(400).json({ error: error.message || 'Failed to toggle follow' });
   }
 });
 
@@ -749,6 +1150,7 @@ apiRouter.post('/chat/message', optionalAuth, async (req: AuthRequest, res) => {
       parentId,
       chatSettings: reqChatSettings,
       showAiImages: reqShowImages,
+      extraLorebook,
       preGeneratedReply,
       preGeneratedModelUsed,
     } = req.body;
@@ -787,6 +1189,7 @@ apiRouter.post('/chat/message', optionalAuth, async (req: AuthRequest, res) => {
 
     // 3. Generate Character Reply (or persist browser-direct Chub.ai / local completion)
     const effectivePersona = userPersona || session.userPersona || (req.user ? `${req.user.name || 'User'}` : null);
+    const effectiveLorebook = mergeGlobalActiveLorebook(character.lorebook, extraLorebook);
     const aiResult =
       typeof preGeneratedReply === 'string' && preGeneratedReply.trim()
         ? {
@@ -807,7 +1210,7 @@ apiRouter.post('/chat/message', optionalAuth, async (req: AuthRequest, res) => {
               postHistoryInstructions: character.postHistoryInstructions,
               scenario: character.scenario,
               exampleDialogues: character.exampleDialogues,
-              lorebook: character.lorebook,
+              lorebook: effectiveLorebook,
               userPersona: effectivePersona,
             },
             history,
@@ -896,6 +1299,7 @@ apiRouter.post('/chat/swipe', optionalAuth, async (req: AuthRequest, res) => {
       chubApiKey,
       chubApiUrl,
       chatSettings: reqChatSettings,
+      extraLorebook,
       preGeneratedReply,
     } = req.body;
     if (!sessionUuid || !messageId) {
@@ -933,6 +1337,10 @@ apiRouter.post('/chat/swipe', optionalAuth, async (req: AuthRequest, res) => {
           content: m.content,
         }));
 
+        const effectiveLorebook = mergeGlobalActiveLorebook(
+          sessionDetails.character.lorebook,
+          extraLorebook
+        );
         const aiResult = await generateCharacterReply({
           character: {
             name: sessionDetails.character.name,
@@ -943,7 +1351,7 @@ apiRouter.post('/chat/swipe', optionalAuth, async (req: AuthRequest, res) => {
             postHistoryInstructions: sessionDetails.character.postHistoryInstructions,
             scenario: sessionDetails.character.scenario,
             exampleDialogues: sessionDetails.character.exampleDialogues,
-            lorebook: sessionDetails.character.lorebook,
+            lorebook: effectiveLorebook,
             userPersona: sessionDetails.session.userPersona,
           },
           history: previousHistory,

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   Sparkles,
   Search,
@@ -37,8 +37,14 @@ import {
 import { CharacterDetailView } from './components/CharacterDetailView.tsx';
 import { UserProfileView } from './components/UserProfileView.tsx';
 import { UserProfileModal } from './components/UserProfileModal.tsx';
+import { ViewportSlot } from './components/ViewportSlot.tsx';
 import { Character, ContentRating, SharedPersona, TagRecord } from './types/index.ts';
 import { isOwnedByRequester } from './utils/ownership.ts';
+import { chunkItems } from './utils/viewportUnload.ts';
+
+const CHARACTER_PAGE_SIZE = 24;
+const EXPLORE_TAG_PAGE_SIZE = 48;
+const EXPLORE_TAG_CHUNK_SIZE = 12;
 
 const DEFAULT_FALLBACK_TAGS = [
   'Anime',
@@ -112,14 +118,29 @@ function PalaceApp() {
   const [characters, setCharacters] = useState<Character[]>([]);
   const [likedIds, setLikedIds] = useState<number[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMoreChars, setLoadingMoreChars] = useState(false);
+  const [hasMoreChars, setHasMoreChars] = useState(false);
 
   // Filters & Dynamic Tag DB
   const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
   const [selectedTag, setSelectedTag] = useState('All');
   const [tagFilterInput, setTagFilterInput] = useState('');
+  const [debouncedTagFilter, setDebouncedTagFilter] = useState('');
   const [dbTags, setDbTags] = useState<TagRecord[]>([]);
+  const [hasMoreTags, setHasMoreTags] = useState(false);
+  const [loadingMoreTags, setLoadingMoreTags] = useState(false);
   const [ratingFilter, setRatingFilter] = useState<'ALL' | 'SFW' | 'NSFW' | 'NSFL' | 'NSFW + NSFL'>('ALL');
   const [sortOrder, setSortOrder] = useState<'popular' | 'latest' | 'chats'>('popular');
+
+  const charNextOffsetRef = useRef(0);
+  const charFetchingMoreRef = useRef(false);
+  const charSentinelRef = useRef<HTMLDivElement | null>(null);
+
+  const tagsScrollRef = useRef<HTMLDivElement | null>(null);
+  const tagsSentinelRef = useRef<HTMLDivElement | null>(null);
+  const tagsNextOffsetRef = useRef(0);
+  const tagsFetchingMoreRef = useRef(false);
 
   // Modals & Navigation
   const [selectedCharacter, setSelectedCharacter] = useState<Character | null>(null);
@@ -176,56 +197,165 @@ function PalaceApp() {
     }
   };
 
-  // Fetch characters
-  const fetchCharacters = async () => {
-    try {
-      setLoading(true);
-      const params = new URLSearchParams();
-      if (searchQuery) params.append('search', searchQuery);
-      if (selectedTag !== 'All') params.append('tag', selectedTag);
-      if (ratingFilter !== 'ALL') params.append('rating', ratingFilter);
-      params.append('sort', sortOrder);
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearchQuery(searchQuery.trim()), 180);
+    return () => clearTimeout(t);
+  }, [searchQuery]);
 
-      const token = await getIdToken();
-      const headers: Record<string, string> = {};
-      if (token) headers['Authorization'] = `Bearer ${token}`;
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedTagFilter(tagFilterInput.trim()), 180);
+    return () => clearTimeout(t);
+  }, [tagFilterInput]);
 
-      const res = await fetch(`/api/characters?${params.toString()}`, { headers });
-      if (res.ok) {
-        const data = await res.json();
-        setCharacters(data.characters || []);
-        setLikedIds(data.likedIds || []);
-      }
-    } catch (err) {
-      console.error('Failed to load characters:', err);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const fetchDbTags = async () => {
-    try {
-      const res = await fetch('/api/tags?limit=120');
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data.tags)) {
-          setDbTags(data.tags);
+  // Fetch characters (paginated)
+  const fetchCharacters = useCallback(
+    async (offset: number = 0, append: boolean = false) => {
+      if (append && charFetchingMoreRef.current) return;
+      try {
+        if (append) {
+          charFetchingMoreRef.current = true;
+          setLoadingMoreChars(true);
+        } else {
+          setLoading(true);
         }
+        const params = new URLSearchParams();
+        if (debouncedSearchQuery) params.append('search', debouncedSearchQuery);
+        if (selectedTag !== 'All') params.append('tag', selectedTag);
+        if (ratingFilter !== 'ALL') params.append('rating', ratingFilter);
+        params.append('sort', sortOrder);
+        params.append('limit', String(CHARACTER_PAGE_SIZE));
+        params.append('offset', String(offset));
+
+        const token = await getIdToken();
+        const headers: Record<string, string> = {};
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+
+        const res = await fetch(`/api/characters?${params.toString()}`, { headers });
+        if (res.ok) {
+          const data = await res.json();
+          const incoming: Character[] = data.characters || [];
+          setCharacters((prev) => {
+            if (!append) return incoming;
+            const seen = new Set(prev.map((c) => c.id));
+            const merged = [...prev];
+            for (const c of incoming) {
+              if (!seen.has(c.id)) {
+                seen.add(c.id);
+                merged.push(c);
+              }
+            }
+            return merged;
+          });
+          if (!append || (data.likedIds && data.likedIds.length > 0)) {
+            setLikedIds(data.likedIds || []);
+          }
+          setHasMoreChars(Boolean(data.hasMore));
+          charNextOffsetRef.current =
+            typeof data.nextOffset === 'number' ? data.nextOffset : offset + incoming.length;
+        }
+      } catch (err) {
+        console.error('Failed to load characters:', err);
+      } finally {
+        charFetchingMoreRef.current = false;
+        setLoadingMoreChars(false);
+        setLoading(false);
       }
-    } catch (err) {
-      console.warn('Failed to fetch tags:', err);
-    }
-  };
+    },
+    [debouncedSearchQuery, selectedTag, ratingFilter, sortOrder, getIdToken]
+  );
+
+  // Fetch tags (paginated + server-filtered)
+  const fetchDbTags = useCallback(
+    async (searchTerm: string = '', offset: number = 0, append: boolean = false) => {
+      if (append && tagsFetchingMoreRef.current) return;
+      try {
+        if (append) {
+          tagsFetchingMoreRef.current = true;
+          setLoadingMoreTags(true);
+        }
+        const params = new URLSearchParams();
+        params.set('limit', String(EXPLORE_TAG_PAGE_SIZE));
+        params.set('offset', String(offset));
+        if (searchTerm) params.set('search', searchTerm);
+
+        const res = await fetch(`/api/tags?${params.toString()}`);
+        if (res.ok) {
+          const data = await res.json();
+          const incoming: TagRecord[] = Array.isArray(data.tags) ? data.tags : [];
+          setDbTags((prev) => {
+            if (!append) return incoming;
+            const seen = new Set(prev.map((t) => t.name.toLowerCase()));
+            const merged = [...prev];
+            for (const t of incoming) {
+              if (!seen.has(t.name.toLowerCase())) {
+                seen.add(t.name.toLowerCase());
+                merged.push(t);
+              }
+            }
+            return merged;
+          });
+          setHasMoreTags(Boolean(data.hasMore));
+          tagsNextOffsetRef.current =
+            typeof data.nextOffset === 'number' ? data.nextOffset : offset + incoming.length;
+        }
+      } catch (err) {
+        console.warn('Failed to fetch tags:', err);
+      } finally {
+        tagsFetchingMoreRef.current = false;
+        setLoadingMoreTags(false);
+      }
+    },
+    []
+  );
 
   useEffect(() => {
-    fetchDbTags();
-  }, []);
+    tagsNextOffsetRef.current = 0;
+    fetchDbTags(debouncedTagFilter, 0, false);
+  }, [debouncedTagFilter, fetchDbTags]);
 
   useEffect(() => {
-    fetchCharacters();
-  }, [searchQuery, selectedTag, ratingFilter, sortOrder, user]);
+    charNextOffsetRef.current = 0;
+    fetchCharacters(0, false);
+  }, [fetchCharacters, user]);
 
-  const exploreTags = React.useMemo(() => {
+  // Infinite scroll sentinel for Explore characters grid
+  useEffect(() => {
+    const sentinel = charSentinelRef.current;
+    if (!sentinel || !hasMoreChars || loading) return;
+    if (typeof IntersectionObserver === 'undefined') return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting && hasMoreChars && !charFetchingMoreRef.current) {
+          fetchCharacters(charNextOffsetRef.current, true);
+        }
+      },
+      { rootMargin: '500px 0px', threshold: 0 }
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [hasMoreChars, loading, fetchCharacters]);
+
+  // Horizontal infinite scroll sentinel for Explore tags strip
+  useEffect(() => {
+    const rootEl = tagsScrollRef.current;
+    const sentinel = tagsSentinelRef.current;
+    if (!rootEl || !sentinel || !hasMoreTags) return;
+    if (typeof IntersectionObserver === 'undefined') return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting && hasMoreTags && !tagsFetchingMoreRef.current) {
+          fetchDbTags(debouncedTagFilter, tagsNextOffsetRef.current, true);
+        }
+      },
+      { root: rootEl, rootMargin: '0px 240px', threshold: 0 }
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [hasMoreTags, debouncedTagFilter, fetchDbTags]);
+
+  const exploreTags = useMemo(() => {
     const base = dbTags.length > 0 ? dbTags.map((t) => t.name) : DEFAULT_FALLBACK_TAGS;
     const q = tagFilterInput.trim().toLowerCase();
     const filtered = q ? base.filter((t) => t.toLowerCase().includes(q)) : base;
@@ -235,85 +365,112 @@ function PalaceApp() {
     return ['All', ...filtered];
   }, [dbTags, tagFilterInput, selectedTag]);
 
-  const handleLikeToggle = async (charId: number) => {
-    try {
-      const token = await getIdToken();
-      if (!token) return;
+  const exploreTagChunks = useMemo(
+    () => chunkItems(exploreTags, EXPLORE_TAG_CHUNK_SIZE),
+    [exploreTags]
+  );
 
-      const res = await fetch(`/api/characters/${charId}/like`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-      });
+  const handleLikeToggle = useCallback(
+    async (charId: number) => {
+      try {
+        const token = await getIdToken();
+        if (!token) return;
 
-      if (res.ok) {
-        const data = await res.json();
-        if (data.liked) {
-          setLikedIds((prev) => [...prev, charId]);
-        } else {
-          setLikedIds((prev) => prev.filter((id) => id !== charId));
+        const res = await fetch(`/api/characters/${charId}/like`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          if (data.liked) {
+            setLikedIds((prev) => [...prev, charId]);
+          } else {
+            setLikedIds((prev) => prev.filter((id) => id !== charId));
+          }
         }
+      } catch (err) {
+        console.error('Like toggle failed:', err);
       }
-    } catch (err) {
-      console.error('Like toggle failed:', err);
-    }
-  };
+    },
+    [getIdToken]
+  );
 
   const handleCharacterCreated = (newChar: Character) => {
     setCharacters((prev) => [newChar, ...prev]);
-    fetchDbTags();
+    fetchDbTags(debouncedTagFilter, 0, false);
     setActiveTab('explore');
     setSelectedCharacter(newChar);
   };
 
-  const handleStartEditCharacter = (char: Character) => {
+  const handleStartEditCharacter = useCallback((char: Character) => {
     setForkCharacter(null);
     setEditingCharacter(char);
     setInspectCharacter(null);
     setSelectedCharacter(null);
     setActiveTab('studio');
-  };
+  }, []);
 
   const handleCharacterUpdated = (updated: Character) => {
     setCharacters((prev) => prev.map((c) => (c.uuid === updated.uuid ? updated : c)));
-    fetchDbTags();
+    fetchDbTags(debouncedTagFilter, 0, false);
     setEditingCharacter(null);
     setActiveTab('explore');
     setInspectCharacter(updated);
   };
 
-  const handleCharacterDeletedByUuid = (uuid: string) => {
-    setCharacters((prev) => prev.filter((c) => c.uuid !== uuid));
-    if (editingCharacter?.uuid === uuid) setEditingCharacter(null);
-    if (inspectCharacter?.uuid === uuid) setInspectCharacter(null);
-    if (selectedCharacter?.uuid === uuid) setSelectedCharacter(null);
-    setActiveTab('explore');
-  };
+  const handleCharacterDeletedByUuid = useCallback(
+    (uuid: string) => {
+      setCharacters((prev) => prev.filter((c) => c.uuid !== uuid));
+      if (editingCharacter?.uuid === uuid) setEditingCharacter(null);
+      if (inspectCharacter?.uuid === uuid) setInspectCharacter(null);
+      if (selectedCharacter?.uuid === uuid) setSelectedCharacter(null);
+      setActiveTab('explore');
+    },
+    [editingCharacter?.uuid, inspectCharacter?.uuid, selectedCharacter?.uuid]
+  );
 
-  const handleDeleteCharacter = async (char: Character) => {
-    try {
-      const token = await getIdToken();
-      const headers: Record<string, string> = {};
-      if (token) headers['Authorization'] = `Bearer ${token}`;
+  const handleDeleteCharacter = useCallback(
+    async (char: Character) => {
+      try {
+        const token = await getIdToken();
+        const headers: Record<string, string> = {};
+        if (token) headers['Authorization'] = `Bearer ${token}`;
 
-      const res = await fetch(
-        `/api/characters/${encodeURIComponent(char.uuid)}?guestId=${encodeURIComponent(guestId)}`,
-        { method: 'DELETE', headers }
-      );
-      if (res.ok) {
-        handleCharacterDeletedByUuid(char.uuid);
+        const res = await fetch(
+          `/api/characters/${encodeURIComponent(char.uuid)}?guestId=${encodeURIComponent(guestId)}`,
+          { method: 'DELETE', headers }
+        );
+        if (res.ok) {
+          handleCharacterDeletedByUuid(char.uuid);
+        }
+      } catch (err) {
+        console.error('Failed to delete character:', err);
       }
-    } catch (err) {
-      console.error('Failed to delete character:', err);
-    }
-  };
+    },
+    [getIdToken, guestId, handleCharacterDeletedByUuid]
+  );
 
-  const displayedCharacters =
-    activeTab === 'favorites'
-      ? characters.filter((c) => likedIds.includes(c.id))
-      : characters;
+  const handleQuickViewCharacter = useCallback((c: Character) => {
+    setInspectCharacter(c);
+  }, []);
+
+  const handleSelectCharacterToChat = useCallback((c: Character) => {
+    setSelectedCharacter(c);
+  }, []);
+
+  const likedIdSet = useMemo(() => new Set(likedIds), [likedIds]);
+
+  const displayedCharacters = useMemo(
+    () =>
+      activeTab === 'favorites'
+        ? characters.filter((c) => likedIdSet.has(c.id))
+        : characters,
+    [activeTab, characters, likedIdSet]
+  );
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col font-sans selection:bg-purple-500 selection:text-white">
@@ -396,6 +553,7 @@ function PalaceApp() {
               setEditingPersona(p);
               setIsPersonaModalOpen(true);
             }}
+            onNavigateProfile={(username) => setActiveTab('profile', username)}
             onSelectCharacter={(c) => {
               setChatLaunchOptions(null);
               setSelectedCharacter(c);
@@ -432,11 +590,14 @@ function PalaceApp() {
             }}
           />
         ) : activeTab === 'lorebooks' ? (
-          <LorebookStudio />
+          <LorebookStudio
+            onViewCreator={(username) => setActiveTab('profile', username)}
+          />
         ) : activeTab === 'stages' ? (
           <StagesManager
             activeStageId={activeStage?.id || ''}
             onSelectStage={handleSelectStage}
+            onViewCreator={(username) => setActiveTab('profile', username)}
           />
         ) : activeTab === 'personas' ? (
           <PersonaGallery
@@ -523,20 +684,52 @@ function PalaceApp() {
                   />
                 </div>
 
-                <div className="flex items-center gap-2 overflow-x-auto pb-1 no-scrollbar flex-1">
-                  {exploreTags.map((tag) => (
-                    <button
-                      key={tag}
-                      onClick={() => setSelectedTag(tag)}
-                      className={`shrink-0 rounded-xl px-3.5 py-1.5 text-xs font-semibold transition-all border ${
-                        selectedTag === tag
-                          ? 'border-purple-500 bg-purple-600/30 text-purple-200 shadow-md shadow-purple-950/40'
-                          : 'border-zinc-800 bg-zinc-900/80 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
-                      }`}
+                <div
+                  ref={tagsScrollRef}
+                  className="flex items-center gap-2 overflow-x-auto pb-1 no-scrollbar flex-1"
+                >
+                  {exploreTagChunks.map((chunk, chunkIdx) => (
+                    <ViewportSlot
+                      key={`tag-chunk-${chunkIdx}-${chunk[0] || ''}`}
+                      axis="horizontal"
+                      rootRef={tagsScrollRef}
+                      rootMargin="0px 280px"
+                      estimatedWidth={880}
+                      estimatedHeight={34}
+                      initialVisible={chunkIdx === 0}
+                      forceMounted={chunk.includes(selectedTag)}
+                      className="flex items-center gap-2 shrink-0"
+                      placeholderClassName="rounded-xl bg-zinc-900/30 border border-zinc-800/30"
+                      testId="explore-tag-chunk"
                     >
-                      {tag === 'All' ? 'All Tags' : `#${tag}`}
-                    </button>
+                      {chunk.map((tag) => (
+                        <button
+                          key={tag}
+                          onClick={() => setSelectedTag(tag)}
+                          className={`shrink-0 rounded-xl px-3.5 py-1.5 text-xs font-semibold transition-all border ${
+                            selectedTag === tag
+                              ? 'border-purple-500 bg-purple-600/30 text-purple-200 shadow-md shadow-purple-950/40'
+                              : 'border-zinc-800 bg-zinc-900/80 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
+                          }`}
+                        >
+                          {tag === 'All' ? 'All Tags' : `#${tag}`}
+                        </button>
+                      ))}
+                    </ViewportSlot>
                   ))}
+
+                  {hasMoreTags && (
+                    <div ref={tagsSentinelRef} className="shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => fetchDbTags(debouncedTagFilter, tagsNextOffsetRef.current, true)}
+                        disabled={loadingMoreTags}
+                        className="shrink-0 rounded-xl border border-zinc-800 bg-zinc-900/80 px-3 py-1.5 text-xs font-semibold text-zinc-400 hover:text-zinc-200"
+                      >
+                        {loadingMoreTags ? 'Loading...' : '+ More Tags'}
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -618,24 +811,46 @@ function PalaceApp() {
                 </button>
               </div>
             ) : (
-              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
-                {displayedCharacters.map((char) => (
-                  <CharacterCard
-                    key={char.id}
-                    character={char}
-                    isLiked={likedIds.includes(char.id)}
-                    canEdit={isOwnedByRequester(char.creatorId, {
-                      userUid: user?.uid,
-                      guestId,
-                    })}
-                    onLikeToggle={handleLikeToggle}
-                    onSelectCharacter={(c) => setSelectedCharacter(c)}
-                    onQuickView={(c) => setInspectCharacter(c)}
-                    onEditCharacter={handleStartEditCharacter}
-                    onDeleteCharacter={handleDeleteCharacter}
-                  />
-                ))}
-              </div>
+              <>
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
+                  {displayedCharacters.map((char, idx) => (
+                    <ViewportSlot
+                      key={char.id}
+                      estimatedHeight={440}
+                      rootMargin="600px 0px"
+                      initialVisible={idx < 8}
+                      testId="character-slot"
+                    >
+                      <CharacterCard
+                        character={char}
+                        isLiked={likedIdSet.has(char.id)}
+                        canEdit={isOwnedByRequester(char.creatorId, {
+                          userUid: user?.uid,
+                          guestId,
+                        })}
+                        onLikeToggle={handleLikeToggle}
+                        onSelectCharacter={handleSelectCharacterToChat}
+                        onQuickView={handleQuickViewCharacter}
+                        onEditCharacter={handleStartEditCharacter}
+                        onDeleteCharacter={handleDeleteCharacter}
+                      />
+                    </ViewportSlot>
+                  ))}
+                </div>
+
+                {activeTab === 'explore' && hasMoreChars && (
+                  <div ref={charSentinelRef} className="flex justify-center pt-4 pb-2">
+                    <button
+                      type="button"
+                      onClick={() => fetchCharacters(charNextOffsetRef.current, true)}
+                      disabled={loadingMoreChars}
+                      className="rounded-xl border border-purple-500/40 bg-zinc-900/90 px-5 py-2.5 text-xs font-bold text-purple-200 hover:bg-purple-900/40 transition-all"
+                    >
+                      {loadingMoreChars ? 'Loading more characters...' : 'Load More Characters'}
+                    </button>
+                  </div>
+                )}
+              </>
             )}
           </div>
         )}
