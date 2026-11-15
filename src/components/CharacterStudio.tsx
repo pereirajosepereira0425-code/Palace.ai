@@ -26,17 +26,21 @@ import {
   Paperclip,
   File as FileIcon,
   Edit3,
+  Heart,
+  Layers,
 } from 'lucide-react';
 import {
   parseTavernCard,
   exportTavernCard,
   extractChubPngCard,
 } from '../utils/characterUtils.ts';
-import { Character, ContentRating } from '../types/index.ts';
+import { Character, ContentRating, SharedLorebookRecord } from '../types/index.ts';
 import { useAuth } from '../context/AuthContext.tsx';
 import { WikiEditor } from './WikiEditor.tsx';
 import { ThreeAvatarViewer } from './ThreeAvatarViewer.tsx';
 import { TagInput } from './TagInput.tsx';
+import { ViewportSlot } from './ViewportSlot.tsx';
+import { mergeCharacterLoreEntries, parseLorebookEntries } from '../utils/communityUtils.ts';
 
 interface AttachedCharacterFile {
   id: string;
@@ -53,6 +57,8 @@ interface CharacterStudioProps {
   onCancel: () => void;
   forkFromCharacter?: Character | null;
   editingCharacter?: Character | null;
+  pendingLorebook?: SharedLorebookRecord | null;
+  onConsumePendingLorebook?: () => void;
 }
 
 const AVATAR_PRESETS = [
@@ -80,8 +86,10 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
   onCancel,
   forkFromCharacter,
   editingCharacter,
+  pendingLorebook,
+  onConsumePendingLorebook,
 }) => {
-  const { getIdToken, guestId } = useAuth();
+  const { user, profile, getIdToken, guestId } = useAuth();
 
   // Chub.ai Full Specification Fields
   const [name, setName] = useState('');
@@ -111,6 +119,14 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
   const [model3dUrl, setModel3dUrl] = useState('');
   const [model3dPose, setModel3dPose] = useState('neutral');
   const [loreEntries, setLoreEntries] = useState<Array<{ key: string; content: string }>>([]);
+  const [attachedLoreNames, setAttachedLoreNames] = useState<string[]>([]);
+  const [showLorePicker, setShowLorePicker] = useState<boolean>(true);
+  const [lorePickerTab, setLorePickerTab] = useState<'community' | 'saved'>('community');
+  const [communityLorebooks, setCommunityLorebooks] = useState<SharedLorebookRecord[]>([]);
+  const [loadingLorebooks, setLoadingLorebooks] = useState(false);
+  const [loreSearch, setLoreSearch] = useState('');
+  const [loreAttachNotice, setLoreAttachNotice] = useState('');
+  const [publishingLorebook, setPublishingLorebook] = useState(false);
   const [attachedFiles, setAttachedFiles] = useState<AttachedCharacterFile[]>([]);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -180,14 +196,8 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
 
     setModel3dUrl(sourceChar.model3dUrl || '');
     setModel3dPose(sourceChar.model3dPose || 'neutral');
-    try {
-      const lore = typeof sourceChar.lorebook === 'string'
-        ? JSON.parse(sourceChar.lorebook)
-        : sourceChar.lorebook;
-      setLoreEntries(Array.isArray(lore) ? lore : []);
-    } catch {
-      setLoreEntries([]);
-    }
+    setLoreEntries(mergeCharacterLoreEntries([], sourceChar.lorebook).entries);
+    setAttachedLoreNames([]);
     setConfirmingDelete(false);
     setSuccessMsg(
       editingCharacter
@@ -507,7 +517,152 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
     setAlternateGreetings(alternateGreetings.filter((_, i) => i !== index));
   };
 
-  // Lorebook helpers
+  // Lorebook helpers + Community / Saved multi-lorebook attachment
+  const savedLorebooks = React.useMemo<
+    Array<{ id: string; name: string; description?: string; scanDepth?: number; entries: any[] }>
+  >(() => {
+    try {
+      const raw = localStorage.getItem('palace_saved_lorebooks');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch {}
+    return [];
+  }, [showLorePicker]);
+
+  React.useEffect(() => {
+    let active = true;
+    const loadCommunityLorebooks = async () => {
+      try {
+        setLoadingLorebooks(true);
+        const params = new URLSearchParams();
+        params.set('limit', '36');
+        params.set('sort', 'popular');
+        if (loreSearch.trim()) params.set('search', loreSearch.trim());
+        const res = await fetch(`/api/lorebooks?${params.toString()}`);
+        if (res.ok && active) {
+          const data = await res.json();
+          setCommunityLorebooks(Array.isArray(data.lorebooks) ? data.lorebooks : []);
+        }
+      } catch (err) {
+        console.warn('Could not load community lorebooks:', err);
+      } finally {
+        if (active) setLoadingLorebooks(false);
+      }
+    };
+    const t = setTimeout(loadCommunityLorebooks, loreSearch.trim() ? 180 : 0);
+    return () => {
+      active = false;
+      clearTimeout(t);
+    };
+  }, [loreSearch]);
+
+  const attachLorebookToCharacter = (
+    sourceName: string,
+    rawEntries: unknown,
+    sharedUuid?: string
+  ) => {
+    setLoreEntries((prev) => {
+      const merged = mergeCharacterLoreEntries(prev, rawEntries);
+      setLoreAttachNotice(
+        merged.addedCount > 0
+          ? `Attached "${sourceName}" (+${merged.addedCount} entries, ${merged.entries.length} total)`
+          : `All entries from "${sourceName}" are already in this character's lorebook.`
+      );
+      setTimeout(() => setLoreAttachNotice(''), 4000);
+      return merged.entries;
+    });
+    setAttachedLoreNames((prev) => (prev.includes(sourceName) ? prev : [...prev, sourceName]));
+
+    if (sharedUuid) {
+      setCommunityLorebooks((prev) =>
+        prev.map((lb) => (lb.uuid === sharedUuid ? { ...lb, useCount: lb.useCount + 1 } : lb))
+      );
+      fetch(`/api/lorebooks/${encodeURIComponent(sharedUuid)}/use`, { method: 'POST' }).catch(
+        console.error
+      );
+    }
+  };
+
+  React.useEffect(() => {
+    if (!pendingLorebook) return;
+    attachLorebookToCharacter(pendingLorebook.name, pendingLorebook.entries, pendingLorebook.uuid);
+    setShowLorePicker(true);
+    onConsumePendingLorebook?.();
+  }, [pendingLorebook]);
+
+  const handleImportLorebookFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const parsed = JSON.parse((ev.target?.result as string) || '{}');
+        const rawList =
+          parsed.entries ||
+          (parsed.character_book && parsed.character_book.entries) ||
+          (Array.isArray(parsed) ? parsed : []);
+        const lbTitle = parsed.name || parsed.title || file.name.replace(/\.json$/i, '');
+        attachLorebookToCharacter(lbTitle, rawList);
+      } catch (err: any) {
+        setLoreAttachNotice(`Invalid lorebook JSON: ${err?.message || 'Unable to parse'}`);
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const handlePublishCharacterLorebook = async () => {
+    const cleanEntries = loreEntries.filter((e) => e.key.trim() || e.content.trim());
+    if (cleanEntries.length === 0) {
+      setLoreAttachNotice('Add at least one lorebook entry before publishing.');
+      return;
+    }
+    try {
+      setPublishingLorebook(true);
+      const token = await getIdToken();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
+      const loreTitle = name.trim() ? `${name.trim()} World Lorebook` : 'Character World Lorebook';
+      const res = await fetch('/api/lorebooks', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          name: loreTitle,
+          description: tagline.trim() || `Shared lorebook from ${name.trim() || 'Palace Character'}.`,
+          scanDepth: 4,
+          entries: cleanEntries.map((item, idx) => ({
+            id: `char_lb_${idx + 1}`,
+            keys: item.key,
+            secondaryKeys: '',
+            content: item.content,
+            insertionOrder: 100,
+            enabled: true,
+            constant: false,
+            caseSensitive: false,
+          })),
+          tags: selectedTags.slice(0, 5),
+          isPublic: true,
+          guestId,
+          creatorName: profile?.username || profile?.displayName || user?.displayName || 'Community',
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.lorebook) {
+          setCommunityLorebooks((prev) => [data.lorebook, ...prev]);
+          setLoreAttachNotice(`🌐 Published "${data.lorebook.name}" to Community Lorebooks!`);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to publish character lorebook:', err);
+    } finally {
+      setPublishingLorebook(false);
+    }
+  };
+
   const addLoreEntry = () => {
     setLoreEntries([...loreEntries, { key: '', content: '' }]);
   };
@@ -1448,61 +1603,274 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
           subtitle="Type ANY custom tag and press Enter to save it permanently to the Chub.ai tag database, or toggle existing tags below."
         />
 
-        {/* Lorebook Trigger Entries */}
-        <div className="rounded-3xl border border-zinc-800/80 bg-zinc-900/40 p-6 backdrop-blur-md space-y-4">
-          <div className="flex items-center justify-between">
+        {/* Lorebook Trigger Entries + Community / Saved Lorebook Picker */}
+        <div
+          data-testid="character-lorebook-section"
+          className="rounded-3xl border border-zinc-800/80 bg-zinc-900/40 p-6 backdrop-blur-md space-y-4"
+        >
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
               <h3 className="text-xs font-bold uppercase tracking-wider text-purple-400 flex items-center gap-1.5">
                 <BookOpen className="h-4 w-4" />
-                <span>World Lorebook / Trigger Entries</span>
+                <span>World Lorebook / Trigger Entries ({loreEntries.length})</span>
               </h3>
               <p className="text-xs text-zinc-400 mt-0.5">
-                Dynamic knowledge injected when keywords appear during conversation
+                Attach any number of Community or Saved lorebooks onto this character, or add custom keyword triggers.
               </p>
             </div>
-            <button
-              type="button"
-              onClick={addLoreEntry}
-              className="flex items-center gap-1 rounded-xl bg-purple-600/30 border border-purple-500/50 px-3 py-1.5 text-xs font-semibold text-purple-200 hover:bg-purple-600/50 transition-all"
-            >
-              <Plus className="h-3.5 w-3.5" />
-              <span>Add Lore Key</span>
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setShowLorePicker((v) => !v)}
+                className={`flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition-all cursor-pointer ${
+                  showLorePicker
+                    ? 'border-amber-400/50 bg-amber-500/20 text-amber-200'
+                    : 'border-zinc-700 bg-zinc-900 text-zinc-300 hover:border-purple-500/50'
+                }`}
+              >
+                <Layers className="h-3.5 w-3.5" />
+                <span>{showLorePicker ? 'Hide Shared Lorebooks' : 'Attach Shared Lorebooks'}</span>
+              </button>
+
+              <label className="flex items-center gap-1.5 cursor-pointer rounded-xl border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs font-semibold text-zinc-200 hover:border-purple-500/50 transition-all">
+                <Upload className="h-3.5 w-3.5 text-purple-400" />
+                <span>Import Lore JSON</span>
+                <input
+                  type="file"
+                  accept=".json,application/json,*/*"
+                  onChange={handleImportLorebookFile}
+                  className="hidden"
+                />
+              </label>
+
+              {loreEntries.length > 0 && (
+                <button
+                  type="button"
+                  disabled={publishingLorebook}
+                  onClick={handlePublishCharacterLorebook}
+                  className="flex items-center gap-1.5 rounded-xl border border-emerald-500/40 bg-emerald-950/30 px-3 py-1.5 text-xs font-semibold text-emerald-200 hover:bg-emerald-900/40 transition-all cursor-pointer disabled:opacity-50"
+                >
+                  <Globe className="h-3.5 w-3.5" />
+                  <span>{publishingLorebook ? 'Sharing...' : 'Share Lorebook'}</span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={addLoreEntry}
+                className="flex items-center gap-1 rounded-xl bg-purple-600/30 border border-purple-500/50 px-3 py-1.5 text-xs font-semibold text-purple-200 hover:bg-purple-600/50 transition-all cursor-pointer"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                <span>Add Lore Key</span>
+              </button>
+            </div>
           </div>
+
+          {loreAttachNotice && (
+            <div className="rounded-xl border border-emerald-500/40 bg-emerald-950/30 px-3.5 py-2 text-xs font-semibold text-emerald-200 flex items-center gap-2">
+              <Check className="h-3.5 w-3.5 shrink-0" />
+              <span>{loreAttachNotice}</span>
+            </div>
+          )}
+
+          {attachedLoreNames.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+              <span className="text-zinc-400 font-semibold">Attached Lorebooks:</span>
+              {attachedLoreNames.map((lbName) => (
+                <span
+                  key={lbName}
+                  className="inline-flex items-center gap-1 rounded-lg border border-amber-400/40 bg-amber-500/15 px-2.5 py-0.5 font-semibold text-amber-200"
+                >
+                  <BookOpen className="h-3 w-3" />
+                  {lbName}
+                </span>
+              ))}
+            </div>
+          )}
+
+          {/* Community & Saved Lorebooks Picker Panel */}
+          {showLorePicker && (
+            <div className="rounded-2xl border border-purple-500/25 bg-zinc-950/80 p-4 space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                <div className="flex items-center gap-1.5 rounded-xl border border-zinc-800 bg-zinc-900/90 p-1 self-start">
+                  <button
+                    type="button"
+                    onClick={() => setLorePickerTab('community')}
+                    className={`flex items-center gap-1.5 rounded-lg px-3 py-1 text-xs font-bold transition-all cursor-pointer ${
+                      lorePickerTab === 'community'
+                        ? 'bg-purple-600/40 text-purple-100 border border-purple-500/40'
+                        : 'text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    <Globe className="h-3.5 w-3.5 text-amber-300" />
+                    <span>Community Lorebooks ({communityLorebooks.length})</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setLorePickerTab('saved')}
+                    className={`flex items-center gap-1.5 rounded-lg px-3 py-1 text-xs font-bold transition-all cursor-pointer ${
+                      lorePickerTab === 'saved'
+                        ? 'bg-purple-600/40 text-purple-100 border border-purple-500/40'
+                        : 'text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    <BookOpen className="h-3.5 w-3.5 text-purple-300" />
+                    <span>Your Saved ({savedLorebooks.length})</span>
+                  </button>
+                </div>
+
+                {lorePickerTab === 'community' && (
+                  <div className="relative flex-1 max-w-sm">
+                    <Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500" />
+                    <input
+                      type="text"
+                      aria-label="Search community lorebooks to attach"
+                      value={loreSearch}
+                      onChange={(e) => setLoreSearch(e.target.value)}
+                      placeholder="Search community lorebooks..."
+                      className="w-full rounded-xl border border-zinc-800 bg-zinc-900 pl-8 pr-3 py-1.5 text-xs text-zinc-100 placeholder-zinc-500 focus:border-purple-500 focus:outline-none"
+                    />
+                  </div>
+                )}
+              </div>
+
+              {lorePickerTab === 'community' ? (
+                loadingLorebooks ? (
+                  <div className="py-6 text-center text-xs text-zinc-400">Loading community lorebooks...</div>
+                ) : communityLorebooks.length === 0 ? (
+                  <div className="py-6 text-center text-xs text-zinc-500">
+                    No matching community lorebooks found. Publish one in Lorebook Studio or click &quot;Share Lorebook&quot; above!
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 max-h-60 overflow-y-auto pr-1">
+                    {communityLorebooks.map((lb) => {
+                      const lbEntries = parseLorebookEntries(lb.entries);
+                      const isAttached = attachedLoreNames.includes(lb.name);
+                      return (
+                        <div
+                          key={lb.uuid}
+                          className={`rounded-xl border p-3 flex items-center justify-between gap-3 ${
+                            isAttached
+                              ? 'border-amber-400/50 bg-amber-950/15'
+                              : 'border-zinc-800 bg-zinc-900/70 hover:border-purple-500/40'
+                          }`}
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs font-bold text-white truncate">{lb.name}</span>
+                              <span className="text-[10px] font-semibold text-purple-300 shrink-0">
+                                {lbEntries.length} entries
+                              </span>
+                            </div>
+                            <div className="text-[11px] text-zinc-400 truncate">
+                              @{lb.creatorName} &bull; {lb.useCount} uses &bull; {lb.description}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => attachLorebookToCharacter(lb.name, lb.entries, lb.uuid)}
+                            className={`flex items-center gap-1 rounded-xl px-3 py-1.5 text-[11px] font-bold shrink-0 transition-all cursor-pointer ${
+                              isAttached
+                                ? 'bg-amber-500/20 border border-amber-400/40 text-amber-200 hover:bg-amber-500/30'
+                                : 'bg-purple-600 text-white hover:bg-purple-500'
+                            }`}
+                          >
+                            <Plus className="h-3 w-3" />
+                            <span>{isAttached ? 'Re-Attach' : 'Attach'}</span>
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )
+              ) : savedLorebooks.length === 0 ? (
+                <div className="py-6 text-center text-xs text-zinc-500">
+                  No locally saved lorebooks yet. Save lorebooks in the Lorebooks tab and they will appear here!
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 max-h-60 overflow-y-auto pr-1">
+                  {savedLorebooks.map((lb) => {
+                    const isAttached = attachedLoreNames.includes(lb.name);
+                    return (
+                      <div
+                        key={lb.id}
+                        className="rounded-xl border border-zinc-800 bg-zinc-900/70 p-3 flex items-center justify-between gap-3"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="text-xs font-bold text-white truncate">{lb.name}</div>
+                          <div className="text-[11px] text-zinc-400 truncate">
+                            {lb.entries?.length || 0} entries &bull; {lb.description}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => attachLorebookToCharacter(lb.name, lb.entries)}
+                          className="flex items-center gap-1 rounded-xl bg-purple-600 px-3 py-1.5 text-[11px] font-bold text-white hover:bg-purple-500 shrink-0 cursor-pointer"
+                        >
+                          <Plus className="h-3 w-3" />
+                          <span>{isAttached ? 'Re-Attach' : 'Attach'}</span>
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
 
           {loreEntries.length === 0 ? (
             <p className="text-xs text-zinc-500 italic py-2">
-              No lorebook entries added yet. Click &quot;Add Lore Key&quot; to define kingdoms, factions, or spells.
+              No lorebook entries attached yet. Click &quot;Attach&quot; on any Community Lorebook above or click &quot;Add Lore Key&quot; to create entries!
             </p>
           ) : (
-            <div className="space-y-3">
-              {loreEntries.map((entry, idx) => (
-                <div
-                  key={idx}
-                  className="flex flex-col sm:flex-row gap-2 rounded-2xl border border-zinc-800 bg-zinc-950 p-3 items-start"
+            <div className="space-y-2.5">
+              <div className="flex items-center justify-end">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLoreEntries([]);
+                    setAttachedLoreNames([]);
+                  }}
+                  className="text-[11px] font-semibold text-rose-400 hover:text-rose-300 cursor-pointer"
                 >
-                  <input
-                    type="text"
-                    value={entry.key}
-                    onChange={(e) => updateLoreEntry(idx, e.target.value, entry.content)}
-                    placeholder="Keyword / Trigger (e.g. Citadel)"
-                    className="w-full sm:w-48 rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs font-semibold text-zinc-100 placeholder-zinc-600 focus:border-purple-500 focus:outline-none"
-                  />
-                  <input
-                    type="text"
-                    value={entry.content}
-                    onChange={(e) => updateLoreEntry(idx, entry.key, e.target.value)}
-                    placeholder="Lore information injected when trigger is mentioned..."
-                    className="flex-1 rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs text-zinc-200 placeholder-zinc-600 focus:border-purple-500 focus:outline-none"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => removeLoreEntry(idx)}
-                    className="p-2 text-zinc-500 hover:text-rose-400 transition-colors"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                </div>
+                  Clear All Entries ({loreEntries.length})
+                </button>
+              </div>
+              {loreEntries.map((entry, idx) => (
+                <ViewportSlot
+                  key={`${idx}-${entry.key.slice(0, 16)}`}
+                  estimatedHeight={82}
+                  rootMargin="120px 0px"
+                  initialVisible={idx < 8}
+                  testId="char-lore-entry-slot"
+                >
+                  <div className="flex flex-col sm:flex-row gap-2 rounded-2xl border border-zinc-800 bg-zinc-950 p-3 items-start">
+                    <input
+                      type="text"
+                      value={entry.key}
+                      onChange={(e) => updateLoreEntry(idx, e.target.value, entry.content)}
+                      placeholder="Keyword / Trigger (e.g. Citadel, Malakor)"
+                      aria-label={`Lorebook keyword ${idx + 1}`}
+                      className="w-full sm:w-52 rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs font-semibold text-zinc-100 placeholder-zinc-600 focus:border-purple-500 focus:outline-none shrink-0"
+                    />
+                    <textarea
+                      rows={2}
+                      value={entry.content}
+                      onChange={(e) => updateLoreEntry(idx, entry.key, e.target.value)}
+                      placeholder="Lore information injected when trigger is mentioned..."
+                      aria-label={`Lorebook content ${idx + 1}`}
+                      className="w-full flex-1 rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs text-zinc-200 placeholder-zinc-600 focus:border-purple-500 focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => removeLoreEntry(idx)}
+                      aria-label={`Remove lorebook entry ${idx + 1}`}
+                      className="p-2 text-zinc-500 hover:text-rose-400 transition-colors shrink-0"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </div>
+                </ViewportSlot>
               ))}
             </div>
           )}

@@ -112,6 +112,10 @@ export interface ChatMessage {
   activeSwipeIndex?: number;
   imageUrl?: string | null;
   poseName?: string | null;
+  speakerCharacterUuid?: string | null;
+  speakerName?: string | null;
+  speakerAvatar?: string | null;
+  modelUsed?: string | null;
   createdAt?: string;
 }
 
@@ -122,6 +126,63 @@ export interface TagRecord {
   usageCount: number;
   createdBy: string;
   createdAt?: string;
+}
+
+export interface GroupParticipant {
+  uuid: string;
+  name: string;
+  avatar: string;
+  tagline: string;
+  description?: string;
+  personality?: string | null;
+  systemPrompt?: string;
+  scenario?: string | null;
+  lorebook?: string | null;
+  muted?: boolean;
+  isHost?: boolean;
+}
+
+export interface EnsembleModelSlot {
+  id: string;
+  label?: string;
+  role?: 'drafter' | 'critic' | 'lorekeeper' | 'dialogue' | 'synthesizer';
+  apiProvider?: string;
+  apiUrl?: string;
+  apiKey?: string;
+}
+
+export interface ModelEnsembleConfig {
+  enabled: boolean;
+  mode: 'single' | 'council' | 'critique_polish' | 'specialist_split';
+  models: EnsembleModelSlot[];
+  synthesizerModelId: string;
+}
+
+export type BrawlTriggerMode = 'auto' | 'manual' | 'off';
+
+export interface BrawlFighterState {
+  id: string;
+  name: string;
+  hp: number;
+  maxHp: number;
+  stamina: number;
+  maxStamina: number;
+  stance: 'balanced' | 'aggressive' | 'guarding' | 'evasive' | 'berserk';
+  statuses: string[];
+  atk: number;
+  def: number;
+}
+
+export interface BrawlCombatState {
+  active: boolean;
+  triggerMode: BrawlTriggerMode;
+  round: number;
+  player: BrawlFighterState;
+  opponent: BrawlFighterState;
+  comboStreak: number;
+  log: string[];
+  outcome: 'ongoing' | 'victory' | 'defeat' | 'truce' | 'fled' | null;
+  startedBy: 'auto' | 'manual' | null;
 }
 
 export interface ChubChatSettings {
@@ -167,6 +228,11 @@ export interface ChubChatSettings {
     joinOrder: 'round_robin' | 'natural_turn' | 'manual';
     silenceThreshold: number;
   };
+  groupParticipants?: GroupParticipant[];
+  responderMode?: 'auto' | 'specific' | 'round_robin' | 'all';
+  selectedResponderUuid?: string | null;
+  ensembleConfig?: ModelEnsembleConfig;
+  brawlState?: BrawlCombatState;
 }
 
 export interface ChatSession {

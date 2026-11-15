@@ -806,8 +806,8 @@ export const StagesManager: React.FC<StagesManagerProps> = ({
                 <ViewportSlot
                   key={stage.id}
                   estimatedHeight={252}
-                  rootMargin="500px 0px"
-                  initialVisible={idx < 6}
+                  rootMargin="120px 0px"
+                  initialVisible={idx < 4}
                   testId="stage-slot"
                 >
                   <div
@@ -1005,8 +1005,8 @@ export const StagesManager: React.FC<StagesManagerProps> = ({
                     <ViewportSlot
                       key={shared.uuid}
                       estimatedHeight={280}
-                      rootMargin="500px 0px"
-                      initialVisible={idx < 6}
+                      rootMargin="120px 0px"
+                      initialVisible={idx < 4}
                       testId="community-stage-slot"
                     >
                       <div

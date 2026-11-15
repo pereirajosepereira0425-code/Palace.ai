@@ -2,6 +2,7 @@ import { db } from './index.ts';
 import { characters, chatMessages, chatSessions, userFavorites } from './schema.ts';
 import { desc, eq, ilike, and, inArray, sql } from 'drizzle-orm';
 import { isOwnedByRequester, type RequesterIdentity } from '../utils/ownership.ts';
+import { mergeCharacterLoreEntries } from '../utils/communityUtils.ts';
 
 export interface CharacterInsert {
   uuid: string;
@@ -89,6 +90,21 @@ export async function getCharacterByUuid(uuid: string) {
   } catch (error) {
     console.error('getCharacterByUuid failed:', error);
     throw new Error('Failed to fetch character', { cause: error });
+  }
+}
+
+export async function getUserCharacters(userIds: string | string[]) {
+  try {
+    const idList = Array.isArray(userIds) ? userIds.filter(Boolean) : [userIds].filter(Boolean);
+    if (idList.length === 0) return [];
+    return await db
+      .select()
+      .from(characters)
+      .where(inArray(characters.creatorId, idList))
+      .orderBy(desc(characters.createdAt));
+  } catch (error) {
+    console.error('getUserCharacters failed:', error);
+    return [];
   }
 }
 
@@ -180,6 +196,44 @@ export async function updateCharacter(
   } catch (error) {
     console.error('updateCharacter failed:', error);
     throw new Error('Failed to update character', { cause: error });
+  }
+}
+
+export async function attachCharacterLorebook(
+  uuid: string,
+  requester: RequesterIdentity,
+  incomingEntries: unknown,
+  mode: 'merge' | 'replace' = 'merge'
+): Promise<
+  | { status: 'ok'; character: any; addedCount: number; totalEntries: number }
+  | { status: 'not_found' }
+  | { status: 'forbidden' }
+> {
+  try {
+    const existing = await getCharacterByUuid(uuid);
+    if (!existing) return { status: 'not_found' };
+    if (!isOwnedByRequester(existing.creatorId, requester)) {
+      return { status: 'forbidden' };
+    }
+
+    const baseEntries = mode === 'replace' ? [] : mergeCharacterLoreEntries([], existing.lorebook).entries;
+    const merged = mergeCharacterLoreEntries(baseEntries, incomingEntries);
+
+    const updated = await db
+      .update(characters)
+      .set({ lorebook: JSON.stringify(merged.entries) })
+      .where(eq(characters.id, existing.id))
+      .returning();
+
+    return {
+      status: 'ok',
+      character: updated[0],
+      addedCount: merged.addedCount,
+      totalEntries: merged.entries.length,
+    };
+  } catch (error) {
+    console.error('attachCharacterLorebook failed:', error);
+    throw new Error('Failed to attach lorebook to character', { cause: error });
   }
 }
 

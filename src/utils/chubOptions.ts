@@ -125,7 +125,7 @@ export const CHUB_API_PROVIDERS: ChubOptionItem[] = [
     id: 'anthropic',
     label: 'Anthropic (Claude Direct / Proxy)',
     badge: 'Commercial',
-    description: 'Connect Claude 3.7 Sonnet, Claude 3.5 Sonnet, and Claude Opus.',
+    description: 'Connect Claude Opus 5.5, Claude 3.7 Sonnet, Claude 3.5 Sonnet, and Claude Opus.',
     defaultUrl: 'https://api.anthropic.com/v1',
     defaultModel: 'claude-3-7-sonnet-20250219',
   },
@@ -226,6 +226,7 @@ export const CHUB_ACTIVE_MODELS: ChubOptionItem[] = [
   { id: 'gemini-4-argon', label: 'Gemini 4 Argon (High Thinking)', provider: 'Google Gemini', description: 'Deep reasoning psychological roleplay engine.' },
   { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro', provider: 'Google Gemini', description: 'Extended context literary & multi-character roleplay.' },
   // Anthropic Claude
+  { id: 'claude-opus-5-5', label: 'Claude Opus 5.5', provider: 'Anthropic', description: 'Flagship Anthropic model for deeply literary roleplay, nuance, and lorebook consistency.' },
   { id: 'claude-3-7-sonnet-20250219', label: 'Claude 3.7 Sonnet', provider: 'Anthropic', description: 'Nuanced prose, extended thinking & complex character voices.' },
   { id: 'claude-3-5-sonnet', label: 'Claude 3.5 Sonnet', provider: 'Anthropic', description: 'Beloved roleplay dialogue & subtle characterization.' },
   { id: 'claude-3-5-haiku', label: 'Claude 3.5 Haiku', provider: 'Anthropic', description: 'Fast, low-cost Anthropic model.' },

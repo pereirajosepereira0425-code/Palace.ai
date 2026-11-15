@@ -92,8 +92,8 @@ export const UserChatsView: React.FC<UserChatsViewProps> = ({ onSelectCharacter 
               <ViewportSlot
                 key={sess.id}
                 estimatedHeight={100}
-                rootMargin="450px 0px"
-                initialVisible={idx < 8}
+                rootMargin="120px 0px"
+                initialVisible={idx < 6}
                 testId="user-chat-slot"
               >
                 <div

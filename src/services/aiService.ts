@@ -14,6 +14,12 @@ import {
   looksLikeHtmlResponse,
   validateConnectionInputs,
 } from '../utils/apiErrorUtils.ts';
+import {
+  buildEnsembleStagePrompt,
+  buildEnsembleSynthesisPrompt,
+  normalizeEnsembleConfig,
+} from '../utils/chatOrchestration.ts';
+import type { ModelEnsembleConfig } from '../types/index.ts';
 
 // Initialize server-side GoogleGenAI client with telemetry User-Agent header
 const ai = new GoogleGenAI({
@@ -53,6 +59,9 @@ export interface GenerateReplyOptions {
   chubApiKey?: string | null;
   chubApiUrl?: string | null;
   chatSummary?: string | null;
+  groupSceneCharacters?: string[];
+  brawlContextPrompt?: string | null;
+  ensembleConfig?: ModelEnsembleConfig | null;
   chatSettings?: {
     promptStructure?: string;
     apiProvider?: string;
@@ -105,16 +114,61 @@ export function isQuotaOrRateLimitError(err: any): boolean {
   );
 }
 
-function generateSmartRoleplayFallback(character: CharacterContext, userMessage?: string, history?: ChatMessageItem[]): string {
+function isPermanentGeminiAuthError(err: any): boolean {
+  const str = (
+    typeof err === 'string'
+      ? err
+      : `${err?.message || ''} ${err?.status || ''} ${JSON.stringify(err || {})}`
+  ).toLowerCase();
+  return (
+    str.includes('permission_denied') ||
+    str.includes('access_token_scope_insufficient') ||
+    str.includes('api_key_invalid') ||
+    str.includes('api key not valid') ||
+    str.includes('api key should be set') ||
+    str.includes('"code":403') ||
+    str.includes('"code":401')
+  );
+}
+
+async function callGeminiWithTimeout<T>(promiseFactory: () => Promise<T>, timeoutMs: number = 9000): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promiseFactory(),
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`Gemini request timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function generateSmartRoleplayFallback(
+  character: CharacterContext,
+  userMessage?: string,
+  history?: ChatMessageItem[],
+  brawlContextPrompt?: string | null
+): string {
   const name = character.name || 'Character';
   const lastUserText = userMessage || history?.slice(-1)[0]?.content || '';
   void lastUserText;
+
+  if (brawlContextPrompt && brawlContextPrompt.trim()) {
+    return `*Pivots sharply on one heel as sparks scatter across the floor, sweeping into a tight defensive combat stance and launching a calibrated counter-strike toward your flank!* "Not bad—let's see how you handle the counter-pressure!"`;
+  }
 
   if (name.toLowerCase().includes('peppa')) {
     return `*Stomps firmly in a glimmering muddy puddle, splashing golden droplets high into the air.* "Oink! You have my full, undivided attention! Tell me where our multiverse expedition ventures next!"`;
   }
   if (name.toLowerCase().includes('nextor')) {
     return `*The elevator bulbs crackle violently as black ichor drips from the ceiling seams.* "Y-y-you... keep speaking into the dark... thinking you can change the tape? Nextor,wƴx remembers every floor you stepped on."`;
+  }
+  if (name.toLowerCase().includes('malakor')) {
+    return `*Swirls a crystal chalice of crimson reserve lazily while dark velvet shadows coil around the vaulted hearth.* "Bold of you to demand my audience, mortal. Speak plainly—your boldness amuses me."`;
   }
   if (character.personality && character.personality.toLowerCase().includes('tsundere')) {
     return `*Crosses my arms and averts my eyes with a soft scoff.* "Hmph! Don't look at me like that... It's not like I was waiting for you to say something interesting or anything! Go on, what's on your mind?"`;
@@ -281,6 +335,16 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
     systemInstructionParts.push(getPromptStructureGuidance(chatSettings.promptStructure));
   }
 
+  if (options.groupSceneCharacters && options.groupSceneCharacters.length > 0) {
+    systemInstructionParts.push(
+      `[GROUP CHAT SCENE ROSTER]: Also present in this scene: ${options.groupSceneCharacters.join(', ')}. Speak ONLY as "${character.name}" (never write dialogue or actions for the user or the other characters, though you can react to or address them naturally).`
+    );
+  }
+
+  if (options.brawlContextPrompt && options.brawlContextPrompt.trim()) {
+    systemInstructionParts.push(options.brawlContextPrompt.trim());
+  }
+
   systemInstructionParts.push(
     `Writing Style Rules:`,
     `- Use asterisks *like this* for actions, thoughts, sensory observations, and physical movements.`,
@@ -422,16 +486,20 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
 
   if (isHighThinking) {
     try {
-      const response = await ai.models.generateContent({
-        model: 'gemini-4-argon',
-        contents,
-        config: {
-          systemInstruction,
-          thinkingConfig: {
-            thinkingLevel: ThinkingLevel.HIGH,
-          },
-        },
-      });
+      const response = await callGeminiWithTimeout(
+        () =>
+          ai.models.generateContent({
+            model: 'gemini-4-argon',
+            contents,
+            config: {
+              systemInstruction,
+              thinkingConfig: {
+                thinkingLevel: ThinkingLevel.HIGH,
+              },
+            },
+          }),
+        11000
+      );
 
       const reply = response.text || '...';
       return {
@@ -442,6 +510,14 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
       };
     } catch (argonError: any) {
       console.warn('gemini-4-argon attempt failed, falling back to gemini-3.8-flash:', argonError?.message);
+      if (isPermanentGeminiAuthError(argonError)) {
+        return {
+          reply: generateSmartRoleplayFallback(character, userMessage, history, options.brawlContextPrompt),
+          thinkingProcess: 'Gemini credentials unavailable in local runtime. Resonant in-character continuity active.',
+          groundingSources: [],
+          modelUsed: 'gemini-3.8-flash (Safe Continuity)',
+        };
+      }
     }
   }
 
@@ -460,11 +536,15 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
   }
 
   try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents,
-      config,
-    });
+    const response = await callGeminiWithTimeout(
+      () =>
+        ai.models.generateContent({
+          model: 'gemini-3.8-flash',
+          contents,
+          config,
+        }),
+      9000
+    );
 
     const reply = response.text || '...';
     const groundingSources: GroundingSource[] = [];
@@ -489,14 +569,18 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
   } catch (err: any) {
     console.warn('Initial generateContent failed, attempting safe fallback:', err?.message);
 
-    // If search grounding was attempted, retry without tools first
-    if (searchGrounding) {
+    // If search grounding was attempted and error isn't a permanent auth failure, retry without tools
+    if (searchGrounding && !isPermanentGeminiAuthError(err)) {
       try {
-        const ungroundedResponse = await ai.models.generateContent({
-          model: 'gemini-3.8-flash',
-          contents,
-          config: { systemInstruction },
-        });
+        const ungroundedResponse = await callGeminiWithTimeout(
+          () =>
+            ai.models.generateContent({
+              model: 'gemini-3.8-flash',
+              contents,
+              config: { systemInstruction },
+            }),
+          8000
+        );
 
         return {
           reply: ungroundedResponse.text || '...',
@@ -511,7 +595,7 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
     // If any quota or rate limit error occurred, provide smart in-character fallback
     if (isQuotaOrRateLimitError(err)) {
       return {
-        reply: generateSmartRoleplayFallback(character, userMessage, history),
+        reply: generateSmartRoleplayFallback(character, userMessage, history, options.brawlContextPrompt),
         thinkingProcess: 'Quota limitation reached on API key. Intelligent contextual roleplay fallback generated.',
         groundingSources: [],
         modelUsed: 'gemini-3.8-flash (Resonant Roleplay Mode)',
@@ -519,11 +603,185 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
     }
 
     return {
-      reply: generateSmartRoleplayFallback(character, userMessage, history),
+      reply: generateSmartRoleplayFallback(character, userMessage, history, options.brawlContextPrompt),
       thinkingProcess: 'Temporary connection anomaly. Roleplay continuity preserved.',
       groundingSources: [],
       modelUsed: 'gemini-3.8-flash (Safe Continuity)',
     };
+  }
+}
+
+/**
+ * Multi-Model Collaboration Engine:
+ * Coordinates 2-4 models (Council, Critique & Polish, or Specialist Split) across
+ * configured Gemini / external providers and synthesizes one unified in-character response.
+ */
+export async function generateMultiModelCharacterReply(
+  options: GenerateReplyOptions
+): Promise<GenerateReplyResult> {
+  const normalized = normalizeEnsembleConfig(options.ensembleConfig);
+  if (!normalized.enabled || normalized.mode === 'single' || normalized.models.length < 2) {
+    return generateCharacterReply(options);
+  }
+
+  const slots = normalized.models;
+  const traceLines: string[] = [
+    `Multi-Model Mode: ${normalized.mode.replace(/_/g, ' ').toUpperCase()} (${slots.map((s) => s.id).join(' + ')})`,
+  ];
+  let geminiNativeAuthBlocked = false;
+
+  const runSlot = async (
+    slot: (typeof slots)[number],
+    stageInstruction: string,
+    tempOffset: number = 0
+  ): Promise<string> => {
+    const slotId = slot.id;
+    const isGeminiArgon = slotId === 'gemini-4-argon';
+    const isGeminiNative = slotId.startsWith('gemini-');
+    const slotKey = (slot.apiKey || options.chubApiKey || '').trim();
+    const slotUrl = (
+      slot.apiUrl ||
+      (slot.apiProvider && slot.apiProvider !== 'gemini'
+        ? CHUB_API_PROVIDERS.find((p) => p.id === slot.apiProvider)?.defaultUrl
+        : undefined) ||
+      (!isGeminiNative ? options.chubApiUrl || undefined : undefined)
+    )?.trim();
+
+    if (!isGeminiNative && slotKey && slotUrl) {
+      const extRes = await generateCharacterReply({
+        ...options,
+        userMessage: stageInstruction,
+        modelPreference: slotId,
+        thinkingLevel: 'OFF',
+        searchGrounding: false,
+        chubApiKey: slotKey,
+        chubApiUrl: slotUrl,
+        chatSettings: {
+          ...options.chatSettings,
+          apiProvider: slot.apiProvider || options.chatSettings?.apiProvider || 'custom_openai',
+          model: slotId,
+          temperature: Math.min(1.4, Math.max(0.2, (options.chatSettings?.temperature ?? 0.85) + tempOffset)),
+          maxNewTokens: Math.min(500, options.chatSettings?.maxNewTokens ?? 400),
+        },
+      });
+      return extRes.reply;
+    }
+
+    const geminiModel = isGeminiArgon ? 'gemini-4-argon' : 'gemini-3.8-flash';
+    if (!geminiNativeAuthBlocked) {
+      try {
+        const response = await callGeminiWithTimeout(
+          () =>
+            ai.models.generateContent({
+              model: geminiModel,
+              contents: [
+                ...options.history.slice(-8).map((m) => ({
+                  role: (m.sender === 'user' ? 'user' : 'model') as 'user' | 'model',
+                  parts: [{ text: m.content }],
+                })),
+                { role: 'user' as const, parts: [{ text: stageInstruction }] },
+              ],
+              config: {
+                systemInstruction: `Stay in character as "${options.character.name}". ${options.character.systemPrompt}${
+                  options.brawlContextPrompt ? `\n\n${options.brawlContextPrompt}` : ''
+                }`,
+                temperature: Math.min(1.35, Math.max(0.3, (options.chatSettings?.temperature ?? 0.85) + tempOffset)),
+                ...(isGeminiArgon ? { thinkingConfig: { thinkingLevel: ThinkingLevel.HIGH } } : {}),
+              },
+            }),
+          8000
+        );
+        const txt = (response.text || '').trim();
+        if (txt) return txt;
+      } catch (err: any) {
+        console.warn(`Ensemble slot ${slotId} fallback:`, err?.message);
+        if (isPermanentGeminiAuthError(err)) {
+          geminiNativeAuthBlocked = true;
+        }
+      }
+    }
+
+    return generateSmartRoleplayFallback(
+      options.character,
+      options.userMessage,
+      options.history,
+      options.brawlContextPrompt
+    );
+  };
+
+  try {
+    const candidates: Array<{ modelId: string; role?: string; text: string }> = [];
+
+    if (normalized.mode === 'critique_polish') {
+      const drafter = slots[0];
+      const polisher = slots[1];
+      const draftPrompt = buildEnsembleStagePrompt({
+        mode: 'critique_polish',
+        role: drafter.role || 'drafter',
+        characterName: options.character.name,
+        userMessage: options.userMessage,
+      });
+      const draftText = await runSlot(drafter, draftPrompt, 0.05);
+      traceLines.push(`1. [${drafter.id} · Draft]: ${draftText.slice(0, 180)}...`);
+
+      const polishPrompt = buildEnsembleStagePrompt({
+        mode: 'critique_polish',
+        role: polisher.role || 'critic',
+        characterName: options.character.name,
+        userMessage: options.userMessage,
+        draftSoFar: draftText,
+      });
+      const polishedText = await runSlot(polisher, polishPrompt, -0.05);
+      traceLines.push(`2. [${polisher.id} · Critique & Polish]: Applied depth, sensory texture & continuity check.`);
+
+      return {
+        reply: polishedText || draftText,
+        thinkingProcess: traceLines.join('\n\n'),
+        groundingSources: [],
+        modelUsed: `Ensemble (${drafter.id} -> ${polisher.id})`,
+      };
+    }
+
+    // 'council' or 'specialist_split': run contributors in parallel then synthesize
+    const results = await Promise.all(
+      slots.map(async (slot, idx) => {
+        const prompt = buildEnsembleStagePrompt({
+          mode: normalized.mode,
+          role: slot.role || (idx === 0 ? 'drafter' : 'lorekeeper'),
+          characterName: options.character.name,
+          userMessage: options.userMessage,
+        });
+        const text = await runSlot(slot, prompt, idx === 0 ? -0.05 : 0.1);
+        return { modelId: slot.id, role: slot.role, text };
+      })
+    );
+
+    results.forEach((r, idx) => {
+      traceLines.push(`${idx + 1}. [${r.modelId} · ${r.role || 'contributor'}]: ${r.text.slice(0, 180)}...`);
+      candidates.push(r);
+    });
+
+    const synthSlot =
+      slots.find((s) => s.id === normalized.synthesizerModelId) || slots[0];
+    const synthPrompt = buildEnsembleSynthesisPrompt({
+      characterName: options.character.name,
+      mode: normalized.mode,
+      candidates,
+      userMessage: options.userMessage,
+    });
+
+    const finalReply = await runSlot(synthSlot, synthPrompt, -0.08);
+    traceLines.push(`Synthesizer [${synthSlot.id}]: Merged all ${candidates.length} perspectives into final reply.`);
+
+    return {
+      reply: finalReply || candidates[0].text,
+      thinkingProcess: traceLines.join('\n\n'),
+      groundingSources: [],
+      modelUsed: `Ensemble (${slots.map((s) => s.id).join(' + ')})`,
+    };
+  } catch (err: any) {
+    console.warn('Multi-model ensemble error, falling back cleanly:', err?.message);
+    return generateCharacterReply(options);
   }
 }
 

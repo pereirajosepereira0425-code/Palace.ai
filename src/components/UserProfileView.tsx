@@ -715,8 +715,8 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({
                   <ViewportSlot
                     key={char.id}
                     estimatedHeight={440}
-                    rootMargin="550px 0px"
-                    initialVisible={idx < 8}
+                    rootMargin="120px 0px"
+                    initialVisible={idx < 4}
                     testId="profile-character-slot"
                   >
                     <CharacterCard
@@ -765,8 +765,8 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({
                     <ViewportSlot
                       key={persona.id}
                       estimatedHeight={200}
-                      rootMargin="450px 0px"
-                      initialVisible={idx < 6}
+                      rootMargin="120px 0px"
+                      initialVisible={idx < 4}
                       testId="profile-persona-slot"
                     >
                       <div
@@ -867,8 +867,8 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({
                     <ViewportSlot
                       key={stage.uuid}
                       estimatedHeight={190}
-                      rootMargin="400px 0px"
-                      initialVisible={idx < 6}
+                      rootMargin="120px 0px"
+                      initialVisible={idx < 4}
                       testId="profile-stage-slot"
                     >
                       <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/80">
@@ -918,8 +918,8 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({
                       <ViewportSlot
                         key={lb.uuid}
                         estimatedHeight={120}
-                        rootMargin="400px 0px"
-                        initialVisible={idx < 6}
+                        rootMargin="120px 0px"
+                        initialVisible={idx < 4}
                         testId="profile-lorebook-slot"
                       >
                         <div className={`rounded-2xl border ${theme.accentBorder} ${cardSurfaceClass} p-4 space-y-2`}>
@@ -983,8 +983,8 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({
                     <ViewportSlot
                       key={`${activeTab}-${person.uid}-${idx}`}
                       estimatedHeight={110}
-                      rootMargin="400px 0px"
-                      initialVisible={idx < 9}
+                      rootMargin="120px 0px"
+                      initialVisible={idx < 6}
                       testId={`profile-${activeTab}-slot`}
                     >
                       <div
@@ -1081,8 +1081,8 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({
                 <ViewportSlot
                   key={idx}
                   estimatedHeight={82}
-                  rootMargin="450px 0px"
-                  initialVisible={idx < 10}
+                  rootMargin="120px 0px"
+                  initialVisible={idx < 6}
                   testId="profile-wall-slot"
                 >
                   <div className="rounded-2xl border border-zinc-800 bg-zinc-950/70 p-4 space-y-1">

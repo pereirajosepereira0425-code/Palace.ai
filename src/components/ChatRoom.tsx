@@ -36,8 +36,20 @@ import {
   Eye,
   Save,
   X,
+  Users,
+  Layers,
+  Swords,
 } from 'lucide-react';
-import { Character, ChatMessage, ChatSession, ChubChatSettings } from '../types/index.ts';
+import {
+  BrawlCombatState,
+  BrawlTriggerMode,
+  Character,
+  ChatMessage,
+  ChatSession,
+  ChubChatSettings,
+  GroupParticipant,
+  ModelEnsembleConfig,
+} from '../types/index.ts';
 import { useAuth } from '../context/AuthContext.tsx';
 import { formatRoleplaySegments, exportTavernCard } from '../utils/characterUtils.ts';
 import { Stage } from './StagesManager.tsx';
@@ -53,6 +65,23 @@ import {
 import { ThreeAvatarViewer } from './ThreeAvatarViewer.tsx';
 import { ViewportSlot } from './ViewportSlot.tsx';
 import { mergeGlobalActiveLorebook } from '../utils/communityUtils.ts';
+import {
+  BrawlArenaHud,
+  GroupRosterModal,
+  MultiModelModal,
+} from './ChatCollaborationPanels.tsx';
+import {
+  type BrawlMoveType,
+  type ResponderSelectionMode,
+  addParticipantToRoster,
+  createInitialBrawlState,
+  detectCombatTrigger,
+  inferBrawlMoveFromText,
+  normalizeEnsembleConfig,
+  removeParticipantFromRoster,
+  resolveBrawlExchange,
+  toGroupParticipant,
+} from '../utils/chatOrchestration.ts';
 
 interface ChatRoomProps {
   character: Character;
@@ -95,6 +124,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   const [allSessions, setAllSessions] = useState<ChatSession[]>([]);
   const [preview3dPose, setPreview3dPose] = useState<string | null>(null);
   const [confirmReset, setConfirmReset] = useState(false);
+  const [isGroupModalOpen, setIsGroupModalOpen] = useState(false);
+  const [isMultiModelModalOpen, setIsMultiModelModalOpen] = useState(false);
 
   // Chub Chat Settings
   const [chubSettings, setChubSettings] = useState<ChubChatSettings>(() => {
@@ -104,6 +135,25 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     } catch {}
     return DEFAULT_CHUB_SETTINGS;
   });
+
+  // Group Chat Roster & Speaker Picker State
+  const [roster, setRoster] = useState<GroupParticipant[]>(() => [
+    toGroupParticipant(character, true),
+  ]);
+  const [responderMode, setResponderMode] = useState<ResponderSelectionMode>('auto');
+  const [selectedResponderUuid, setSelectedResponderUuid] = useState<string | null>(
+    character.uuid
+  );
+
+  // Multi-Model Collaboration State
+  const [ensembleConfig, setEnsembleConfig] = useState<ModelEnsembleConfig>(() =>
+    normalizeEnsembleConfig(chubSettings.ensembleConfig)
+  );
+
+  // BrawlChat.ai Text-Fighting Arena State
+  const [brawlState, setBrawlState] = useState<BrawlCombatState>(() =>
+    createInitialBrawlState(persona.name, character.name, 'auto', null)
+  );
 
   const getEffectiveApiPayload = () => {
     let presetsData: any = {};
@@ -259,6 +309,32 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             setUnsavedCount(sessData.session.unsavedMessageCount || 0);
             if (sessData.session.showAiImages !== undefined) {
               setShowAiImages(Boolean(sessData.session.showAiImages));
+            }
+            // Hydrate group roster, multi-model collaboration, and BrawlChat state
+            try {
+              const savedChatCfg =
+                typeof sessData.session.chatSettings === 'string'
+                  ? JSON.parse(sessData.session.chatSettings || '{}')
+                  : sessData.session.chatSettings || {};
+              if (Array.isArray(savedChatCfg.groupParticipants) && savedChatCfg.groupParticipants.length > 0) {
+                setRoster(savedChatCfg.groupParticipants);
+              } else {
+                setRoster([toGroupParticipant(character, true)]);
+              }
+              if (savedChatCfg.responderMode) setResponderMode(savedChatCfg.responderMode);
+              if (savedChatCfg.selectedResponderUuid) {
+                setSelectedResponderUuid(savedChatCfg.selectedResponderUuid);
+              }
+              if (savedChatCfg.ensembleConfig) {
+                setEnsembleConfig(normalizeEnsembleConfig(savedChatCfg.ensembleConfig));
+              }
+              if (savedChatCfg.brawlState) {
+                setBrawlState(savedChatCfg.brawlState);
+              } else {
+                setBrawlState(createInitialBrawlState(persona.name, character.name, 'auto', null));
+              }
+            } catch {
+              setRoster([toGroupParticipant(character, true)]);
             }
           }
         }
@@ -494,27 +570,198 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     });
   };
 
-  // Send message
-  const handleSendMessage = async (textToSend?: string) => {
-    const text = textToSend || inputText;
-    if (!text.trim() || sending || !session) return;
+  // Persist Group Roster, Multi-Model Config, & BrawlState onto chatSettings
+  const persistSessionCollaboration = async (overrides: {
+    groupParticipants?: GroupParticipant[];
+    responderMode?: ResponderSelectionMode;
+    selectedResponderUuid?: string | null;
+    ensembleConfig?: ModelEnsembleConfig;
+    brawlState?: BrawlCombatState;
+  }) => {
+    const nextSettings: ChubChatSettings = {
+      ...chubSettings,
+      groupParticipants: overrides.groupParticipants ?? roster,
+      responderMode: overrides.responderMode ?? responderMode,
+      selectedResponderUuid:
+        overrides.selectedResponderUuid !== undefined
+          ? overrides.selectedResponderUuid
+          : selectedResponderUuid,
+      ensembleConfig: overrides.ensembleConfig ?? ensembleConfig,
+      brawlState: overrides.brawlState ?? brawlState,
+    };
+    setChubSettings(nextSettings);
+    try {
+      localStorage.setItem('palace_chub_chat_settings', JSON.stringify(nextSettings));
+    } catch {}
+    if (session?.uuid) {
+      fetch(`/api/chat/settings/${session.uuid}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chatSettings: nextSettings }),
+      }).catch(console.error);
+    }
+  };
+
+  const handleAddGroupParticipant = (charToAdd: Character) => {
+    const nextRoster = addParticipantToRoster(roster, toGroupParticipant(charToAdd, false));
+    setRoster(nextRoster);
+    persistSessionCollaboration({ groupParticipants: nextRoster });
+  };
+
+  const handleRemoveGroupParticipant = (uuidToRemove: string) => {
+    const { nextRoster, removed } = removeParticipantFromRoster(roster, uuidToRemove);
+    if (!removed) return;
+    const nextSelected =
+      selectedResponderUuid === uuidToRemove ? nextRoster[0]?.uuid || character.uuid : selectedResponderUuid;
+    const nextMode =
+      selectedResponderUuid === uuidToRemove && responderMode === 'specific' ? 'auto' : responderMode;
+    setRoster(nextRoster);
+    setSelectedResponderUuid(nextSelected);
+    setResponderMode(nextMode);
+    persistSessionCollaboration({
+      groupParticipants: nextRoster,
+      selectedResponderUuid: nextSelected,
+      responderMode: nextMode,
+    });
+  };
+
+  const handleToggleParticipantMute = (uuid: string) => {
+    const nextRoster = roster.map((p) => (p.uuid === uuid ? { ...p, muted: !p.muted } : p));
+    setRoster(nextRoster);
+    persistSessionCollaboration({ groupParticipants: nextRoster });
+  };
+
+  const handleChangeResponderMode = (
+    nextMode: ResponderSelectionMode,
+    nextUuid?: string | null
+  ) => {
+    const resolvedUuid = nextUuid !== undefined ? nextUuid : selectedResponderUuid;
+    setResponderMode(nextMode);
+    setSelectedResponderUuid(resolvedUuid);
+    persistSessionCollaboration({
+      responderMode: nextMode,
+      selectedResponderUuid: resolvedUuid,
+    });
+  };
+
+  const handleSaveEnsemble = (nextEnsemble: ModelEnsembleConfig) => {
+    const normalized = normalizeEnsembleConfig(nextEnsemble);
+    setEnsembleConfig(normalized);
+    persistSessionCollaboration({ ensembleConfig: normalized });
+  };
+
+  const getActiveOpponentName = () => {
+    const picked = roster.find((p) => p.uuid === selectedResponderUuid);
+    return picked?.name || character.name;
+  };
+
+  const handleToggleBrawlManual = () => {
+    if (brawlState.active) {
+      const ended: BrawlCombatState = {
+        ...brawlState,
+        active: false,
+        outcome: 'truce',
+        log: [...brawlState.log, `Fight ended manually — returning to normal roleplay.`].slice(-12),
+      };
+      setBrawlState(ended);
+      persistSessionCollaboration({ brawlState: ended });
+    } else {
+      const started = createInitialBrawlState(
+        persona.name,
+        getActiveOpponentName(),
+        brawlState.triggerMode === 'off' ? 'manual' : brawlState.triggerMode,
+        'manual'
+      );
+      setBrawlState(started);
+      persistSessionCollaboration({ brawlState: started });
+    }
+  };
+
+  const handleChangeBrawlTriggerMode = (nextMode: BrawlTriggerMode) => {
+    const updated: BrawlCombatState = {
+      ...brawlState,
+      triggerMode: nextMode,
+      ...(nextMode === 'off' && brawlState.active ? { active: false, outcome: 'truce' } : {}),
+    };
+    setBrawlState(updated);
+    persistSessionCollaboration({ brawlState: updated });
+  };
+
+  // Send message (or prompt a specific speaker directly without typing user text)
+  const handleSendMessage = async (
+    textToSend?: string,
+    opts?: {
+      triggerWithoutUserMessage?: boolean;
+      explicitMoveType?: BrawlMoveType;
+      explicitResponderUuid?: string;
+    }
+  ) => {
+    const triggerOnly = Boolean(opts?.triggerWithoutUserMessage);
+    const text = textToSend !== undefined ? textToSend : inputText;
+    if ((!text.trim() && !triggerOnly) || sending || !session) return;
 
     const userText = text.trim();
-    setInputText('');
+    if (!triggerOnly) setInputText('');
     setPersonaReaction(null);
     setSending(true);
 
-    const lastMsg = messages[messages.length - 1];
+    // Advance BrawlChat Text Fighting State (Auto or Manual)
+    let nextBrawlState = brawlState;
+    if (userText) {
+      if (brawlState.triggerMode === 'auto') {
+        const signal = detectCombatTrigger(userText, brawlState.active);
+        if (signal === 'start') {
+          const fresh = createInitialBrawlState(
+            persona.name,
+            getActiveOpponentName(),
+            'auto',
+            'auto'
+          );
+          nextBrawlState = resolveBrawlExchange(
+            fresh,
+            opts?.explicitMoveType || inferBrawlMoveFromText(userText),
+            userText
+          );
+        } else if (signal === 'end') {
+          nextBrawlState = {
+            ...brawlState,
+            active: false,
+            outcome: 'truce',
+            log: [...brawlState.log, `Fight concluded peacefully — returning to normal RP.`].slice(-12),
+          };
+        } else if (brawlState.active) {
+          nextBrawlState = resolveBrawlExchange(
+            brawlState,
+            opts?.explicitMoveType || inferBrawlMoveFromText(userText),
+            userText
+          );
+        }
+      } else if (brawlState.active) {
+        nextBrawlState = resolveBrawlExchange(
+          brawlState,
+          opts?.explicitMoveType || inferBrawlMoveFromText(userText),
+          userText
+        );
+      }
+      if (nextBrawlState !== brawlState) {
+        setBrawlState(nextBrawlState);
+      }
+    }
 
-    const tempUserMsg: ChatMessage = {
-      id: Date.now(),
-      sessionId: session.uuid,
-      sender: 'user',
-      content: userText,
-      parentId: lastMsg ? lastMsg.id : null,
-      createdAt: new Date().toISOString(),
-    };
-    setMessages((prev) => [...prev, tempUserMsg]);
+    const lastMsg = messages[messages.length - 1];
+    const tempUserMsg: ChatMessage | null = triggerOnly
+      ? null
+      : {
+          id: Date.now(),
+          sessionId: session.uuid,
+          sender: 'user',
+          content: userText,
+          parentId: lastMsg ? lastMsg.id : null,
+          createdAt: new Date().toISOString(),
+        };
+    if (tempUserMsg) {
+      setMessages((prev) => [...prev, tempUserMsg]);
+    }
 
     try {
       const token = await getIdToken();
@@ -522,18 +769,34 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       if (token) headers['Authorization'] = `Bearer ${token}`;
 
       const { chubApiKey, chubApiUrl, mergedSettings } = getEffectiveApiPayload();
+      const effectiveSettings: ChubChatSettings = {
+        ...mergedSettings,
+        groupParticipants: roster,
+        responderMode,
+        selectedResponderUuid,
+        ensembleConfig,
+        brawlState: nextBrawlState,
+      };
 
       let preGeneratedReply: string | undefined;
       let preGeneratedModelUsed: string | undefined;
 
+      const isSingleStandardSpeaker =
+        roster.length <= 1 && !ensembleConfig.enabled && !nextBrawlState.active && !triggerOnly;
       const shouldTryBrowserDirect =
-        mergedSettings.apiProvider &&
-        mergedSettings.apiProvider !== 'gemini' &&
-        (isChubUrlOrProvider(mergedSettings.apiProvider, chubApiUrl) ||
-          isLocalProviderOrUrl(mergedSettings.apiProvider, chubApiUrl));
+        isSingleStandardSpeaker &&
+        effectiveSettings.apiProvider &&
+        effectiveSettings.apiProvider !== 'gemini' &&
+        (isChubUrlOrProvider(effectiveSettings.apiProvider, chubApiUrl) ||
+          isLocalProviderOrUrl(effectiveSettings.apiProvider, chubApiUrl));
 
       const activeGlobalLoreRaw = localStorage.getItem('palace_active_lorebook');
-      const effectiveLorebook = mergeGlobalActiveLorebook(character.lorebook, activeGlobalLoreRaw);
+      const personaLoreRaw = persona.lorebook || null;
+      const effectiveLorebook = mergeGlobalActiveLorebook(
+        character.lorebook,
+        activeGlobalLoreRaw,
+        personaLoreRaw
+      );
 
       if (shouldTryBrowserDirect) {
         const directRes = await tryBrowserExternalCompletion({
@@ -555,11 +818,11 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           })),
           userMessage: userText,
           chatSummary,
-          apiProvider: mergedSettings.apiProvider,
+          apiProvider: effectiveSettings.apiProvider,
           apiUrl: chubApiUrl,
           apiKey: chubApiKey,
-          model: mergedSettings.model,
-          chatSettings: mergedSettings,
+          model: effectiveSettings.model,
+          chatSettings: effectiveSettings,
         });
 
         if (directRes.ok) {
@@ -576,6 +839,10 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         }
       }
 
+      const targetUuidForSend =
+        opts?.explicitResponderUuid ||
+        (responderMode === 'specific' ? selectedResponderUuid || character.uuid : undefined);
+
       const res = await fetch('/api/chat/message', {
         method: 'POST',
         headers,
@@ -584,13 +851,18 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           content: userText,
           userPersona: `${persona.name}: ${persona.bio}`,
           parentId: lastMsg ? lastMsg.id : null,
-          chatSettings: mergedSettings,
+          chatSettings: effectiveSettings,
           chubApiKey,
           chubApiUrl,
           showAiImages,
           extraLorebook: activeGlobalLoreRaw,
+          personaLorebook: personaLoreRaw,
           preGeneratedReply,
           preGeneratedModelUsed,
+          respondingCharacterUuid: targetUuidForSend,
+          triggerWithoutUserMessage: triggerOnly,
+          ensembleConfig,
+          brawlState: nextBrawlState,
         }),
       });
 
@@ -610,12 +882,25 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       }
 
       const data = parsed.data;
-      setMessages((prev) => [
-        ...prev.filter((m) => m.id !== tempUserMsg.id),
-        data.userMessage,
-        data.characterMessage,
-      ]);
-      setUnsavedCount((prev) => prev + 2);
+      const newReplies: ChatMessage[] = Array.isArray(data.generatedMessages)
+        ? data.generatedMessages
+        : data.characterMessage
+          ? [data.characterMessage]
+          : [];
+
+      setMessages((prev) => {
+        const cleaned = tempUserMsg ? prev.filter((m) => m.id !== tempUserMsg.id) : prev;
+        return [
+          ...cleaned,
+          ...(data.userMessage ? [data.userMessage] : []),
+          ...newReplies,
+        ];
+      });
+      setUnsavedCount((prev) => prev + (data.userMessage ? 1 : 0) + newReplies.length);
+
+      if (nextBrawlState !== brawlState) {
+        persistSessionCollaboration({ brawlState: nextBrawlState });
+      }
     } catch (err: any) {
       console.error('Error sending message:', err);
       setMessages((prev) => [
@@ -678,7 +963,12 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
               isLocalProviderOrUrl(mergedSettings.apiProvider, chubApiUrl));
 
           const activeGlobalLoreRaw = localStorage.getItem('palace_active_lorebook');
-          const effectiveLorebook = mergeGlobalActiveLorebook(character.lorebook, activeGlobalLoreRaw);
+          const personaLoreRaw = persona.lorebook || null;
+          const effectiveLorebook = mergeGlobalActiveLorebook(
+            character.lorebook,
+            activeGlobalLoreRaw,
+            personaLoreRaw
+          );
 
           if (shouldTryBrowserDirect) {
             const msgIndex = messages.findIndex((m) => m.id === messageId);
@@ -723,6 +1013,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
               chubApiKey,
               chubApiUrl,
               extraLorebook: activeGlobalLoreRaw,
+              personaLorebook: personaLoreRaw,
               preGeneratedReply,
             }),
           });
@@ -994,20 +1285,73 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             <span className="hidden md:inline font-semibold">All Chats</span>
           </button>
 
+          {/* Group Characters Manager */}
+          <button
+            type="button"
+            data-testid="open-group-modal-btn"
+            onClick={() => setIsGroupModalOpen(true)}
+            className={`flex items-center gap-1 rounded-xl border px-2.5 py-1.5 text-xs font-semibold transition-all cursor-pointer whitespace-nowrap ${
+              roster.length > 1
+                ? 'border-purple-500/60 bg-purple-600/25 text-purple-100'
+                : 'border-zinc-800 bg-zinc-900/90 text-zinc-300 hover:bg-zinc-800'
+            }`}
+            title="Manage Group Chat Characters & Who Replies"
+          >
+            <Users className="h-3.5 w-3.5 text-purple-400" />
+            <span className="hidden sm:inline">Group</span>
+            <span className="font-mono tabular-nums text-[11px]">({roster.length})</span>
+          </button>
+
+          {/* Multi-Model Collaboration Team */}
+          <button
+            type="button"
+            data-testid="open-multimodel-modal-btn"
+            onClick={() => setIsMultiModelModalOpen(true)}
+            className={`flex items-center gap-1 rounded-xl border px-2.5 py-1.5 text-xs font-semibold transition-all cursor-pointer whitespace-nowrap ${
+              ensembleConfig.enabled
+                ? 'border-indigo-500/70 bg-indigo-600/30 text-indigo-100'
+                : 'border-zinc-800 bg-zinc-900/90 text-zinc-300 hover:bg-zinc-800'
+            }`}
+            title="Configure Multiple AI Models Working Together"
+          >
+            <Layers className="h-3.5 w-3.5 text-indigo-400" />
+            <span className="hidden md:inline">
+              {ensembleConfig.enabled ? `Models (${ensembleConfig.models.length})` : 'Models'}
+            </span>
+          </button>
+
+          {/* BrawlChat Text Fighting Toggle */}
+          <button
+            type="button"
+            data-testid="brawl-toggle-btn"
+            onClick={handleToggleBrawlManual}
+            className={`flex items-center gap-1 rounded-xl border px-2.5 py-1.5 text-xs font-semibold transition-all cursor-pointer whitespace-nowrap ${
+              brawlState.active
+                ? 'border-rose-500 bg-rose-600/30 text-rose-100'
+                : 'border-zinc-800 bg-zinc-900/90 text-zinc-300 hover:border-rose-500/40 hover:bg-zinc-800'
+            }`}
+            title="Start or End BrawlChat.ai Text-Fighting Mode"
+          >
+            <Swords className="h-3.5 w-3.5 text-rose-400" />
+            <span className="hidden md:inline">
+              {brawlState.active ? 'End Fight' : 'Text Fight'}
+            </span>
+          </button>
+
           {/* Chat Tree Modal Button */}
           <button
             onClick={() => setIsChatTreeOpen(true)}
-            className="flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900/90 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 transition-all cursor-pointer"
+            className="flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900/90 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 transition-all cursor-pointer whitespace-nowrap shrink-0"
             title="View Full Chat Tree & Alternate Branches"
           >
             <GitBranch className="h-3.5 w-3.5 text-indigo-400" />
-            <span className="hidden lg:inline font-semibold">Chat Tree</span>
+            <span className="hidden xl:inline font-semibold">Tree</span>
           </button>
 
           {/* Show AI Images Toggle */}
           <button
             onClick={handleToggleAiImages}
-            className={`flex items-center gap-1 rounded-xl px-2.5 py-1.5 text-xs font-semibold border transition-all cursor-pointer ${
+            className={`flex items-center gap-1 rounded-xl px-2.5 py-1.5 text-xs font-semibold border transition-all cursor-pointer whitespace-nowrap shrink-0 ${
               showAiImages
                 ? 'border-purple-400 bg-purple-600/30 text-purple-200 shadow-sm'
                 : 'border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-200'
@@ -1022,7 +1366,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           {/* Chub Chat Settings */}
           <button
             onClick={() => setIsChubSettingsOpen(true)}
-            className="flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900/90 p-2 text-zinc-300 hover:border-purple-500/50 hover:bg-zinc-800 transition-all cursor-pointer"
+            className="flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900/90 p-2 text-zinc-300 hover:border-purple-500/50 hover:bg-zinc-800 transition-all cursor-pointer shrink-0"
             title="Chub.ai Chat Settings (https://chub.ai/chats/177970478)"
           >
             <Settings2 className="h-4 w-4 text-purple-400" />
@@ -1032,7 +1376,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           <button
             type="button"
             onClick={handleToggleAvatarBackground}
-            className={`flex items-center gap-1 rounded-xl px-2.5 py-1.5 text-xs font-semibold border transition-all cursor-pointer ${
+            className={`flex items-center gap-1 rounded-xl px-2.5 py-1.5 text-xs font-semibold border transition-all cursor-pointer whitespace-nowrap shrink-0 ${
               useAvatarBg
                 ? 'border-fuchsia-400 bg-fuchsia-600/30 text-fuchsia-100 shadow-sm'
                 : 'border-zinc-800 bg-zinc-900/90 text-zinc-300 hover:border-purple-500/50 hover:bg-zinc-800'
@@ -1048,11 +1392,11 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           {onOpenStages && (
             <button
               onClick={onOpenStages}
-              className="hidden sm:flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900/90 px-2.5 py-1.5 text-xs text-indigo-300 hover:border-indigo-500/50 hover:bg-zinc-800 transition-all"
+              className="hidden sm:flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900/90 px-2.5 py-1.5 text-xs text-indigo-300 hover:border-indigo-500/50 hover:bg-zinc-800 transition-all cursor-pointer whitespace-nowrap shrink-0"
               title="Change Atmosphere Stage (/my_stages)"
             >
-              <Palette className="h-3.5 w-3.5" />
-              <span className="hidden lg:inline font-semibold">
+              <Palette className="h-3.5 w-3.5 shrink-0" />
+              <span className="hidden lg:inline font-semibold max-w-[110px] truncate">
                 {activeStage ? activeStage.name : 'Stage'}
               </span>
             </button>
@@ -1179,6 +1523,21 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         )}
       </div>
 
+      {/* BrawlChat.ai Text Fighting Arena HUD (Auto on fight or Manual) */}
+      <BrawlArenaHud
+        brawlState={brawlState}
+        onChangeTriggerMode={handleChangeBrawlTriggerMode}
+        onEndBattle={handleToggleBrawlManual}
+        onDismissSummary={() => {
+          const cleared = { ...brawlState, outcome: null };
+          setBrawlState(cleared);
+          persistSessionCollaboration({ brawlState: cleared });
+        }}
+        onQuickMove={(move, promptText) =>
+          handleSendMessage(promptText, { explicitMoveType: move })
+        }
+      />
+
       {/* Main Messages Stream */}
       <div
         ref={messagesContainerRef}
@@ -1212,7 +1571,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
               <ViewportSlot
                 key={message.id}
                 rootRef={messagesContainerRef}
-                rootMargin="650px 0px"
+                rootMargin="160px 0px"
                 estimatedHeight={150}
                 forceMounted={keepMounted}
                 initialVisible={keepMounted}
@@ -1228,8 +1587,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 <div className="shrink-0 mt-0.5">
                   {isCharacter ? (
                     <img
-                      src={character.avatar}
-                      alt={character.name}
+                      src={message.speakerAvatar || character.avatar}
+                      alt={message.speakerName || character.name}
+                      referrerPolicy="no-referrer"
                       className="h-9 w-9 rounded-xl object-cover object-top border border-purple-500/40 shadow-sm"
                     />
                   ) : isUser ? (
@@ -1252,8 +1612,17 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                   {/* Sender Name & Alternate Greeting Switcher Bar */}
                   <div className="flex flex-wrap items-center gap-2 mb-1 px-1">
                     <span className="text-xs font-bold text-zinc-300">
-                      {isCharacter ? character.name : isUser ? persona.name : 'Palace System'}
+                      {isCharacter
+                        ? message.speakerName || character.name
+                        : isUser
+                          ? persona.name
+                          : 'Palace System'}
                     </span>
+                    {isCharacter && message.modelUsed && (
+                      <span className="text-[11px] text-zinc-500">
+                        · {message.modelUsed}
+                      </span>
+                    )}
 
                     {/* Alternate Greetings Switcher on Message 0 */}
                     {hasAlternateGreetings && (
@@ -1291,7 +1660,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                         : 'bg-zinc-900/85 border border-zinc-800/80 text-zinc-100 rounded-tl-sm backdrop-blur-md'
                     }`}
                   >
-                    {/* Collapsible Thinking Process */}
+                    {/* Collapsible Thinking / Multi-Model Trace */}
                     {message.thinkingProcess && (
                       <div className="mb-3 rounded-2xl border border-purple-500/30 bg-purple-950/30 p-2.5 text-xs text-purple-200">
                         <button
@@ -1305,7 +1674,11 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                         >
                           <span className="flex items-center gap-1.5">
                             <BrainCircuit className="h-3.5 w-3.5 text-purple-400" />
-                            Reasoning Monologue (gemini-4-argon)
+                            {message.thinkingProcess.includes('Multi-Model Mode:')
+                              ? 'Multi-Model Teamwork Trace'
+                              : message.modelUsed?.includes('gemini-4-argon')
+                                ? 'Reasoning Monologue (gemini-4-argon)'
+                                : 'Scene & Engine Note'}
                           </span>
                           {expandedThinking[message.id] ? (
                             <ChevronUp className="h-3.5 w-3.5" />
@@ -1314,7 +1687,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                           )}
                         </button>
                         {expandedThinking[message.id] && (
-                          <p className="mt-2 text-zinc-300 leading-relaxed font-mono text-[11px] bg-zinc-950/60 p-2.5 rounded-xl border border-purple-900/30">
+                          <p className="mt-2 text-zinc-300 leading-relaxed font-mono text-[11px] whitespace-pre-wrap bg-zinc-950/60 p-2.5 rounded-xl border border-purple-900/30">
                             {message.thinkingProcess}
                           </p>
                         )}
@@ -1576,8 +1949,119 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             </div>
           )}
 
-          {/* Active Persona Banner */}
-          <div className="flex items-center justify-between text-xs text-zinc-400 px-1">
+          {/* Chub.ai-Style Who Replies Bar + Multi-Model & Brawl Status */}
+          <div
+            data-testid="speaker-selector-bar"
+            className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-zinc-800/80 bg-zinc-900/60 px-3 py-2 text-xs"
+          >
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-[11px] font-semibold text-zinc-400 mr-1">Who Replies:</span>
+              <button
+                type="button"
+                onClick={() => handleChangeResponderMode('auto', selectedResponderUuid)}
+                className={`rounded-xl border px-2.5 py-1 text-[11px] font-semibold cursor-pointer whitespace-nowrap transition-colors ${
+                  responderMode === 'auto'
+                    ? 'border-purple-500 bg-purple-600/35 text-white'
+                    : 'border-zinc-800 bg-zinc-950 text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                Auto
+              </button>
+
+              {roster.map((participant) => {
+                const isSelectedSpeaker =
+                  responderMode === 'specific' &&
+                  (selectedResponderUuid || character.uuid) === participant.uuid;
+                const isAddedChar = participant.uuid !== character.uuid;
+                return (
+                  <div
+                    key={participant.uuid}
+                    className={`inline-flex items-center rounded-xl border text-[11px] font-semibold transition-colors ${
+                      isSelectedSpeaker
+                        ? 'border-purple-400 bg-purple-600/40 text-white'
+                        : 'border-zinc-800 bg-zinc-950 text-zinc-300 hover:border-zinc-700'
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      data-testid={`speaker-chip-${participant.uuid}`}
+                      onClick={() => handleChangeResponderMode('specific', participant.uuid)}
+                      className="flex items-center gap-1.5 px-2.5 py-1 cursor-pointer whitespace-nowrap"
+                    >
+                      <img
+                        src={participant.avatar}
+                        alt={participant.name}
+                        referrerPolicy="no-referrer"
+                        className="h-4 w-4 rounded-full object-cover object-top"
+                      />
+                      <span className="max-w-[110px] truncate">{participant.name}</span>
+                    </button>
+                    {isAddedChar && (
+                      <button
+                        type="button"
+                        data-testid={`quick-remove-chip-${participant.uuid}`}
+                        onClick={() => handleRemoveGroupParticipant(participant.uuid)}
+                        title={`Remove ${participant.name} from chat`}
+                        aria-label={`Remove ${participant.name} from chat`}
+                        className="pr-2 pl-0.5 py-1 text-zinc-400 hover:text-rose-400 cursor-pointer"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+
+              {roster.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => handleChangeResponderMode('all', selectedResponderUuid)}
+                  className={`rounded-xl border px-2.5 py-1 text-[11px] font-semibold cursor-pointer whitespace-nowrap transition-colors ${
+                    responderMode === 'all'
+                      ? 'border-amber-500 bg-amber-600/30 text-amber-100'
+                      : 'border-zinc-800 bg-zinc-950 text-zinc-400 hover:text-zinc-200'
+                  }`}
+                >
+                  Everyone
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={() => setIsGroupModalOpen(true)}
+                className="rounded-xl border border-dashed border-zinc-700 bg-zinc-950/60 px-2.5 py-1 text-[11px] text-zinc-400 hover:text-purple-300 hover:border-purple-500/50 cursor-pointer whitespace-nowrap"
+              >
+                + Add / Manage
+              </button>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              {ensembleConfig.enabled && (
+                <button
+                  type="button"
+                  data-testid="active-ensemble-badge"
+                  onClick={() => setIsMultiModelModalOpen(true)}
+                  className="text-[11px] font-medium text-indigo-300 hover:text-indigo-200 cursor-pointer whitespace-nowrap"
+                >
+                  {ensembleConfig.models.length} Models · {ensembleConfig.mode.replace('_', ' ')}
+                </button>
+              )}
+
+              <button
+                type="button"
+                data-testid="trigger-speaker-btn"
+                disabled={sending}
+                onClick={() => handleSendMessage('', { triggerWithoutUserMessage: true })}
+                className="rounded-xl border border-purple-500/40 bg-purple-600/20 px-2.5 py-1 text-[11px] font-bold text-purple-200 hover:bg-purple-600/35 disabled:opacity-40 cursor-pointer whitespace-nowrap"
+                title="Trigger the selected character(s) to reply right now without typing a message"
+              >
+                Speak Now
+              </button>
+            </div>
+          </div>
+
+          {/* Active Persona Banner & Text-Fight Mode Switch */}
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-zinc-400 px-1">
             <button
               onClick={onOpenPersonaModal}
               className="flex items-center gap-1.5 font-medium hover:text-amber-300 transition-colors cursor-pointer"
@@ -1589,9 +2073,25 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
               <span className="text-[10px] text-zinc-500 underline">(change)</span>
             </button>
 
-            <span className="text-[10px] text-zinc-500">
-              Shift + Enter for new line &bull; Enter to send
-            </span>
+            <div className="flex items-center gap-3">
+              <label className="flex items-center gap-1.5 text-[11px] text-zinc-400">
+                <span>Text Fight:</span>
+                <select
+                  data-testid="brawl-mode-select"
+                  value={brawlState.triggerMode}
+                  onChange={(e) => handleChangeBrawlTriggerMode(e.target.value as BrawlTriggerMode)}
+                  className="rounded-lg border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-[11px] text-zinc-200 focus:border-rose-500 focus:outline-none"
+                >
+                  <option value="auto">Auto</option>
+                  <option value="manual">Manual</option>
+                  <option value="off">Off</option>
+                </select>
+              </label>
+
+              <span className="text-[10px] text-zinc-500 hidden sm:inline">
+                Shift + Enter for new line &bull; Enter to send
+              </span>
+            </div>
           </div>
 
           {/* Input Box */}
@@ -1637,7 +2137,30 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         onSave={(newSettings) => {
           setChubSettings(newSettings);
           localStorage.setItem('palace_chub_chat_settings', JSON.stringify(newSettings));
+          persistSessionCollaboration({});
         }}
+      />
+
+      {/* Modals: Group Chat Roster & Responder Picker */}
+      <GroupRosterModal
+        isOpen={isGroupModalOpen}
+        onClose={() => setIsGroupModalOpen(false)}
+        hostCharacterUuid={character.uuid}
+        roster={roster}
+        responderMode={responderMode}
+        selectedResponderUuid={selectedResponderUuid}
+        onChangeResponderMode={handleChangeResponderMode}
+        onAddParticipant={handleAddGroupParticipant}
+        onRemoveParticipant={handleRemoveGroupParticipant}
+        onToggleMute={handleToggleParticipantMute}
+      />
+
+      {/* Modals: Multi-Model Collaboration Team */}
+      <MultiModelModal
+        isOpen={isMultiModelModalOpen}
+        onClose={() => setIsMultiModelModalOpen(false)}
+        config={ensembleConfig}
+        onSave={handleSaveEnsemble}
       />
 
       {/* Modals: All Chats Drawer/Modal */}

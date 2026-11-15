@@ -46,17 +46,29 @@ function loadSavedGuestProfile(): UserProfile {
   return DEFAULT_GUEST_PROFILE;
 }
 
+export interface ActivePersonaState {
+  name: string;
+  bio: string;
+  uuid?: string;
+  avatar?: string;
+  lorebook?: string | null;
+}
+
 interface AuthContextType {
   user: User | null;
   profile: UserProfile | null;
   loading: boolean;
   guestId: string;
-  persona: { name: string; bio: string };
+  persona: ActivePersonaState;
   signInWithGoogle: () => Promise<void>;
   signOutUser: () => Promise<void>;
   getIdToken: () => Promise<string | null>;
-  setPersona: (p: { name: string; bio: string }) => void;
-  savePersonaToCloud: (name: string, bio: string) => Promise<void>;
+  setPersona: (p: ActivePersonaState) => void;
+  savePersonaToCloud: (
+    name: string,
+    bio: string,
+    extra?: { uuid?: string; avatar?: string; lorebook?: string | null }
+  ) => Promise<void>;
   updateProfile: (data: Partial<UserProfile>) => Promise<UserProfile>;
   refreshProfile: () => Promise<void>;
 }
@@ -68,9 +80,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [profile, setProfile] = useState<UserProfile | null>(() => loadSavedGuestProfile());
   const [loading, setLoading] = useState(true);
   const [guestId, setGuestId] = useState<string>('guest_' + Math.random().toString(36).substring(2, 9));
-  const [persona, setPersona] = useState<{ name: string; bio: string }>({
+  const [persona, setPersona] = useState<ActivePersonaState>({
     name: 'Adventurer',
     bio: 'A curious traveler seeking stories across worlds.',
+    lorebook: null,
   });
 
   // Load or generate guest ID & local persona
@@ -113,10 +126,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             if (data.user) {
               setProfile(data.user);
               if (data.user.personaName) {
-                setPersona({
+                setPersona((prev) => ({
+                  ...prev,
                   name: data.user.personaName,
                   bio: data.user.personaBio || '',
-                });
+                }));
               }
             }
           }
@@ -155,9 +169,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return await auth.currentUser.getIdToken();
   };
 
-  const savePersonaToCloud = async (name: string, bio: string) => {
-    setPersona({ name, bio });
-    localStorage.setItem('palace_persona', JSON.stringify({ name, bio }));
+  const savePersonaToCloud = async (
+    name: string,
+    bio: string,
+    extra?: { uuid?: string; avatar?: string; lorebook?: string | null }
+  ) => {
+    const nextPersona: ActivePersonaState = {
+      name,
+      bio,
+      ...(extra?.uuid !== undefined ? { uuid: extra.uuid } : {}),
+      ...(extra?.avatar !== undefined ? { avatar: extra.avatar } : {}),
+      ...(extra?.lorebook !== undefined ? { lorebook: extra.lorebook } : {}),
+    };
+    setPersona(nextPersona);
+    localStorage.setItem('palace_persona', JSON.stringify(nextPersona));
 
     if (user) {
       try {

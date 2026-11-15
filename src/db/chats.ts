@@ -91,6 +91,12 @@ export async function getSessionDetails(sessionUuid: string) {
           groundingSources: sources,
           swipes: swipesList,
           activeSwipeIndex: m.activeSwipeIndex || 0,
+          imageUrl: m.imageUrl,
+          poseName: m.poseName,
+          speakerCharacterUuid: m.speakerCharacterUuid,
+          speakerName: m.speakerName,
+          speakerAvatar: m.speakerAvatar,
+          modelUsed: m.modelUsed,
           createdAt: m.createdAt,
         };
       }),
@@ -213,6 +219,10 @@ export async function addChatMessage(params: {
   swipes?: string;
   imageUrl?: string | null;
   poseName?: string | null;
+  speakerCharacterUuid?: string | null;
+  speakerName?: string | null;
+  speakerAvatar?: string | null;
+  modelUsed?: string | null;
 }) {
   try {
     const res = await db.insert(chatMessages).values({
@@ -226,6 +236,10 @@ export async function addChatMessage(params: {
       activeSwipeIndex: 0,
       imageUrl: params.imageUrl || null,
       poseName: params.poseName || null,
+      speakerCharacterUuid: params.speakerCharacterUuid || null,
+      speakerName: params.speakerName || null,
+      speakerAvatar: params.speakerAvatar || null,
+      modelUsed: params.modelUsed || null,
     }).returning();
 
     // Increment unsaved messages counter for chat summarization tracking

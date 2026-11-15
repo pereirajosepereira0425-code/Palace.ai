@@ -14,14 +14,22 @@ import {
   Shield,
   Edit3,
   Trash2,
+  BookOpen,
 } from 'lucide-react';
 import { SharedPersona } from '../types/index.ts';
 import { isOwnedByRequester } from '../utils/ownership.ts';
+import { mergeCharacterLoreEntries } from '../utils/communityUtils.ts';
 import { useAuth } from '../context/AuthContext.tsx';
 import { ViewportSlot } from './ViewportSlot.tsx';
 
 interface PersonaGalleryProps {
-  onSelectPersona: (persona: { name: string; bio: string }) => void;
+  onSelectPersona: (persona: {
+    name: string;
+    bio: string;
+    uuid?: string;
+    avatar?: string;
+    lorebook?: string | null;
+  }) => void;
   onOpenCreateModal: () => void;
   onEditPersona?: (persona: SharedPersona) => void;
   refreshKey?: number;
@@ -164,12 +172,14 @@ export const PersonaGallery: React.FC<PersonaGalleryProps> = ({
   };
 
   const handleUsePersona = async (p: SharedPersona) => {
-    savePersonaToCloud(p.name, p.bio);
+    const normalizedLore = JSON.stringify(mergeCharacterLoreEntries([], p.lorebook).entries);
+    const extra = { uuid: p.uuid, avatar: p.avatar, lorebook: normalizedLore };
+    savePersonaToCloud(p.name, p.bio, extra);
     setAppliedId(p.id);
     setTimeout(() => setAppliedId(null), 2000);
 
     fetch(`/api/personas/${p.id}/use`, { method: 'POST' }).catch(console.error);
-    onSelectPersona({ name: p.name, bio: p.bio });
+    onSelectPersona({ name: p.name, bio: p.bio, ...extra });
   };
 
   return (
@@ -302,13 +312,14 @@ export const PersonaGallery: React.FC<PersonaGalleryProps> = ({
               }
 
               const isCurrent = activePersona.name === p.name;
+              const personaLoreCount = mergeCharacterLoreEntries([], p.lorebook).entries.length;
 
               return (
                 <ViewportSlot
                   key={p.id}
                   estimatedHeight={240}
-                  rootMargin="500px 0px"
-                  initialVisible={idx < 6}
+                  rootMargin="120px 0px"
+                  initialVisible={idx < 4}
                   testId="persona-slot"
                 >
                   <div
@@ -331,9 +342,17 @@ export const PersonaGallery: React.FC<PersonaGalleryProps> = ({
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center justify-between gap-1">
                         <h3 className="font-bold text-sm text-zinc-100 truncate">{p.name}</h3>
-                        <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[9px] font-semibold text-purple-300">
-                          {p.pronouns}
-                        </span>
+                        <div className="flex items-center gap-1 shrink-0">
+                          {personaLoreCount > 0 && (
+                            <span className="inline-flex items-center gap-0.5 rounded bg-amber-500/20 border border-amber-400/30 px-1.5 py-0.5 text-[9px] font-bold text-amber-200">
+                              <BookOpen className="h-2.5 w-2.5" />
+                              {personaLoreCount}
+                            </span>
+                          )}
+                          <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[9px] font-semibold text-purple-300">
+                            {p.pronouns}
+                          </span>
+                        </div>
                       </div>
                       <p className="text-[11px] text-zinc-400 font-medium">
                         By <span className="text-zinc-300">{p.creatorName}</span>

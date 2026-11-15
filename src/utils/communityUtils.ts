@@ -60,13 +60,15 @@ export function parseLorebookEntries(raw: unknown): LorebookEntryItem[] {
 
 /**
  * Merges a character's built-in lorebook JSON with an optional active global/community lorebook
- * stored in browser storage (`palace_active_lorebook`) so ChatRoom injects both seamlessly.
+ * and active persona lorebook so ChatRoom & AI routes inject all three seamlessly.
  */
 export function mergeGlobalActiveLorebook(
   characterLorebookRaw: string | null | undefined,
-  activeGlobalLorebookRaw: string | null | undefined
+  activeGlobalLorebookRaw: string | null | undefined,
+  personaLorebookRaw?: string | null | undefined
 ): string {
   const combined: Array<{ key: string; content: string; constant?: boolean }> = [];
+  const seen = new Set<string>();
 
   const pushCharacterLore = (raw: unknown) => {
     if (!raw) return;
@@ -86,19 +88,25 @@ export function mergeGlobalActiveLorebook(
     for (const item of items) {
       if (item?.enabled === false) continue;
       const key = String(item?.key ?? item?.keys ?? '').trim();
-      const content = String(item?.content ?? '').trim();
+      const content = String(item?.content ?? item?.value ?? '').trim();
       if (!content) continue;
       if (key || item?.constant) {
-        combined.push({
-          key: key || '__constant__',
-          content,
-          constant: Boolean(item?.constant),
-        });
+        const finalKey = key || '__constant__';
+        const sig = `${finalKey.toLowerCase()}::${content.toLowerCase()}`;
+        if (!seen.has(sig)) {
+          seen.add(sig);
+          combined.push({
+            key: finalKey,
+            content,
+            constant: Boolean(item?.constant),
+          });
+        }
       }
     }
   };
 
   pushCharacterLore(characterLorebookRaw);
+  pushCharacterLore(personaLorebookRaw);
   pushCharacterLore(activeGlobalLorebookRaw);
 
   return JSON.stringify(combined);
@@ -118,3 +126,51 @@ export function canFollowTarget(
   }
   return { allowed: true };
 }
+
+export interface CharacterLoreEntry {
+  key: string;
+  content: string;
+}
+
+/**
+ * Merges incoming lorebook entries (from a shared community lorebook, saved local lorebook,
+ * or imported JSON card) onto an existing character's lorebook entry list, deduplicating
+ * identical (key, content) pairs while preserving unlimited stacked lorebooks.
+ */
+export function mergeCharacterLoreEntries(
+  existing: CharacterLoreEntry[],
+  incoming: unknown
+): { entries: CharacterLoreEntry[]; addedCount: number } {
+  const base: CharacterLoreEntry[] = Array.isArray(existing)
+    ? existing.map((e) => ({
+        key: String(e?.key ?? '').trim(),
+        content: String(e?.content ?? '').trim(),
+      }))
+    : [];
+
+  const seen = new Set(
+    base
+      .filter((e) => e.key || e.content)
+      .map((e) => `${e.key.toLowerCase()}::${e.content.toLowerCase()}`)
+  );
+
+  const normalizedIncoming = parseLorebookEntries(incoming);
+  let addedCount = 0;
+
+  for (const item of normalizedIncoming) {
+    if (item.enabled === false) continue;
+    const key = (item.keys || (item.constant ? 'Constant Lore' : '')).trim();
+    const content = item.content.trim();
+    if (!key && !content) continue;
+
+    const sig = `${key.toLowerCase()}::${content.toLowerCase()}`;
+    if (!seen.has(sig)) {
+      seen.add(sig);
+      base.push({ key, content });
+      addedCount += 1;
+    }
+  }
+
+  return { entries: base, addedCount };
+}
+

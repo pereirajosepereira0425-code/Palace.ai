@@ -701,4 +701,255 @@ test('communityUtils validates follow targets, normalizes stage sliders, and mer
   assert.equal(merged[1].key, 'Vespera, Academy');
 });
 
+test('mergeCharacterLoreEntries stacks multiple shared lorebooks onto a character and deduplicates identical entries', async () => {
+  const { mergeCharacterLoreEntries } = await import('./communityUtils.ts');
+
+  const initial = [{ key: 'Citadel', content: 'Ancient stone fortress.' }];
+  const firstAttach = mergeCharacterLoreEntries(
+    initial,
+    JSON.stringify([
+      { keys: 'Citadel', content: 'Ancient stone fortress.', enabled: true }, // duplicate
+      { keys: 'Starforge, Anvil', content: 'Dwarven forge orbiting a pulsar.', enabled: true },
+      { keys: 'DisabledLore', content: 'Should skip disabled entry', enabled: false },
+    ])
+  );
+  assert.equal(firstAttach.addedCount, 1);
+  assert.equal(firstAttach.entries.length, 2);
+
+  // Stack a second shared lorebook onto the same character
+  const secondAttach = mergeCharacterLoreEntries(firstAttach.entries, [
+    { keys: 'Moonveil', content: 'Luminous silver forest.', constant: true, enabled: true },
+  ]);
+  assert.equal(secondAttach.addedCount, 1);
+  assert.equal(secondAttach.entries.length, 3);
+  assert.equal(secondAttach.entries[2].key, 'Moonveil');
+});
+
+test('mergeGlobalActiveLorebook combines character, persona, and global lorebooks without duplicating entries', async () => {
+  const { mergeGlobalActiveLorebook } = await import('./communityUtils.ts');
+
+  const charLore = JSON.stringify([
+    { key: 'Sovereign', content: 'Ruler of the silver citadel.' },
+  ]);
+  const personaLore = JSON.stringify([
+    { key: 'Silver Crest', content: 'Worn by royal envoys.' },
+    { key: 'Sovereign', content: 'Ruler of the silver citadel.' },
+  ]);
+  const globalLore = JSON.stringify({
+    name: 'Shared Codex',
+    entries: [
+      { keys: 'Aether Well', content: 'Source of arcane tides.', enabled: true },
+      { keys: 'Hidden', content: 'Disabled global entry.', enabled: false },
+    ],
+  });
+
+  const merged = JSON.parse(mergeGlobalActiveLorebook(charLore, globalLore, personaLore));
+  assert.equal(merged.length, 3);
+  assert.equal(merged[0].key, 'Sovereign');
+  assert.equal(merged[1].key, 'Silver Crest');
+  assert.equal(merged[2].key, 'Aether Well');
+});
+
+test('Claude Opus 5.5 is listed under Anthropic, resolved cleanly from /models aliases, and uses x-api-key headers', async () => {
+  const { pickBestModelForEndpoint, buildExternalAuthHeaders } = await import('./apiErrorUtils.ts');
+
+  const opus55 = CHUB_ACTIVE_MODELS.find((m) => m.id === 'claude-opus-5-5');
+  assert.ok(opus55);
+  assert.equal(opus55.label, 'Claude Opus 5.5');
+  assert.equal(opus55.provider, 'Anthropic');
+
+  assert.equal(
+    pickBestModelForEndpoint('claude-opus-5-5', ['gpt-4o', 'anthropic/claude-opus-5.5']),
+    'anthropic/claude-opus-5.5'
+  );
+  assert.equal(
+    pickBestModelForEndpoint('claude-opus-5-5', ['claude-opus-5-5', 'claude-sonnet-4-6']),
+    'claude-opus-5-5'
+  );
+
+  const anthropicHeaders = buildExternalAuthHeaders(
+    'sk-ant-test-key',
+    'https://api.anthropic.com/v1/chat/completions',
+    'anthropic'
+  );
+  assert.equal(anthropicHeaders['x-api-key'], 'sk-ant-test-key');
+  assert.equal(anthropicHeaders['anthropic-version'], '2023-06-01');
+  assert.equal(anthropicHeaders.Authorization, 'Bearer sk-ant-test-key');
+});
+
+test('Group chat roster add/remove and speaker selection respect manual choice, mentions, round-robin, and all', async () => {
+  const {
+    addParticipantToRoster,
+    removeParticipantFromRoster,
+    selectRespondingCharacters,
+  } = await import('./chatOrchestration.ts');
+
+  const host = {
+    uuid: 'char-sylvia',
+    name: 'Sylvia Thorne',
+    avatar: 'sylvia.jpg',
+    tagline: 'Detective',
+    isHost: true,
+    muted: false,
+  };
+  const added1 = {
+    uuid: 'char-malakor',
+    name: 'Lord Malakor',
+    avatar: 'malakor.jpg',
+    tagline: 'Vampire',
+    isHost: false,
+    muted: false,
+  };
+  const added2 = {
+    uuid: 'char-kaelen',
+    name: 'Kaelen Fireforge',
+    avatar: 'kaelen.jpg',
+    tagline: 'Blacksmith',
+    isHost: false,
+    muted: false,
+  };
+
+  let roster = addParticipantToRoster([host], added1);
+  roster = addParticipantToRoster(roster, added2);
+  assert.equal(roster.length, 3);
+
+  // Explicit responder choice
+  const explicit = selectRespondingCharacters({
+    roster,
+    mode: 'specific',
+    selectedUuid: 'char-malakor',
+  });
+  assert.equal(explicit.length, 1);
+  assert.equal(explicit[0].uuid, 'char-malakor');
+
+  // Auto mention matching
+  const autoMention = selectRespondingCharacters({
+    roster,
+    mode: 'auto',
+    userMessage: 'Hey Kaelen, what do you think of this sword?',
+  });
+  assert.equal(autoMention.length, 1);
+  assert.equal(autoMention[0].uuid, 'char-kaelen');
+
+  // Round robin
+  const nextRobin = selectRespondingCharacters({
+    roster,
+    mode: 'round_robin',
+    lastSpeakerUuid: 'char-sylvia',
+  });
+  assert.equal(nextRobin[0].uuid, 'char-malakor');
+
+  // Everyone replies
+  const allSpeakers = selectRespondingCharacters({
+    roster,
+    mode: 'all',
+  });
+  assert.equal(allSpeakers.length, 3);
+
+  // Remove added character cleanly
+  const rm = removeParticipantFromRoster(roster, 'char-malakor');
+  assert.equal(rm.removed, true);
+  assert.equal(rm.nextRoster.length, 2);
+  assert.ok(!rm.nextRoster.some((p) => p.uuid === 'char-malakor'));
+
+  // Refuses removing last remaining participant
+  const rm2 = removeParticipantFromRoster([host], 'char-sylvia');
+  assert.equal(rm2.removed, false);
+  assert.equal(rm2.nextRoster.length, 1);
+});
+
+test('Multi-model ensemble normalization and synthesis prompts combine multiple models cleanly', async () => {
+  const {
+    normalizeEnsembleConfig,
+    buildEnsembleStagePrompt,
+    buildEnsembleSynthesisPrompt,
+  } = await import('./chatOrchestration.ts');
+
+  const normalized = normalizeEnsembleConfig({
+    enabled: true,
+    mode: 'council',
+    models: [
+      { id: 'claude-opus-5-5', role: 'drafter' },
+      { id: 'gemini-4-argon', role: 'critic' },
+    ],
+    synthesizerModelId: 'claude-opus-5-5',
+  });
+
+  assert.equal(normalized.enabled, true);
+  assert.equal(normalized.models.length, 2);
+  assert.equal(normalized.synthesizerModelId, 'claude-opus-5-5');
+
+  const polishPrompt = buildEnsembleStagePrompt({
+    mode: 'critique_polish',
+    role: 'critic',
+    characterName: 'Sylvia',
+    userMessage: 'Check the alley.',
+    draftSoFar: '*Looks left.*',
+  });
+  assert.ok(polishPrompt.includes('*Looks left.*'));
+
+  const synthPrompt = buildEnsembleSynthesisPrompt({
+    characterName: 'Sylvia',
+    mode: 'council',
+    candidates: [
+      { modelId: 'claude-opus-5-5', text: 'Poetic noir draft.' },
+      { modelId: 'gemini-4-argon', text: 'Deep deduction draft.' },
+    ],
+  });
+  assert.ok(synthPrompt.includes('claude-opus-5-5'));
+  assert.ok(synthPrompt.includes('gemini-4-argon'));
+});
+
+test('BrawlChat text fighting detects real combat triggers, avoids casual false positives, and resolves exchanges until battle end', async () => {
+  const {
+    createInitialBrawlState,
+    detectCombatTrigger,
+    inferBrawlMoveFromText,
+    resolveBrawlExchange,
+    buildBrawlSystemPrompt,
+  } = await import('./chatOrchestration.ts');
+
+  // Casual non-combat phrases must NOT false-trigger
+  assert.equal(detectCombatTrigger('I really enjoy playing fighting games with friends.', false), 'none');
+  assert.equal(detectCombatTrigger('Tell me about the history of war in this kingdom.', false), 'none');
+
+  // Real fighting triggers start automatically
+  assert.equal(detectCombatTrigger('*I lunge forward and punch him across the jaw!*', false), 'start');
+  assert.equal(detectCombatTrigger('*I draw my blade and slash toward the knight!*', false), 'start');
+
+  // End trigger stops active combat
+  assert.equal(detectCombatTrigger('*I lower my sword and call a truce.*', true), 'end');
+
+  let state = createInitialBrawlState('Aria', 'Valerie', 'auto', 'auto');
+  assert.equal(state.active, true);
+  assert.equal(state.player.hp, 100);
+  assert.equal(state.opponent.hp, 100);
+  assert.ok(buildBrawlSystemPrompt(state).includes('TEXT-FIGHTING MODE ACTIVE'));
+
+  assert.equal(inferBrawlMoveFromText('*I guard with my shield*'), 'guard');
+  assert.equal(inferBrawlMoveFromText('*I heal using a crimson potion*'), 'recover');
+  assert.equal(inferBrawlMoveFromText('*I unleash a rapid combo flurry!*'), 'combo');
+
+  // Execute strike exchange
+  state = resolveBrawlExchange(state, 'strike', '*I slash cleanly!*', 1.0);
+  assert.equal(state.round, 2);
+  assert.ok(state.opponent.hp < 100);
+  assert.ok(state.player.hp < 100);
+
+  // Deal finishing blow when opponent HP is low
+  state = { ...state, opponent: { ...state.opponent, hp: 5 } };
+  state = resolveBrawlExchange(state, 'special', '*Signature finisher!*', 1.1);
+  assert.equal(state.opponent.hp, 0);
+  assert.equal(state.active, false);
+  assert.equal(state.outcome, 'victory');
+
+  // Flee cleanly exits battle
+  const fleeState = resolveBrawlExchange(
+    createInitialBrawlState('Aria', 'Valerie', 'manual', 'manual'),
+    'flee',
+    'I disengage and retreat.'
+  );
+  assert.equal(fleeState.active, false);
+  assert.equal(fleeState.outcome, 'fled');
+});
 

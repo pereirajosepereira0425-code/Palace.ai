@@ -15,8 +15,8 @@ interface TagInputProps {
   compact?: boolean;
 }
 
-const TAG_PAGE_SIZE = 60;
-const TAG_CHUNK_SIZE = 12;
+const TAG_PAGE_SIZE = 42;
+const TAG_CHUNK_SIZE = 6;
 
 export const TagInput: React.FC<TagInputProps> = ({
   selectedTags,
@@ -317,8 +317,8 @@ export const TagInput: React.FC<TagInputProps> = ({
           <ViewportSlot
             key={`chunk-${chunkIdx}-${chunk[0]?.name || ''}`}
             rootRef={tagScrollRef}
-            rootMargin="48px 0px"
-            estimatedHeight={68}
+            rootMargin="0px 0px"
+            estimatedHeight={36}
             initialVisible={chunkIdx < 2}
             className="flex flex-wrap gap-1.5"
             placeholderClassName="rounded-xl bg-zinc-900/30 border border-zinc-800/30"

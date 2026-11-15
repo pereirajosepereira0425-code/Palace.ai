@@ -38,13 +38,13 @@ import { CharacterDetailView } from './components/CharacterDetailView.tsx';
 import { UserProfileView } from './components/UserProfileView.tsx';
 import { UserProfileModal } from './components/UserProfileModal.tsx';
 import { ViewportSlot } from './components/ViewportSlot.tsx';
-import { Character, ContentRating, SharedPersona, TagRecord } from './types/index.ts';
+import { Character, ContentRating, SharedLorebookRecord, SharedPersona, TagRecord } from './types/index.ts';
 import { isOwnedByRequester } from './utils/ownership.ts';
 import { chunkItems } from './utils/viewportUnload.ts';
 
 const CHARACTER_PAGE_SIZE = 24;
 const EXPLORE_TAG_PAGE_SIZE = 48;
-const EXPLORE_TAG_CHUNK_SIZE = 12;
+const EXPLORE_TAG_CHUNK_SIZE = 8;
 
 const DEFAULT_FALLBACK_TAGS = [
   'Anime',
@@ -152,6 +152,8 @@ function PalaceApp() {
   const [inspectCharacter, setInspectCharacter] = useState<Character | null>(null);
   const [forkCharacter, setForkCharacter] = useState<Character | null>(null);
   const [editingCharacter, setEditingCharacter] = useState<Character | null>(null);
+  const [pendingLorebook, setPendingLorebook] = useState<SharedLorebookRecord | null>(null);
+  const [pendingPersonaLorebook, setPendingPersonaLorebook] = useState<SharedLorebookRecord | null>(null);
   const [editingPersona, setEditingPersona] = useState<SharedPersona | null>(null);
   const [personasRefreshKey, setPersonasRefreshKey] = useState(0);
   const [isPersonaModalOpen, setIsPersonaModalOpen] = useState(false);
@@ -531,6 +533,10 @@ function PalaceApp() {
               setActiveTab('studio');
             }}
             onEditCharacter={handleStartEditCharacter}
+            onCharacterUpdated={(updated) => {
+              setCharacters((prev) => prev.map((c) => (c.uuid === updated.uuid ? updated : c)));
+              setInspectCharacter((curr) => (curr?.uuid === updated.uuid ? updated : curr));
+            }}
             onDeleteCharacter={handleDeleteCharacter}
             onViewCreator={(creatorName) => {
               setInspectCharacter(null);
@@ -566,6 +572,8 @@ function PalaceApp() {
           <CharacterStudio
             forkFromCharacter={forkCharacter}
             editingCharacter={editingCharacter}
+            pendingLorebook={pendingLorebook}
+            onConsumePendingLorebook={() => setPendingLorebook(null)}
             onCharacterCreated={(char) => {
               setForkCharacter(null);
               setEditingCharacter(null);
@@ -592,6 +600,28 @@ function PalaceApp() {
         ) : activeTab === 'lorebooks' ? (
           <LorebookStudio
             onViewCreator={(username) => setActiveTab('profile', username)}
+            onUseInCharacterStudio={(lb) => {
+              setForkCharacter(null);
+              setEditingCharacter(null);
+              setPendingLorebook(lb);
+              setActiveTab('studio');
+            }}
+            onUseInExistingCharacter={(lb, targetChar) => {
+              setForkCharacter(null);
+              setEditingCharacter(targetChar);
+              setPendingLorebook(lb);
+              setActiveTab('studio');
+            }}
+            onUseInPersona={(lb, targetPersona) => {
+              setEditingPersona(targetPersona || null);
+              setPendingPersonaLorebook(lb);
+              setIsPersonaModalOpen(true);
+            }}
+            onCharacterUpdated={(updated) => {
+              setCharacters((prev) => prev.map((c) => (c.uuid === updated.uuid ? updated : c)));
+              setInspectCharacter((curr) => (curr?.uuid === updated.uuid ? updated : curr));
+            }}
+            onPersonasChanged={() => setPersonasRefreshKey((k) => k + 1)}
           />
         ) : activeTab === 'stages' ? (
           <StagesManager
@@ -603,7 +633,7 @@ function PalaceApp() {
           <PersonaGallery
             refreshKey={personasRefreshKey}
             onSelectPersona={(p) => {
-              setPersona({ name: p.name, bio: p.bio });
+              setPersona(p);
               setEditingPersona(null);
               setIsPersonaModalOpen(true);
             }}
@@ -693,8 +723,8 @@ function PalaceApp() {
                       key={`tag-chunk-${chunkIdx}-${chunk[0] || ''}`}
                       axis="horizontal"
                       rootRef={tagsScrollRef}
-                      rootMargin="0px 280px"
-                      estimatedWidth={880}
+                      rootMargin="0px 80px"
+                      estimatedWidth={640}
                       estimatedHeight={34}
                       initialVisible={chunkIdx === 0}
                       forceMounted={chunk.includes(selectedTag)}
@@ -817,8 +847,8 @@ function PalaceApp() {
                     <ViewportSlot
                       key={char.id}
                       estimatedHeight={440}
-                      rootMargin="600px 0px"
-                      initialVisible={idx < 8}
+                      rootMargin="120px 0px"
+                      initialVisible={idx < 4}
                       testId="character-slot"
                     >
                       <CharacterCard
@@ -860,10 +890,13 @@ function PalaceApp() {
       <PersonaModal
         isOpen={isPersonaModalOpen}
         initialEditPersona={editingPersona}
+        pendingLorebook={pendingPersonaLorebook}
+        onConsumePendingLorebook={() => setPendingPersonaLorebook(null)}
         onPersonasChanged={() => setPersonasRefreshKey((k) => k + 1)}
         onClose={() => {
           setIsPersonaModalOpen(false);
           setEditingPersona(null);
+          setPendingPersonaLorebook(null);
         }}
       />
 

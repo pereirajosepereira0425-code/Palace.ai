@@ -3,6 +3,7 @@ import { personas } from './schema.ts';
 import { desc, eq, and, inArray, sql } from 'drizzle-orm';
 import type { SharedPersona } from '../types/index.ts';
 import { isOwnedByRequester, type RequesterIdentity } from '../utils/ownership.ts';
+import { mergeCharacterLoreEntries } from '../utils/communityUtils.ts';
 
 export async function getPublicPersonas(options: {
   search?: string;
@@ -100,7 +101,7 @@ export async function createSharedPersona(data: {
       scenario: data.scenario || '',
       exampleDialogues: data.exampleDialogues || '',
       creatorNotes: data.creatorNotes || '',
-      lorebook: JSON.stringify(data.lorebook || []),
+      lorebook: typeof data.lorebook === 'string' ? data.lorebook : JSON.stringify(data.lorebook || []),
       model3dUrl: data.model3dUrl || null,
       model3dPose: data.model3dPose || 'neutral',
       isPublic: data.isPublic ?? false,
@@ -168,11 +169,16 @@ export async function updateSharedPersona(
     if (data.scenario !== undefined) updatePayload.scenario = data.scenario;
     if (data.exampleDialogues !== undefined) updatePayload.exampleDialogues = data.exampleDialogues;
     if (data.creatorNotes !== undefined) updatePayload.creatorNotes = data.creatorNotes;
-    if (data.lorebook !== undefined) updatePayload.lorebook = JSON.stringify(data.lorebook);
+    if (data.lorebook !== undefined) {
+      updatePayload.lorebook =
+        typeof data.lorebook === 'string' ? data.lorebook : JSON.stringify(data.lorebook);
+    }
     if (data.model3dUrl !== undefined) updatePayload.model3dUrl = data.model3dUrl;
     if (data.model3dPose !== undefined) updatePayload.model3dPose = data.model3dPose;
     if (data.isPublic !== undefined) updatePayload.isPublic = data.isPublic;
-    if (data.tags !== undefined) updatePayload.tags = JSON.stringify(data.tags);
+    if (data.tags !== undefined) {
+      updatePayload.tags = typeof data.tags === 'string' ? data.tags : JSON.stringify(data.tags);
+    }
 
     const result = await db
       .update(personas)
@@ -183,6 +189,44 @@ export async function updateSharedPersona(
   } catch (error) {
     console.error('updateSharedPersona failed:', error);
     throw error;
+  }
+}
+
+export async function attachPersonaLorebook(
+  uuid: string,
+  requester: string | RequesterIdentity,
+  incomingEntries: unknown,
+  mode: 'merge' | 'replace' = 'merge'
+) {
+  try {
+    const existingList = await db.select().from(personas).where(eq(personas.uuid, uuid)).limit(1);
+    const existing = existingList[0];
+    if (!existing) return { status: 'not_found' as const };
+
+    const identity: RequesterIdentity =
+      typeof requester === 'string' ? { userUid: requester, guestId: requester } : requester;
+    if (!isOwnedByRequester(existing.userId, identity)) {
+      return { status: 'forbidden' as const };
+    }
+
+    const baseEntries = mode === 'replace' ? [] : mergeCharacterLoreEntries([], existing.lorebook).entries;
+    const merged = mergeCharacterLoreEntries(baseEntries, incomingEntries);
+
+    const updated = await db
+      .update(personas)
+      .set({ lorebook: JSON.stringify(merged.entries) })
+      .where(eq(personas.id, existing.id))
+      .returning();
+
+    return {
+      status: 'ok' as const,
+      persona: updated[0],
+      addedCount: merged.addedCount,
+      totalEntries: merged.entries.length,
+    };
+  } catch (error) {
+    console.error('attachPersonaLorebook failed:', error);
+    throw new Error('Failed to attach lorebook to persona', { cause: error });
   }
 }
 

@@ -501,6 +501,10 @@ export function buildExternalAuthHeaders(
     if (isChubUrlOrProvider(apiProvider, endpoint)) {
       headers['CH-API-KEY'] = trimmedKey;
     }
+    if (apiProvider === 'anthropic' || /anthropic\.com/i.test(endpoint || '')) {
+      headers['x-api-key'] = trimmedKey;
+      headers['anthropic-version'] = '2023-06-01';
+    }
   }
   return headers;
 }
@@ -583,6 +587,8 @@ export function pickBestModelForEndpoint(
       aliasTokens.push('mercury', 'mythomax', 'mistral', 'mixtral');
     } else if (stripped.includes('mythomax')) {
       aliasTokens.push('mythomax');
+    } else if (stripped.includes('opus-5-5') || stripped.includes('opus-5.5')) {
+      aliasTokens.push('claude-opus-5-5', 'claude-opus-5.5', 'opus-5.5', 'opus-5', 'opus');
     }
 
     for (const token of aliasTokens) {

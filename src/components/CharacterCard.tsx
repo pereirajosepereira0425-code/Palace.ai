@@ -83,24 +83,15 @@ const CharacterCardInner: React.FC<CharacterCardProps> = ({
   return (
     <div
       onClick={() => onQuickView(character)}
-      className="group relative flex flex-col overflow-hidden rounded-2xl border border-zinc-800/80 bg-zinc-900/60 backdrop-blur-md transition-all duration-300 hover:-translate-y-1 hover:border-purple-500/50 hover:bg-zinc-900/90 hover:shadow-xl hover:shadow-purple-950/30 cursor-pointer"
+      className="group relative flex flex-col overflow-hidden rounded-2xl border border-zinc-800/80 bg-zinc-900/90 transition-colors duration-200 hover:-translate-y-0.5 hover:border-purple-500/50 hover:bg-zinc-900 hover:shadow-xl hover:shadow-purple-950/30 cursor-pointer"
     >
       {/* Character Image Container */}
-      <div className="relative aspect-[3/4] w-full overflow-hidden bg-zinc-950">
-        <img
-          src={character.avatar}
-          alt=""
-          aria-hidden="true"
-          referrerPolicy="no-referrer"
-          loading="lazy"
-          decoding="async"
-          className="absolute inset-0 h-full w-full object-cover blur-xl scale-110 opacity-35 pointer-events-none"
-        />
+      <div className="relative aspect-[3/4] w-full overflow-hidden bg-gradient-to-br from-purple-950/35 via-zinc-950 to-zinc-950">
         <img
           src={character.avatar}
           alt={character.name}
           referrerPolicy="no-referrer"
-          className="relative z-10 h-full w-full object-contain transition-transform duration-500 group-hover:scale-105"
+          className="relative z-10 h-full w-full object-contain transition-transform duration-300 group-hover:scale-105"
           loading="lazy"
           decoding="async"
           onError={(e) => {
@@ -111,35 +102,35 @@ const CharacterCardInner: React.FC<CharacterCardProps> = ({
         />
 
         {/* Gradient Scrim */}
-        <div className="absolute inset-0 bg-gradient-to-t from-zinc-950 via-zinc-950/20 to-transparent" />
+        <div className="absolute inset-0 z-10 pointer-events-none bg-gradient-to-t from-zinc-950 via-zinc-950/15 to-transparent" />
 
         {/* Top Floating Badges */}
-        <div className="absolute left-3 top-3 right-24 flex flex-wrap items-center gap-1.5">
+        <div className="absolute left-3 top-3 right-24 z-20 flex flex-wrap items-center gap-1.5">
           <span
-            className={`rounded-md px-2 py-0.5 text-[10px] font-bold tracking-wider uppercase border backdrop-blur-md ${
+            className={`rounded-md px-2 py-0.5 text-[10px] font-bold tracking-wider uppercase border ${
               character.rating === 'NSFW'
-                ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
-                : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                ? 'bg-rose-950/85 text-rose-300 border-rose-500/40'
+                : 'bg-emerald-950/85 text-emerald-300 border-emerald-500/40'
             }`}
           >
             {character.rating}
           </span>
 
           {character.pronouns && (
-            <span className="rounded-md bg-purple-950/70 border border-purple-500/40 px-2 py-0.5 text-[10px] font-bold text-purple-200 backdrop-blur-md">
+            <span className="rounded-md bg-purple-950/90 border border-purple-500/40 px-2 py-0.5 text-[10px] font-bold text-purple-200">
               {character.pronouns}
             </span>
           )}
 
           {character.model3dUrl && (
-            <span className="rounded-md bg-indigo-500/30 border border-indigo-400/40 px-2 py-0.5 text-[10px] font-bold text-indigo-200 backdrop-blur-md flex items-center gap-1">
+            <span className="rounded-md bg-indigo-950/90 border border-indigo-400/40 px-2 py-0.5 text-[10px] font-bold text-indigo-200 flex items-center gap-1">
               <span>3D</span>
             </span>
           )}
 
           {character.thinkingDefault && (
             <span
-              className="flex items-center gap-1 rounded-md bg-purple-500/30 px-2 py-0.5 text-[10px] font-semibold text-purple-200 border border-purple-400/40 backdrop-blur-md"
+              className="flex items-center gap-1 rounded-md bg-purple-950/90 px-2 py-0.5 text-[10px] font-semibold text-purple-200 border border-purple-400/40"
               title="Gemini 4 Argon High-Thinking Enabled"
             >
               <BrainCircuit className="h-3 w-3" />
@@ -149,7 +140,7 @@ const CharacterCardInner: React.FC<CharacterCardProps> = ({
 
           {character.searchDefault && (
             <span
-              className="flex items-center gap-1 rounded-md bg-sky-500/30 px-2 py-0.5 text-[10px] font-semibold text-sky-200 border border-sky-400/40 backdrop-blur-md"
+              className="flex items-center gap-1 rounded-md bg-sky-950/90 px-2 py-0.5 text-[10px] font-semibold text-sky-200 border border-sky-400/40"
               title="Google Search Grounding Enabled"
             >
               <Globe className="h-3 w-3" />
@@ -159,11 +150,11 @@ const CharacterCardInner: React.FC<CharacterCardProps> = ({
         </div>
 
         {/* Top Right Quick Actions */}
-        <div className="absolute right-3 top-3 flex items-center gap-1.5">
+        <div className="absolute right-3 top-3 z-20 flex items-center gap-1.5">
           {/* Tavern JSON Export Button */}
           <button
             onClick={handleExportJson}
-            className="flex h-8 w-8 items-center justify-center rounded-xl bg-zinc-900/80 text-zinc-300 backdrop-blur-md border border-zinc-700/60 hover:bg-purple-600 hover:text-white transition-all shadow-md"
+            className="flex h-8 w-8 items-center justify-center rounded-xl bg-zinc-950/90 text-zinc-300 border border-zinc-700/60 hover:bg-purple-600 hover:text-white transition-colors shadow-md"
             title="Download Tavern / Chub JSON Card"
             aria-label="Download character JSON"
           >
@@ -173,10 +164,10 @@ const CharacterCardInner: React.FC<CharacterCardProps> = ({
           {/* Like Heart Button */}
           <button
             onClick={handleLike}
-            className={`flex h-8 items-center gap-1 rounded-xl px-2.5 backdrop-blur-md border transition-all shadow-md ${
+            className={`flex h-8 items-center gap-1 rounded-xl px-2.5 border transition-colors shadow-md ${
               liked
-                ? 'bg-pink-600/30 text-pink-400 border-pink-500/60'
-                : 'bg-zinc-900/80 text-zinc-300 border-zinc-700/60 hover:text-pink-400'
+                ? 'bg-pink-950/90 text-pink-400 border-pink-500/60'
+                : 'bg-zinc-950/90 text-zinc-300 border-zinc-700/60 hover:text-pink-400'
             }`}
             aria-label="Like character"
           >
@@ -186,13 +177,13 @@ const CharacterCardInner: React.FC<CharacterCardProps> = ({
         </div>
 
         {/* Bottom stats inside image */}
-        <div className="absolute bottom-3 left-3 right-3 flex items-center justify-between text-xs text-zinc-300">
-          <div className="flex items-center gap-1 rounded-lg bg-zinc-900/80 px-2 py-1 backdrop-blur-md border border-zinc-800">
+        <div className="absolute bottom-3 left-3 right-3 z-20 flex items-center justify-between text-xs text-zinc-300">
+          <div className="flex items-center gap-1 rounded-lg bg-zinc-950/90 px-2 py-1 border border-zinc-800">
             <MessageSquare className="h-3 w-3 text-fuchsia-400" />
             <span className="font-semibold">{character.chatCount.toLocaleString()}</span>
           </div>
 
-          <div className="flex items-center gap-1 rounded-lg bg-zinc-900/80 px-2 py-1 backdrop-blur-md border border-zinc-800 text-amber-300">
+          <div className="flex items-center gap-1 rounded-lg bg-zinc-950/90 px-2 py-1 border border-zinc-800 text-amber-300">
             <Volume2 className="h-3 w-3" />
             <span className="text-[11px] font-medium">{character.voiceName}</span>
           </div>

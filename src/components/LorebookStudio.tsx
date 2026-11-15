@@ -16,12 +16,20 @@ import {
   Search,
   Share2,
   User as UserIcon,
+  Layers,
+  X,
+  Users,
 } from 'lucide-react';
 import { ViewportSlot } from './ViewportSlot.tsx';
 import { useAuth } from '../context/AuthContext.tsx';
-import { LorebookEntryItem, SharedLorebookRecord } from '../types/index.ts';
+import {
+  Character,
+  LorebookEntryItem,
+  SharedLorebookRecord,
+  SharedPersona,
+} from '../types/index.ts';
 import { isOwnedByRequester } from '../utils/ownership.ts';
-import { parseLorebookEntries } from '../utils/communityUtils.ts';
+import { mergeCharacterLoreEntries, parseLorebookEntries } from '../utils/communityUtils.ts';
 
 export type LoreEntry = LorebookEntryItem;
 
@@ -38,10 +46,22 @@ const LOREBOOK_PAGE_SIZE = 24;
 
 interface LorebookStudioProps {
   onViewCreator?: (username: string) => void;
+  onUseInCharacterStudio?: (lorebook: SharedLorebookRecord) => void;
+  onUseInExistingCharacter?: (lorebook: SharedLorebookRecord, character: Character) => void;
+  onUseInPersona?: (lorebook: SharedLorebookRecord, persona?: SharedPersona | null) => void;
+  onCharacterUpdated?: (character: Character) => void;
+  onPersonasChanged?: () => void;
 }
 
-export const LorebookStudio: React.FC<LorebookStudioProps> = ({ onViewCreator }) => {
-  const { user, profile, guestId, getIdToken } = useAuth();
+export const LorebookStudio: React.FC<LorebookStudioProps> = ({
+  onViewCreator,
+  onUseInCharacterStudio,
+  onUseInExistingCharacter,
+  onUseInPersona,
+  onCharacterUpdated,
+  onPersonasChanged,
+}) => {
+  const { user, profile, guestId, getIdToken, persona: activePersona, setPersona, savePersonaToCloud } = useAuth();
 
   const [viewMode, setViewMode] = useState<'editor' | 'community'>('editor');
   const [editingLorebookId, setEditingLorebookId] = useState<string | null>(null);
@@ -112,6 +132,17 @@ export const LorebookStudio: React.FC<LorebookStudioProps> = ({ onViewCreator })
 
   const [savedMsg, setSavedMsg] = useState('');
 
+  // "Apply to Existing Character / Persona" modal state
+  const [applyTargetLorebook, setApplyTargetLorebook] = useState<SharedLorebookRecord | null>(null);
+  const [applyTab, setApplyTab] = useState<'characters' | 'personas'>('characters');
+  const [myCharacters, setMyCharacters] = useState<Character[]>([]);
+  const [myPersonas, setMyPersonas] = useState<SharedPersona[]>([]);
+  const [loadingTargets, setLoadingTargets] = useState(false);
+  const [targetSearch, setTargetSearch] = useState('');
+  const [attachingTargetUuid, setAttachingTargetUuid] = useState<string | null>(null);
+  const [applyNotice, setApplyNotice] = useState('');
+  const [applyError, setApplyError] = useState('');
+
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(communitySearch.trim()), 180);
     return () => clearTimeout(t);
@@ -120,6 +151,183 @@ export const LorebookStudio: React.FC<LorebookStudioProps> = ({ onViewCreator })
   const showNotice = (msg: string) => {
     setSavedMsg(msg);
     setTimeout(() => setSavedMsg((curr) => (curr === msg ? '' : curr)), 4000);
+  };
+
+  const openApplyModal = async (lorebookPayload: SharedLorebookRecord) => {
+    setApplyTargetLorebook(lorebookPayload);
+    setTargetSearch('');
+    setApplyNotice('');
+    setApplyError('');
+    setLoadingTargets(true);
+    try {
+      const token = await getIdToken();
+      const headers: Record<string, string> = {};
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
+      const [charsRes, personasRes] = await Promise.all([
+        fetch(`/api/characters/me?guestId=${encodeURIComponent(guestId)}`, { headers }),
+        fetch(`/api/personas/me?guestId=${encodeURIComponent(guestId)}`, { headers }),
+      ]);
+      if (charsRes.ok) {
+        const cData = await charsRes.json();
+        setMyCharacters(Array.isArray(cData.characters) ? cData.characters : []);
+      }
+      if (personasRes.ok) {
+        const pData = await personasRes.json();
+        setMyPersonas(Array.isArray(pData.personas) ? pData.personas : []);
+      }
+    } catch (err) {
+      console.error('Failed to load user characters/personas for lorebook attachment:', err);
+      setApplyError('Could not load your characters and personas.');
+    } finally {
+      setLoadingTargets(false);
+    }
+  };
+
+  const handleOpenEditorApplyModal = () => {
+    const editorRecord: SharedLorebookRecord = {
+      id: 0,
+      uuid: editingSharedUuid || `local_${editingLorebookId || Date.now()}`,
+      userId: user?.uid || guestId,
+      creatorName: profile?.username || profile?.displayName || user?.displayName || 'Creator',
+      name: name.trim() || 'Untitled Lorebook',
+      description: description.trim() || 'Custom world info codex.',
+      scanDepth,
+      entries: JSON.stringify(entries),
+      tags: JSON.stringify(
+        tagsInput
+          .split(',')
+          .map((t) => t.trim())
+          .filter(Boolean)
+      ),
+      isPublic: sharePublicly,
+      likeCount: 0,
+      useCount: 0,
+      createdAt: new Date().toISOString(),
+    };
+    openApplyModal(editorRecord);
+  };
+
+  const handleOpenSavedApplyModal = (lb: SavedLorebook) => {
+    openApplyModal({
+      id: 0,
+      uuid: lb.id,
+      userId: user?.uid || guestId,
+      creatorName: profile?.username || profile?.displayName || user?.displayName || 'Creator',
+      name: lb.name,
+      description: lb.description,
+      scanDepth: lb.scanDepth || 4,
+      entries: JSON.stringify(lb.entries || []),
+      tags: '[]',
+      isPublic: false,
+      likeCount: 0,
+      useCount: 0,
+      createdAt: lb.updatedAt,
+    });
+  };
+
+  const handleAttachToTargetCharacter = async (targetChar: Character) => {
+    if (!applyTargetLorebook) return;
+    try {
+      setAttachingTargetUuid(targetChar.uuid);
+      setApplyError('');
+      const token = await getIdToken();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
+      const res = await fetch(`/api/characters/${encodeURIComponent(targetChar.uuid)}/lorebook`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({
+          entries: parseLorebookEntries(applyTargetLorebook.entries),
+          mode: 'merge',
+          guestId,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to attach lorebook to character');
+      }
+      if (data.character) {
+        setMyCharacters((prev) =>
+          prev.map((c) => (c.uuid === targetChar.uuid ? data.character : c))
+        );
+        onCharacterUpdated?.(data.character);
+      }
+      if (applyTargetLorebook.id > 0 && applyTargetLorebook.uuid) {
+        fetch(`/api/lorebooks/${encodeURIComponent(applyTargetLorebook.uuid)}/use`, {
+          method: 'POST',
+        }).catch(console.error);
+      }
+      const added = typeof data.addedCount === 'number' ? data.addedCount : 0;
+      setApplyNotice(
+        added > 0
+          ? `Attached "${applyTargetLorebook.name}" (+${added} entries) to ${targetChar.name}!`
+          : `All entries from "${applyTargetLorebook.name}" are already attached to ${targetChar.name}.`
+      );
+    } catch (err: any) {
+      setApplyError(err?.message || 'Failed to attach lorebook');
+    } finally {
+      setAttachingTargetUuid(null);
+    }
+  };
+
+  const handleAttachToTargetPersona = async (targetPersona: SharedPersona) => {
+    if (!applyTargetLorebook) return;
+    try {
+      setAttachingTargetUuid(targetPersona.uuid);
+      setApplyError('');
+      const token = await getIdToken();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
+      const res = await fetch(`/api/personas/${encodeURIComponent(targetPersona.uuid)}/lorebook`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({
+          entries: parseLorebookEntries(applyTargetLorebook.entries),
+          mode: 'merge',
+          guestId,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to attach lorebook to persona');
+      }
+      if (data.persona) {
+        setMyPersonas((prev) =>
+          prev.map((p) => (p.uuid === targetPersona.uuid ? data.persona : p))
+        );
+        if (
+          activePersona.uuid === targetPersona.uuid ||
+          activePersona.name === targetPersona.name
+        ) {
+          const extra = {
+            uuid: data.persona.uuid,
+            avatar: data.persona.avatar,
+            lorebook: data.persona.lorebook,
+          };
+          setPersona({ name: data.persona.name, bio: data.persona.bio, ...extra });
+          savePersonaToCloud(data.persona.name, data.persona.bio, extra);
+        }
+        onPersonasChanged?.();
+      }
+      if (applyTargetLorebook.id > 0 && applyTargetLorebook.uuid) {
+        fetch(`/api/lorebooks/${encodeURIComponent(applyTargetLorebook.uuid)}/use`, {
+          method: 'POST',
+        }).catch(console.error);
+      }
+      const added = typeof data.addedCount === 'number' ? data.addedCount : 0;
+      setApplyNotice(
+        added > 0
+          ? `Attached "${applyTargetLorebook.name}" (+${added} entries) to persona "${targetPersona.name}"!`
+          : `All entries from "${applyTargetLorebook.name}" are already on persona "${targetPersona.name}".`
+      );
+    } catch (err: any) {
+      setApplyError(err?.message || 'Failed to attach lorebook to persona');
+    } finally {
+      setAttachingTargetUuid(null);
+    }
   };
 
   const fetchCommunityLorebooks = useCallback(
@@ -583,10 +791,15 @@ export const LorebookStudio: React.FC<LorebookStudioProps> = ({ onViewCreator })
           <div className="mb-8 rounded-3xl border border-zinc-800/80 bg-zinc-900/40 p-6 backdrop-blur-md space-y-4">
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <div className="sm:col-span-2">
-                <label className="block text-xs font-bold uppercase tracking-wider text-purple-400 mb-1">
+                <label
+                  htmlFor="lorebook-name-input"
+                  className="block text-xs font-bold uppercase tracking-wider text-purple-400 mb-1"
+                >
                   Lorebook Name
                 </label>
                 <input
+                  id="lorebook-name-input"
+                  aria-label="Lorebook Name"
                   type="text"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
@@ -595,10 +808,15 @@ export const LorebookStudio: React.FC<LorebookStudioProps> = ({ onViewCreator })
               </div>
 
               <div>
-                <label className="block text-xs font-bold uppercase tracking-wider text-purple-400 mb-1">
+                <label
+                  htmlFor="lorebook-scan-depth"
+                  className="block text-xs font-bold uppercase tracking-wider text-purple-400 mb-1"
+                >
                   Scan Depth (Messages)
                 </label>
                 <input
+                  id="lorebook-scan-depth"
+                  aria-label="Scan Depth"
                   type="number"
                   min={1}
                   max={20}
@@ -611,10 +829,15 @@ export const LorebookStudio: React.FC<LorebookStudioProps> = ({ onViewCreator })
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs font-bold uppercase tracking-wider text-purple-400 mb-1">
+                <label
+                  htmlFor="lorebook-description-input"
+                  className="block text-xs font-bold uppercase tracking-wider text-purple-400 mb-1"
+                >
                   Description
                 </label>
                 <input
+                  id="lorebook-description-input"
+                  aria-label="Lorebook Description"
                   type="text"
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
@@ -622,10 +845,15 @@ export const LorebookStudio: React.FC<LorebookStudioProps> = ({ onViewCreator })
                 />
               </div>
               <div>
-                <label className="block text-xs font-bold uppercase tracking-wider text-purple-400 mb-1">
+                <label
+                  htmlFor="lorebook-tags-input"
+                  className="block text-xs font-bold uppercase tracking-wider text-purple-400 mb-1"
+                >
                   Tags (comma-separated)
                 </label>
                 <input
+                  id="lorebook-tags-input"
+                  aria-label="Lorebook Tags"
                   type="text"
                   value={tagsInput}
                   onChange={(e) => setTagsInput(e.target.value)}
@@ -658,8 +886,8 @@ export const LorebookStudio: React.FC<LorebookStudioProps> = ({ onViewCreator })
                 <ViewportSlot
                   key={entry.id}
                   estimatedHeight={158}
-                  rootMargin="500px 0px"
-                  initialVisible={index < 6}
+                  rootMargin="120px 0px"
+                  initialVisible={index < 4}
                   forceMounted={focusedEntryId === entry.id}
                   testId="lore-entry-slot"
                 >
@@ -758,6 +986,14 @@ export const LorebookStudio: React.FC<LorebookStudioProps> = ({ onViewCreator })
                 )}
                 <button
                   type="button"
+                  onClick={handleOpenEditorApplyModal}
+                  className="flex items-center gap-2 rounded-xl border border-amber-400/50 bg-amber-500/15 px-4 py-2.5 text-xs font-bold text-amber-200 hover:bg-amber-500/30 transition-all cursor-pointer"
+                >
+                  <Layers className="h-4 w-4" />
+                  <span>Apply to Char / Persona</span>
+                </button>
+                <button
+                  type="button"
                   onClick={handleSaveToBrowser}
                   className="flex items-center gap-2 rounded-xl border border-purple-500/40 bg-zinc-900 px-5 py-2.5 text-xs font-bold text-purple-200 hover:bg-purple-950/50 transition-all cursor-pointer"
                 >
@@ -794,8 +1030,8 @@ export const LorebookStudio: React.FC<LorebookStudioProps> = ({ onViewCreator })
                     <ViewportSlot
                       key={lb.id}
                       estimatedHeight={76}
-                      rootMargin="450px 0px"
-                      initialVisible={idx < 6}
+                      rootMargin="120px 0px"
+                      initialVisible={idx < 4}
                       testId="saved-lorebook-slot"
                     >
                       <div
@@ -811,7 +1047,16 @@ export const LorebookStudio: React.FC<LorebookStudioProps> = ({ onViewCreator })
                             {lb.entries.length} entries &bull; Scan depth {lb.scanDepth}
                           </div>
                         </div>
-                        <div className="flex items-center gap-1.5 shrink-0">
+                        <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => handleOpenSavedApplyModal(lb)}
+                            className="flex items-center gap-1 rounded-xl bg-purple-600 px-2.5 py-1.5 text-xs font-bold text-white hover:bg-purple-500 transition-all cursor-pointer"
+                            title="Attach to an existing character or persona"
+                          >
+                            <Layers className="h-3.5 w-3.5" />
+                            <span>Use on...</span>
+                          </button>
                           <button
                             type="button"
                             onClick={() => handleShareSavedLorebook(lb)}
@@ -924,8 +1169,8 @@ export const LorebookStudio: React.FC<LorebookStudioProps> = ({ onViewCreator })
                     <ViewportSlot
                       key={shared.uuid}
                       estimatedHeight={220}
-                      rootMargin="450px 0px"
-                      initialVisible={idx < 6}
+                      rootMargin="120px 0px"
+                      initialVisible={idx < 4}
                       testId="community-lorebook-slot"
                     >
                       <div
@@ -1027,18 +1272,31 @@ export const LorebookStudio: React.FC<LorebookStudioProps> = ({ onViewCreator })
                             )}
                           </div>
 
-                          <button
-                            type="button"
-                            onClick={() => handleUseCommunityLorebook(shared)}
-                            className={`flex items-center gap-1.5 rounded-xl px-4 py-1.5 text-xs font-bold transition-all cursor-pointer ${
-                              isActive
-                                ? 'bg-amber-500 text-zinc-950'
-                                : 'bg-purple-600 text-white hover:bg-purple-500'
-                            }`}
-                          >
-                            <Check className="h-3.5 w-3.5" />
-                            <span>{isActive ? 'Active in Chats' : 'Use Lorebook'}</span>
-                          </button>
+                          <div className="flex flex-wrap items-center justify-end gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => handleUseCommunityLorebook(shared)}
+                              className={`flex items-center gap-1 rounded-xl px-3 py-1.5 text-[11px] font-bold transition-all cursor-pointer ${
+                                isActive
+                                  ? 'bg-amber-500 text-zinc-950'
+                                  : 'border border-zinc-700 bg-zinc-800 text-zinc-200 hover:bg-zinc-700'
+                              }`}
+                              title="Activate globally for all chats"
+                            >
+                              <Check className="h-3 w-3" />
+                              <span>{isActive ? 'Global On' : 'Global'}</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => openApplyModal(shared)}
+                              className="flex items-center gap-1 rounded-xl bg-purple-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-purple-500 transition-all cursor-pointer"
+                              title="Attach this lorebook to an existing character or persona"
+                            >
+                              <Layers className="h-3.5 w-3.5" />
+                              <span>Use on Char / Persona</span>
+                            </button>
+                          </div>
                         </div>
                       </div>
                     </ViewportSlot>
@@ -1060,6 +1318,286 @@ export const LorebookStudio: React.FC<LorebookStudioProps> = ({ onViewCreator })
               )}
             </>
           )}
+        </div>
+      )}
+
+      {/* Apply Lorebook to Existing Character / Persona Picker Modal */}
+      {applyTargetLorebook && (
+        <div
+          data-testid="apply-lorebook-modal"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-md animate-in fade-in"
+        >
+          <div className="flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-3xl border border-purple-500/40 bg-zinc-950 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-purple-900/40 bg-zinc-900/80 px-5 py-4">
+              <div className="min-w-0">
+                <h3 className="text-sm font-black text-white flex items-center gap-2 truncate">
+                  <Layers className="h-4 w-4 text-amber-300 shrink-0" />
+                  <span className="truncate">Apply &quot;{applyTargetLorebook.name}&quot;</span>
+                </h3>
+                <p className="text-[11px] text-zinc-400">
+                  Attach &amp; stack {parseLorebookEntries(applyTargetLorebook.entries).length} lore entries onto any Character or Persona you&apos;ve already created.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setApplyTargetLorebook(null)}
+                aria-label="Close apply lorebook modal"
+                className="rounded-xl border border-zinc-800 bg-zinc-900 p-1.5 text-zinc-400 hover:text-white cursor-pointer"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="p-5 flex-1 overflow-y-auto space-y-4">
+              {applyNotice && (
+                <div className="rounded-xl border border-emerald-500/40 bg-emerald-950/30 px-3.5 py-2.5 text-xs font-semibold text-emerald-200 flex items-center gap-2">
+                  <Check className="h-4 w-4 shrink-0" />
+                  <span>{applyNotice}</span>
+                </div>
+              )}
+              {applyError && (
+                <div className="rounded-xl border border-rose-500/40 bg-rose-950/30 px-3.5 py-2.5 text-xs font-semibold text-rose-200">
+                  {applyError}
+                </div>
+              )}
+
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                <div className="flex items-center gap-1.5 rounded-xl border border-zinc-800 bg-zinc-900 p-1 self-start">
+                  <button
+                    type="button"
+                    onClick={() => setApplyTab('characters')}
+                    className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-bold cursor-pointer ${
+                      applyTab === 'characters'
+                        ? 'bg-purple-600/40 text-purple-100 border border-purple-500/40'
+                        : 'text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    <Users className="h-3.5 w-3.5 text-purple-300" />
+                    <span>My Characters ({myCharacters.length})</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setApplyTab('personas')}
+                    className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-bold cursor-pointer ${
+                      applyTab === 'personas'
+                        ? 'bg-purple-600/40 text-purple-100 border border-purple-500/40'
+                        : 'text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    <UserIcon className="h-3.5 w-3.5 text-amber-300" />
+                    <span>My Personas ({myPersonas.length})</span>
+                  </button>
+                </div>
+
+                <div className="relative flex-1 max-w-xs">
+                  <Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500" />
+                  <input
+                    type="text"
+                    value={targetSearch}
+                    onChange={(e) => setTargetSearch(e.target.value)}
+                    placeholder={`Filter ${applyTab}...`}
+                    className="w-full rounded-xl border border-zinc-800 bg-zinc-900 pl-8 pr-3 py-1.5 text-xs text-zinc-100 placeholder-zinc-500 focus:border-purple-500 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              {loadingTargets ? (
+                <div className="py-10 text-center text-xs text-zinc-400">Loading your creations...</div>
+              ) : applyTab === 'characters' ? (
+                (() => {
+                  const q = targetSearch.trim().toLowerCase();
+                  const filtered = q
+                    ? myCharacters.filter((c) => c.name.toLowerCase().includes(q))
+                    : myCharacters;
+                  return filtered.length === 0 ? (
+                    <div className="rounded-2xl border border-zinc-800 bg-zinc-900/50 p-6 text-center text-xs text-zinc-400 space-y-3">
+                      <p>No existing characters found for your account yet.</p>
+                      {onUseInCharacterStudio && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const lb = applyTargetLorebook;
+                            setApplyTargetLorebook(null);
+                            onUseInCharacterStudio(lb);
+                          }}
+                          className="rounded-xl bg-purple-600 px-4 py-2 text-xs font-bold text-white hover:bg-purple-500 cursor-pointer"
+                        >
+                          + Create New Character with This Lorebook
+                        </button>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="space-y-2.5 max-h-72 overflow-y-auto pr-1">
+                      {filtered.map((char) => {
+                        const existingCount = mergeCharacterLoreEntries([], char.lorebook).entries.length;
+                        const busy = attachingTargetUuid === char.uuid;
+                        return (
+                          <div
+                            key={char.uuid}
+                            className="flex items-center justify-between gap-3 rounded-2xl border border-zinc-800 bg-zinc-900/70 p-3"
+                          >
+                            <div className="flex items-center gap-3 min-w-0">
+                              <img
+                                src={char.avatar}
+                                alt={char.name}
+                                className="h-10 w-10 rounded-xl object-cover border border-purple-500/40 shrink-0"
+                              />
+                              <div className="min-w-0">
+                                <div className="text-xs font-bold text-white truncate">{char.name}</div>
+                                <div className="text-[11px] text-zinc-400 truncate">
+                                  📚 {existingCount} lore keys &bull; {char.tagline}
+                                </div>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              {onUseInExistingCharacter && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const lb = applyTargetLorebook;
+                                    setApplyTargetLorebook(null);
+                                    onUseInExistingCharacter(lb, char);
+                                  }}
+                                  className="rounded-xl border border-amber-500/40 bg-amber-500/15 px-2.5 py-1.5 text-[11px] font-bold text-amber-200 hover:bg-amber-500/30 cursor-pointer"
+                                >
+                                  Open in Editor
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => handleAttachToTargetCharacter(char)}
+                                className="flex items-center gap-1 rounded-xl bg-purple-600 px-3 py-1.5 text-[11px] font-bold text-white hover:bg-purple-500 disabled:opacity-50 cursor-pointer"
+                              >
+                                <Plus className="h-3 w-3" />
+                                <span>{busy ? 'Saving...' : 'Attach & Save'}</span>
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()
+              ) : (
+                (() => {
+                  const q = targetSearch.trim().toLowerCase();
+                  const filtered = q
+                    ? myPersonas.filter((p) => p.name.toLowerCase().includes(q))
+                    : myPersonas;
+                  return filtered.length === 0 ? (
+                    <div className="rounded-2xl border border-zinc-800 bg-zinc-900/50 p-6 text-center text-xs text-zinc-400 space-y-3">
+                      <p>No saved personas found for your account yet.</p>
+                      {onUseInPersona && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const lb = applyTargetLorebook;
+                            setApplyTargetLorebook(null);
+                            onUseInPersona(lb, null);
+                          }}
+                          className="rounded-xl bg-purple-600 px-4 py-2 text-xs font-bold text-white hover:bg-purple-500 cursor-pointer"
+                        >
+                          + Create New Persona with This Lorebook
+                        </button>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="space-y-2.5 max-h-72 overflow-y-auto pr-1">
+                      {filtered.map((p) => {
+                        const existingCount = mergeCharacterLoreEntries([], p.lorebook).entries.length;
+                        const busy = attachingTargetUuid === p.uuid;
+                        return (
+                          <div
+                            key={p.uuid}
+                            className="flex items-center justify-between gap-3 rounded-2xl border border-zinc-800 bg-zinc-900/70 p-3"
+                          >
+                            <div className="flex items-center gap-3 min-w-0">
+                              <img
+                                src={p.avatar}
+                                alt={p.name}
+                                className="h-10 w-10 rounded-xl object-cover border border-purple-500/40 shrink-0"
+                              />
+                              <div className="min-w-0">
+                                <div className="text-xs font-bold text-white truncate">{p.name}</div>
+                                <div className="text-[11px] text-zinc-400 truncate">
+                                  📚 {existingCount} lore keys &bull; {p.bio}
+                                </div>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              {onUseInPersona && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const lb = applyTargetLorebook;
+                                    setApplyTargetLorebook(null);
+                                    onUseInPersona(lb, p);
+                                  }}
+                                  className="rounded-xl border border-amber-500/40 bg-amber-500/15 px-2.5 py-1.5 text-[11px] font-bold text-amber-200 hover:bg-amber-500/30 cursor-pointer"
+                                >
+                                  Open in Editor
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => handleAttachToTargetPersona(p)}
+                                className="flex items-center gap-1 rounded-xl bg-purple-600 px-3 py-1.5 text-[11px] font-bold text-white hover:bg-purple-500 disabled:opacity-50 cursor-pointer"
+                              >
+                                <Plus className="h-3 w-3" />
+                                <span>{busy ? 'Saving...' : 'Attach & Save'}</span>
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-800 bg-zinc-900/60 px-5 py-3">
+              <div className="flex flex-wrap items-center gap-2">
+                {onUseInCharacterStudio && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const lb = applyTargetLorebook;
+                      setApplyTargetLorebook(null);
+                      onUseInCharacterStudio(lb);
+                    }}
+                    className="flex items-center gap-1 rounded-xl border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-[11px] font-bold text-zinc-200 hover:bg-zinc-700 cursor-pointer"
+                  >
+                    <Plus className="h-3 w-3" />
+                    <span>New Character with This</span>
+                  </button>
+                )}
+                {onUseInPersona && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const lb = applyTargetLorebook;
+                      setApplyTargetLorebook(null);
+                      onUseInPersona(lb, null);
+                    }}
+                    className="flex items-center gap-1 rounded-xl border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-[11px] font-bold text-zinc-200 hover:bg-zinc-700 cursor-pointer"
+                  >
+                    <Plus className="h-3 w-3" />
+                    <span>New Persona with This</span>
+                  </button>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => setApplyTargetLorebook(null)}
+                className="rounded-xl border border-zinc-700 bg-zinc-900 px-4 py-1.5 text-xs font-bold text-zinc-300 hover:text-white cursor-pointer"
+              >
+                Done
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

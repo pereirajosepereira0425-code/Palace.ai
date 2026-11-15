@@ -127,6 +127,10 @@ export const chatMessages = pgTable('chat_messages', {
   activeSwipeIndex: integer('active_swipe_index').default(0),
   imageUrl: text('image_url'),
   poseName: text('pose_name'),
+  speakerCharacterUuid: text('speaker_character_uuid'),
+  speakerName: text('speaker_name'),
+  speakerAvatar: text('speaker_avatar'),
+  modelUsed: text('model_used'),
   createdAt: timestamp('created_at').defaultNow(),
 });
 

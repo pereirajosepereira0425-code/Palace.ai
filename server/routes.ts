@@ -3,8 +3,10 @@ import { optionalAuth, requireAuth, type AuthRequest } from '../src/middleware/a
 import {
   getCharacters,
   getCharacterByUuid,
+  getUserCharacters,
   createCharacter,
   updateCharacter,
+  attachCharacterLorebook,
   deleteCharacter,
   toggleLike,
   getUserLikedIds,
@@ -38,6 +40,7 @@ import {
   getUserPersonas,
   createSharedPersona,
   updateSharedPersona,
+  attachPersonaLorebook,
   deleteSharedPersona,
   toggleLikePersona,
   incrementPersonaUse,
@@ -65,6 +68,7 @@ import {
 } from '../src/db/lorebooks.ts';
 import {
   generateCharacterReply,
+  generateMultiModelCharacterReply,
   generateSpeechTTS,
   generatePersonaReaction,
   generateChatSummary,
@@ -74,6 +78,12 @@ import { importCharacterFromUrl, UrlImportError } from './urlImporter.ts';
 import { ensureSeedTags, getTags, upsertTags } from '../src/db/tags.ts';
 import { parsePageParams, slicePaginatedRows } from '../src/utils/viewportUnload.ts';
 import { mergeGlobalActiveLorebook } from '../src/utils/communityUtils.ts';
+import {
+  buildBrawlSystemPrompt,
+  selectRespondingCharacters,
+  toGroupParticipant,
+} from '../src/utils/chatOrchestration.ts';
+import type { GroupParticipant } from '../src/types/index.ts';
 
 export const apiRouter = express.Router();
 
@@ -154,6 +164,18 @@ apiRouter.get('/characters', optionalAuth, async (req: AuthRequest, res) => {
   } catch (error: any) {
     console.error('Failed to get characters:', error);
     res.status(500).json({ error: error.message || 'Failed to get characters' });
+  }
+});
+
+apiRouter.get('/characters/me', optionalAuth, async (req: AuthRequest, res) => {
+  try {
+    const guestId = (req.query.guestId as string) || '';
+    const ids = Array.from(new Set([req.user?.uid || '', guestId, 'guest'].filter(Boolean)));
+    const list = await getUserCharacters(ids);
+    res.json({ characters: list });
+  } catch (error: any) {
+    console.error('Failed to get user characters:', error);
+    res.status(500).json({ error: error.message || 'Failed to get user characters' });
   }
 });
 
@@ -324,6 +346,36 @@ apiRouter.put('/characters/:uuid', optionalAuth, async (req: AuthRequest, res) =
   } catch (error: any) {
     console.error('Failed to update character:', error);
     res.status(500).json({ error: error.message || 'Failed to update character' });
+  }
+});
+
+apiRouter.patch('/characters/:uuid/lorebook', optionalAuth, async (req: AuthRequest, res) => {
+  try {
+    const requester = {
+      userUid: req.user?.uid || null,
+      guestId: (typeof req.body?.guestId === 'string' && req.body.guestId) || null,
+    };
+    const mode = req.body?.mode === 'replace' ? 'replace' : 'merge';
+    const result = await attachCharacterLorebook(
+      req.params.uuid,
+      requester,
+      req.body?.entries ?? req.body?.lorebook ?? [],
+      mode
+    );
+    if (result.status === 'not_found') {
+      return res.status(404).json({ error: 'Character not found' });
+    }
+    if (result.status === 'forbidden') {
+      return res.status(403).json({ error: 'You can only modify characters you created' });
+    }
+    res.json({
+      character: result.character,
+      addedCount: result.addedCount,
+      totalEntries: result.totalEntries,
+    });
+  } catch (error: any) {
+    console.error('Failed to attach character lorebook:', error);
+    res.status(500).json({ error: error.message || 'Failed to attach lorebook to character' });
   }
 });
 
@@ -515,6 +567,36 @@ apiRouter.put('/personas/:uuid', optionalAuth, async (req: AuthRequest, res) => 
     }
     console.error('Failed to update persona:', error);
     res.status(500).json({ error: error.message || 'Failed to update persona' });
+  }
+});
+
+apiRouter.patch('/personas/:uuid/lorebook', optionalAuth, async (req: AuthRequest, res) => {
+  try {
+    const requester = {
+      userUid: req.user?.uid || null,
+      guestId: (typeof req.body?.guestId === 'string' && req.body.guestId) || null,
+    };
+    const mode = req.body?.mode === 'replace' ? 'replace' : 'merge';
+    const result = await attachPersonaLorebook(
+      req.params.uuid,
+      requester,
+      req.body?.entries ?? req.body?.lorebook ?? [],
+      mode
+    );
+    if (result.status === 'not_found') {
+      return res.status(404).json({ error: 'Persona not found' });
+    }
+    if (result.status === 'forbidden') {
+      return res.status(403).json({ error: 'You can only modify personas you created' });
+    }
+    res.json({
+      persona: result.persona,
+      addedCount: result.addedCount,
+      totalEntries: result.totalEntries,
+    });
+  } catch (error: any) {
+    console.error('Failed to attach persona lorebook:', error);
+    res.status(500).json({ error: error.message || 'Failed to attach lorebook to persona' });
   }
 });
 
@@ -1151,10 +1233,17 @@ apiRouter.post('/chat/message', optionalAuth, async (req: AuthRequest, res) => {
       chatSettings: reqChatSettings,
       showAiImages: reqShowImages,
       extraLorebook,
+      personaLorebook,
       preGeneratedReply,
       preGeneratedModelUsed,
+      respondingCharacterUuids,
+      respondingCharacterUuid,
+      triggerWithoutUserMessage,
+      ensembleConfig: reqEnsembleConfig,
+      brawlState: reqBrawlState,
     } = req.body;
-    if (!sessionUuid || !content?.trim()) {
+    const trimmedContent = typeof content === 'string' ? content.trim() : '';
+    if (!sessionUuid || (!trimmedContent && !triggerWithoutUserMessage)) {
       return res.status(400).json({ error: 'sessionUuid and content are required' });
     }
 
@@ -1173,103 +1262,266 @@ apiRouter.post('/chat/message', optionalAuth, async (req: AuthRequest, res) => {
       parsedSettings = {};
     }
 
-    // 1. Save user message to database
-    const userMsg = await addChatMessage({
-      sessionId: session.uuid,
-      sender: 'user',
-      content: content.trim(),
-      parentId: parentId || null,
-    });
+    // 1. Save user message to database unless user explicitly triggered an NPC turn without text
+    let userMsg: any = null;
+    if (!triggerWithoutUserMessage && trimmedContent) {
+      userMsg = await addChatMessage({
+        sessionId: session.uuid,
+        sender: 'user',
+        content: trimmedContent,
+        parentId: parentId || null,
+      });
+    }
 
-    // 2. Build conversation history for Gemini or Chub API
-    const history = messages.map(m => ({
+    // 2. Resolve Group Chat Roster & Target Responding Character(s)
+    const hostParticipant = toGroupParticipant(character as any, true);
+    const rawRoster: GroupParticipant[] =
+      Array.isArray(parsedSettings.groupParticipants) && parsedSettings.groupParticipants.length > 0
+        ? parsedSettings.groupParticipants
+        : [hostParticipant];
+    const roster: GroupParticipant[] = rawRoster.some((p) => p.uuid === character.uuid)
+      ? rawRoster
+      : [hostParticipant, ...rawRoster];
+
+    const lastSpeakerMsg = [...messages].reverse().find((m) => m.sender === 'character');
+    let targetSpeakers: GroupParticipant[] = [];
+
+    if (Array.isArray(respondingCharacterUuids) && respondingCharacterUuids.length > 0) {
+      targetSpeakers = respondingCharacterUuids
+        .map((uid: string) => roster.find((p) => p.uuid === uid))
+        .filter((p): p is GroupParticipant => Boolean(p));
+    } else if (typeof respondingCharacterUuid === 'string' && respondingCharacterUuid.trim()) {
+      const foundInRoster = roster.find((p) => p.uuid === respondingCharacterUuid.trim());
+      if (foundInRoster) {
+        targetSpeakers = [foundInRoster];
+      }
+    }
+
+    if (targetSpeakers.length === 0) {
+      targetSpeakers = selectRespondingCharacters({
+        roster,
+        mode: parsedSettings.responderMode || 'auto',
+        selectedUuid: parsedSettings.selectedResponderUuid || character.uuid,
+        userMessage: trimmedContent,
+        lastSpeakerUuid: lastSpeakerMsg?.speakerCharacterUuid || character.uuid,
+      });
+    }
+    if (targetSpeakers.length === 0) {
+      targetSpeakers = [hostParticipant];
+    }
+
+    // Hydrate full DB details for any non-host participant missing full prompt fields
+    const hydratedSpeakers = await Promise.all(
+      targetSpeakers.map(async (sp) => {
+        if (sp.uuid === character.uuid) {
+          return {
+            uuid: character.uuid,
+            name: character.name,
+            avatar: character.avatar,
+            tagline: character.tagline,
+            description: character.description,
+            personality: character.personality,
+            systemPrompt: character.systemPrompt,
+            postHistoryInstructions: character.postHistoryInstructions,
+            scenario: character.scenario,
+            exampleDialogues: character.exampleDialogues,
+            lorebook: character.lorebook,
+            backgroundImage: character.backgroundImage,
+            model3dPose: character.model3dPose,
+          };
+        }
+        const dbChar = await getCharacterByUuid(sp.uuid).catch(() => null);
+        return dbChar
+          ? {
+              uuid: dbChar.uuid,
+              name: dbChar.name,
+              avatar: dbChar.avatar,
+              tagline: dbChar.tagline,
+              description: dbChar.description,
+              personality: dbChar.personality,
+              systemPrompt: dbChar.systemPrompt,
+              postHistoryInstructions: dbChar.postHistoryInstructions,
+              scenario: dbChar.scenario,
+              exampleDialogues: dbChar.exampleDialogues,
+              lorebook: dbChar.lorebook,
+              backgroundImage: dbChar.backgroundImage,
+              model3dPose: dbChar.model3dPose,
+            }
+          : {
+              uuid: sp.uuid,
+              name: sp.name,
+              avatar: sp.avatar,
+              tagline: sp.tagline,
+              description: sp.description || sp.tagline,
+              personality: sp.personality,
+              systemPrompt: sp.systemPrompt || `You are ${sp.name}. Stay in character.`,
+              postHistoryInstructions: null,
+              scenario: sp.scenario,
+              exampleDialogues: null,
+              lorebook: sp.lorebook,
+              backgroundImage: null,
+              model3dPose: 'neutral',
+            };
+      })
+    );
+
+    // 3. Build conversation history (attributing group speakers cleanly)
+    const rollingHistory = messages.map((m) => ({
       sender: m.sender as 'user' | 'character' | 'system',
-      content: m.content,
+      content:
+        m.sender === 'character' && m.speakerName && roster.length > 1
+          ? `[${m.speakerName}]: ${m.content}`
+          : m.content,
     }));
 
-    // 3. Generate Character Reply (or persist browser-direct Chub.ai / local completion)
-    const effectivePersona = userPersona || session.userPersona || (req.user ? `${req.user.name || 'User'}` : null);
-    const effectiveLorebook = mergeGlobalActiveLorebook(character.lorebook, extraLorebook);
-    const aiResult =
-      typeof preGeneratedReply === 'string' && preGeneratedReply.trim()
+    const effectivePersona =
+      userPersona || session.userPersona || (req.user ? `${req.user.name || 'User'}` : null);
+    const activeEnsemble = reqEnsembleConfig || parsedSettings.ensembleConfig || null;
+    const activeBrawl = reqBrawlState || parsedSettings.brawlState || null;
+    const brawlContextPrompt =
+      activeBrawl && activeBrawl.active ? buildBrawlSystemPrompt(activeBrawl) : '';
+
+    const isImageRequested = reqShowImages !== undefined ? reqShowImages : session.showAiImages;
+    const generatedMessages: any[] = [];
+    let lastModelUsed = '';
+
+    for (let sIdx = 0; sIdx < hydratedSpeakers.length; sIdx++) {
+      const speaker = hydratedSpeakers[sIdx];
+      const effectiveLorebook = mergeGlobalActiveLorebook(
+        speaker.lorebook,
+        extraLorebook,
+        personaLorebook
+      );
+      const otherSceneNames = roster
+        .filter((p) => p.uuid !== speaker.uuid && !p.muted)
+        .map((p) => p.name);
+
+      const usePreGenerated =
+        sIdx === 0 && typeof preGeneratedReply === 'string' && preGeneratedReply.trim();
+
+      const replyOptions = {
+        character: {
+          name: speaker.name,
+          tagline: speaker.tagline,
+          description: speaker.description,
+          personality: speaker.personality,
+          systemPrompt: speaker.systemPrompt,
+          postHistoryInstructions: speaker.postHistoryInstructions,
+          scenario: speaker.scenario,
+          exampleDialogues: speaker.exampleDialogues,
+          lorebook: effectiveLorebook,
+          userPersona: effectivePersona,
+        },
+        history: rollingHistory,
+        userMessage:
+          trimmedContent ||
+          `(Continue the scene naturally and react now as ${speaker.name}.)`,
+        modelPreference: parsedSettings.model || session.modelPreference,
+        thinkingLevel: session.thinkingLevel as 'HIGH' | 'OFF',
+        searchGrounding: session.searchGrounding,
+        chubApiKey,
+        chubApiUrl,
+        chatSummary: session.summary,
+        groupSceneCharacters: otherSceneNames,
+        brawlContextPrompt,
+        ensembleConfig: activeEnsemble,
+        chatSettings: parsedSettings,
+      };
+
+      const aiResult = usePreGenerated
         ? {
             reply: preGeneratedReply.trim(),
             thinkingProcess: undefined,
             groundingSources: [] as Array<{ title: string; uri: string }>,
-            modelUsed: typeof preGeneratedModelUsed === 'string' && preGeneratedModelUsed.trim()
-              ? preGeneratedModelUsed.trim()
-              : 'Chub.ai / Direct Browser API',
+            modelUsed:
+              typeof preGeneratedModelUsed === 'string' && preGeneratedModelUsed.trim()
+                ? preGeneratedModelUsed.trim()
+                : 'Chub.ai / Direct Browser API',
           }
-        : await generateCharacterReply({
-            character: {
-              name: character.name,
-              tagline: character.tagline,
-              description: character.description,
-              personality: character.personality,
-              systemPrompt: character.systemPrompt,
-              postHistoryInstructions: character.postHistoryInstructions,
-              scenario: character.scenario,
-              exampleDialogues: character.exampleDialogues,
-              lorebook: effectiveLorebook,
-              userPersona: effectivePersona,
-            },
-            history,
-            userMessage: content.trim(),
-            modelPreference: parsedSettings.model || session.modelPreference,
-            thinkingLevel: session.thinkingLevel as 'HIGH' | 'OFF',
-            searchGrounding: session.searchGrounding,
-            chubApiKey,
-            chubApiUrl,
-            chatSummary: session.summary,
-            chatSettings: parsedSettings,
-          });
+        : activeEnsemble?.enabled
+          ? await generateMultiModelCharacterReply(replyOptions)
+          : await generateCharacterReply(replyOptions);
 
-    const isImageRequested = reqShowImages !== undefined ? reqShowImages : session.showAiImages;
-    let sceneImageUrl: string | null = null;
-    let poseName: string = character.model3dPose || 'neutral';
+      let sceneImageUrl: string | null = null;
+      let poseName: string = speaker.model3dPose || 'neutral';
 
-    if (isImageRequested) {
-      // Determine pose based on dialogue/action
-      const lowerReply = aiResult.reply.toLowerCase();
-      if (lowerReply.includes('combat') || lowerReply.includes('blade') || lowerReply.includes('fight') || lowerReply.includes('weapon')) {
-        poseName = 'combat';
-      } else if (lowerReply.includes('magic') || lowerReply.includes('spell') || lowerReply.includes('power') || lowerReply.includes('ichor')) {
-        poseName = 'spellcasting';
-      } else if (lowerReply.includes('lean') || lowerReply.includes('whisper') || lowerReply.includes('curious')) {
-        poseName = 'inquisitive';
-      } else if (lowerReply.includes('sit') || lowerReply.includes('rest') || lowerReply.includes('chair')) {
-        poseName = 'relaxed';
+      if (isImageRequested) {
+        const lowerReply = aiResult.reply.toLowerCase();
+        if (
+          lowerReply.includes('combat') ||
+          lowerReply.includes('blade') ||
+          lowerReply.includes('fight') ||
+          lowerReply.includes('weapon') ||
+          activeBrawl?.active
+        ) {
+          poseName = 'combat';
+        } else if (
+          lowerReply.includes('magic') ||
+          lowerReply.includes('spell') ||
+          lowerReply.includes('power') ||
+          lowerReply.includes('ichor')
+        ) {
+          poseName = 'spellcasting';
+        } else if (
+          lowerReply.includes('lean') ||
+          lowerReply.includes('whisper') ||
+          lowerReply.includes('curious')
+        ) {
+          poseName = 'inquisitive';
+        } else if (
+          lowerReply.includes('sit') ||
+          lowerReply.includes('rest') ||
+          lowerReply.includes('chair')
+        ) {
+          poseName = 'relaxed';
+        }
+        sceneImageUrl = speaker.backgroundImage || speaker.avatar;
       }
 
-      // Provide scenario illustration
-      sceneImageUrl = character.backgroundImage || character.avatar;
-    }
+      const charMsg = await addChatMessage({
+        sessionId: session.uuid,
+        sender: 'character',
+        content: aiResult.reply,
+        parentId: userMsg ? userMsg.id : lastSpeakerMsg?.id || null,
+        thinkingProcess: aiResult.thinkingProcess,
+        groundingSources: JSON.stringify(aiResult.groundingSources),
+        swipes: JSON.stringify([aiResult.reply]),
+        imageUrl: sceneImageUrl,
+        poseName,
+        speakerCharacterUuid: speaker.uuid,
+        speakerName: speaker.name,
+        speakerAvatar: speaker.avatar,
+        modelUsed: aiResult.modelUsed,
+      });
 
-    // 4. Save character message to database (with initial swipe candidate)
-    const charMsg = await addChatMessage({
-      sessionId: session.uuid,
-      sender: 'character',
-      content: aiResult.reply,
-      parentId: userMsg.id,
-      thinkingProcess: aiResult.thinkingProcess,
-      groundingSources: JSON.stringify(aiResult.groundingSources),
-      swipes: JSON.stringify([aiResult.reply]),
-      imageUrl: sceneImageUrl,
-      poseName,
-    });
-
-    res.json({
-      userMessage: userMsg,
-      characterMessage: {
+      const formattedMsg = {
         ...charMsg,
         swipes: [aiResult.reply],
         activeSwipeIndex: 0,
         groundingSources: aiResult.groundingSources,
         imageUrl: sceneImageUrl,
         poseName,
-      },
-      modelUsed: aiResult.modelUsed,
-      unsavedMessageCount: (session.unsavedMessageCount || 0) + 2,
+        speakerCharacterUuid: speaker.uuid,
+        speakerName: speaker.name,
+        speakerAvatar: speaker.avatar,
+        modelUsed: aiResult.modelUsed,
+      };
+      generatedMessages.push(formattedMsg);
+      lastModelUsed = aiResult.modelUsed;
+
+      // Append this speaker's reply so next character in 'all' mode sees it immediately
+      rollingHistory.push({
+        sender: 'character',
+        content: roster.length > 1 ? `[${speaker.name}]: ${aiResult.reply}` : aiResult.reply,
+      });
+    }
+
+    res.json({
+      userMessage: userMsg,
+      characterMessage: generatedMessages[0],
+      generatedMessages,
+      modelUsed: lastModelUsed,
+      unsavedMessageCount: (session.unsavedMessageCount || 0) + (userMsg ? 1 : 0) + generatedMessages.length,
     });
   } catch (error: any) {
     console.error('Failed to process message:', error);
@@ -1300,6 +1552,7 @@ apiRouter.post('/chat/swipe', optionalAuth, async (req: AuthRequest, res) => {
       chubApiUrl,
       chatSettings: reqChatSettings,
       extraLorebook,
+      personaLorebook,
       preGeneratedReply,
     } = req.body;
     if (!sessionUuid || !messageId) {
@@ -1337,20 +1590,33 @@ apiRouter.post('/chat/swipe', optionalAuth, async (req: AuthRequest, res) => {
           content: m.content,
         }));
 
+        const targetChar =
+          targetMsg.speakerCharacterUuid &&
+          targetMsg.speakerCharacterUuid !== sessionDetails.character.uuid
+            ? (await getCharacterByUuid(targetMsg.speakerCharacterUuid).catch(() => null)) ||
+              sessionDetails.character
+            : sessionDetails.character;
+
         const effectiveLorebook = mergeGlobalActiveLorebook(
-          sessionDetails.character.lorebook,
-          extraLorebook
+          targetChar.lorebook,
+          extraLorebook,
+          personaLorebook
         );
-        const aiResult = await generateCharacterReply({
+        const activeEnsemble = reqChatSettings?.ensembleConfig || parsedSettings.ensembleConfig || null;
+        const activeBrawl = reqChatSettings?.brawlState || parsedSettings.brawlState || null;
+        const brawlContextPrompt =
+          activeBrawl && activeBrawl.active ? buildBrawlSystemPrompt(activeBrawl) : '';
+
+        const swipeOpts = {
           character: {
-            name: sessionDetails.character.name,
-            tagline: sessionDetails.character.tagline,
-            description: sessionDetails.character.description,
-            personality: sessionDetails.character.personality,
-            systemPrompt: sessionDetails.character.systemPrompt,
-            postHistoryInstructions: sessionDetails.character.postHistoryInstructions,
-            scenario: sessionDetails.character.scenario,
-            exampleDialogues: sessionDetails.character.exampleDialogues,
+            name: targetChar.name,
+            tagline: targetChar.tagline,
+            description: targetChar.description,
+            personality: targetChar.personality,
+            systemPrompt: targetChar.systemPrompt,
+            postHistoryInstructions: targetChar.postHistoryInstructions,
+            scenario: targetChar.scenario,
+            exampleDialogues: targetChar.exampleDialogues,
             lorebook: effectiveLorebook,
             userPersona: sessionDetails.session.userPersona,
           },
@@ -1361,8 +1627,14 @@ apiRouter.post('/chat/swipe', optionalAuth, async (req: AuthRequest, res) => {
           chubApiKey,
           chubApiUrl,
           chatSummary: sessionDetails.session.summary,
+          brawlContextPrompt,
+          ensembleConfig: activeEnsemble,
           chatSettings: parsedSettings,
-        });
+        };
+
+        const aiResult = activeEnsemble?.enabled
+          ? await generateMultiModelCharacterReply(swipeOpts)
+          : await generateCharacterReply(swipeOpts);
 
         swipes.push(aiResult.reply);
         newIndex = swipes.length - 1;
@@ -1378,6 +1650,10 @@ apiRouter.post('/chat/swipe', optionalAuth, async (req: AuthRequest, res) => {
         swipes,
         activeSwipeIndex: newIndex,
         content: swipes[newIndex],
+        speakerCharacterUuid: targetMsg.speakerCharacterUuid,
+        speakerName: targetMsg.speakerName,
+        speakerAvatar: targetMsg.speakerAvatar,
+        modelUsed: targetMsg.modelUsed,
       },
     });
   } catch (error: any) {

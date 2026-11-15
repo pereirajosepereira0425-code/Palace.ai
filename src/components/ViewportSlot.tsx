@@ -15,10 +15,79 @@ export interface ViewportSlotProps {
   testId?: string;
 }
 
+type VisibilityHandler = (isIntersecting: boolean) => void;
+
+interface ObserverPoolBucket {
+  observer: IntersectionObserver;
+  listeners: Map<Element, VisibilityHandler>;
+}
+
+const windowObserverPool = new Map<string, ObserverPoolBucket>();
+const elementObserverPools = new WeakMap<Element, Map<string, ObserverPoolBucket>>();
+
+function getOrCreateBucket(
+  root: Element | null,
+  rootMargin: string
+): { bucket: ObserverPoolBucket; deleteIfEmpty: () => void } {
+  const poolMap = root
+    ? elementObserverPools.get(root) ??
+      (() => {
+        const created = new Map<string, ObserverPoolBucket>();
+        elementObserverPools.set(root, created);
+        return created;
+      })()
+    : windowObserverPool;
+
+  let bucket = poolMap.get(rootMargin);
+  if (!bucket) {
+    const listeners = new Map<Element, VisibilityHandler>();
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          const cb = listeners.get(entry.target);
+          if (cb) cb(entry.isIntersecting);
+        }
+      },
+      { root, rootMargin, threshold: 0 }
+    );
+    bucket = { observer, listeners };
+    poolMap.set(rootMargin, bucket);
+  }
+
+  const targetBucket = bucket;
+  return {
+    bucket: targetBucket,
+    deleteIfEmpty: () => {
+      if (targetBucket.listeners.size === 0) {
+        targetBucket.observer.disconnect();
+        poolMap.delete(rootMargin);
+      }
+    },
+  };
+}
+
+function observePooledIntersection(
+  el: Element,
+  root: Element | null,
+  rootMargin: string,
+  onVisibilityChange: VisibilityHandler
+): () => void {
+  const { bucket, deleteIfEmpty } = getOrCreateBucket(root, rootMargin);
+  bucket.listeners.set(el, onVisibilityChange);
+  bucket.observer.observe(el);
+
+  return () => {
+    bucket.listeners.delete(el);
+    bucket.observer.unobserve(el);
+    deleteIfEmpty();
+  };
+}
+
 /**
- * Unmounts heavy child DOM nodes (images, blur layers, textareas, SVG trees)
- * once an item scrolls outside the viewport + overscan margin, while locking
- * its measured pixel dimensions so scrolling stays fluid without layout shifts.
+ * Unmounts heavy child DOM nodes (images, textareas, SVG trees, nested cards)
+ * once an item scrolls outside the viewport + tight overscan margin, sharing a
+ * single pooled IntersectionObserver per scroll container and locking measured
+ * pixel dimensions on exit so scrolling stays fluid with zero layout shift.
  */
 export const ViewportSlot: React.FC<ViewportSlotProps> = ({
   children,
@@ -41,7 +110,7 @@ export const ViewportSlot: React.FC<ViewportSlotProps> = ({
   const [lockedSize, setLockedSize] = useState<{ height: number; width?: number } | null>(null);
 
   const effectiveMargin =
-    rootMargin ?? (axis === 'horizontal' ? '0px 320px' : '550px 0px');
+    rootMargin ?? (axis === 'horizontal' ? '0px 100px' : '120px 0px');
 
   useEffect(() => {
     const el = containerRef.current;
@@ -52,16 +121,15 @@ export const ViewportSlot: React.FC<ViewportSlotProps> = ({
       return;
     }
 
-    const observer = new IntersectionObserver(
-      (entries) => {
-        const entry = entries[0];
-        if (!entry) return;
-
-        if (entry.isIntersecting) {
+    return observePooledIntersection(
+      el,
+      rootRef?.current ?? null,
+      effectiveMargin,
+      (isIntersecting) => {
+        if (isIntersecting) {
           setLockedSize(null);
           setInViewport(true);
         } else {
-          // Lock the latest measured pixel footprint before unmounting children
           const rect = el.getBoundingClientRect();
           const nextHeight = resolveSlotDimension(
             rect.height || measuredHeightRef.current,
@@ -83,38 +151,11 @@ export const ViewportSlot: React.FC<ViewportSlotProps> = ({
           setLockedSize({ height: nextHeight, width: nextWidth });
           setInViewport(false);
         }
-      },
-      {
-        root: rootRef?.current ?? null,
-        rootMargin: effectiveMargin,
-        threshold: 0,
       }
     );
-
-    observer.observe(el);
-    return () => observer.disconnect();
   }, [rootRef, effectiveMargin, axis, estimatedHeight, estimatedWidth]);
 
   const isMounted = forceMounted || inViewport;
-
-  useEffect(() => {
-    if (!isMounted) return;
-    const el = containerRef.current;
-    if (!el) return;
-
-    const recordSize = () => {
-      const rect = el.getBoundingClientRect();
-      if (rect.height > 0) measuredHeightRef.current = Math.round(rect.height);
-      if (rect.width > 0) measuredWidthRef.current = Math.round(rect.width);
-    };
-
-    recordSize();
-
-    if (typeof ResizeObserver === 'undefined') return;
-    const ro = new ResizeObserver(() => recordSize());
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [isMounted]);
 
   const slotStyle: React.CSSProperties = !isMounted
     ? {
