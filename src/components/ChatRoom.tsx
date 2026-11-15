@@ -82,6 +82,8 @@ import {
   resolveBrawlExchange,
   toGroupParticipant,
 } from '../utils/chatOrchestration.ts';
+import { playTTSResponseData, stopActiveTTSPlayback } from '../utils/ttsPlayer.ts';
+import { applyEditedSwipe, normalizeEditedMessageText } from '../utils/customVoiceUtils.ts';
 
 interface ChatRoomProps {
   character: Character;
@@ -229,6 +231,12 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
   // Copied message state
   const [copiedId, setCopiedId] = useState<number | null>(null);
+
+  // Inline Message Editing State
+  const [editingMessageId, setEditingMessageId] = useState<number | null>(null);
+  const [editingContent, setEditingContent] = useState<string>('');
+  const [savingEdit, setSavingEdit] = useState<boolean>(false);
+  const [editError, setEditError] = useState<string | null>(null);
 
   // Alternate Greetings calculation
   const parsedAlternateGreetings: string[] = useMemo(() => {
@@ -392,17 +400,23 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         setSession(data.session);
         setChatSummary('');
         setUnsavedCount(0);
-        const initGreet = greetingOverride || character.greeting;
-        setMessages([
-          {
-            id: Date.now(),
-            sessionId: data.session.uuid,
-            sender: 'character',
-            content: initGreet,
-            swipes: [initGreet],
-            activeSwipeIndex: 0,
-          },
-        ]);
+        const sessRes = await fetch(`/api/chat/session/${data.session.uuid}`);
+        if (sessRes.ok) {
+          const sessData = await sessRes.json();
+          setMessages(sessData.messages || []);
+        } else {
+          const initGreet = greetingOverride || character.greeting;
+          setMessages([
+            {
+              id: Date.now(),
+              sessionId: data.session.uuid,
+              sender: 'character',
+              content: initGreet,
+              swipes: [initGreet],
+              activeSwipeIndex: 0,
+            },
+          ]);
+        }
         setIsAllChatsOpen(false);
       }
     } catch (err) {
@@ -555,6 +569,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     if (newIndex < 0 || newIndex >= allGreetings.length) return;
     setActiveGreetingIndex(newIndex);
     const chosenGreeting = allGreetings[newIndex];
+    const firstMsg = messages[0];
 
     setMessages((prev) => {
       if (prev.length === 0) return prev;
@@ -568,6 +583,17 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         ...prev.slice(1),
       ];
     });
+
+    if (session?.uuid && firstMsg?.id && firstMsg.id < 1_000_000_000_000) {
+      fetch(`/api/chat/message/${firstMsg.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionUuid: session.uuid,
+          content: chosenGreeting,
+        }),
+      }).catch(console.error);
+    }
   };
 
   // Persist Group Roster, Multi-Model Config, & BrawlState onto chatSettings
@@ -1051,15 +1077,12 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     }
   };
 
-  // TTS Audio Narration
+  // TTS Audio Narration (supports Gemini, Chub.ai Custom Voices Engine, & calibrated fallback)
   const handlePlayTTS = async (message: ChatMessage) => {
     if (chubSettings.ttsApi === 'none') return;
 
     if (activeAudioMessageId === message.id) {
-      currentAudioRef.current?.pause();
-      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-        window.speechSynthesis.cancel();
-      }
+      stopActiveTTSPlayback(currentAudioRef);
       setActiveAudioMessageId(null);
       return;
     }
@@ -1083,32 +1106,41 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     }
 
     try {
-      if (currentAudioRef.current) {
-        currentAudioRef.current.pause();
-      }
+      stopActiveTTSPlayback(currentAudioRef);
 
       setAudioLoadingId(message.id);
+      const { chubApiKey, mergedSettings } = getEffectiveApiPayload();
+      const effectiveCustomVoiceUuid =
+        mergedSettings.customVoiceUuid || character.customVoiceUuid || undefined;
+      const effectiveTtsApi =
+        effectiveCustomVoiceUuid && (!mergedSettings.ttsApi || mergedSettings.ttsApi === 'gemini_flash_tts')
+          ? 'chub_custom_voice'
+          : mergedSettings.ttsApi || 'gemini_flash_tts';
+
       const res = await fetch('/api/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           text: message.content.slice(0, 450),
-          voiceName: selectedVoice || chubSettings.defaultVoice,
+          voiceName: selectedVoice || mergedSettings.defaultVoice,
           voiceStyle: character.voiceStyle || 'Expressive roleplay dialogue',
-          ttsApi: chubSettings.ttsApi,
+          ttsApi: effectiveTtsApi,
+          customVoiceUuid: effectiveCustomVoiceUuid,
+          ttsEndpointUrl: mergedSettings.ttsEndpointUrl || undefined,
+          ttsApiKey: mergedSettings.ttsApiKey || undefined,
+          chubApiKey,
         }),
       });
 
       if (!res.ok) throw new Error('TTS generation failed');
       const data = await res.json();
 
-      const audio = new Audio(`data:audio/wav;base64,${data.audioBase64}`);
-      currentAudioRef.current = audio;
-      setActiveAudioMessageId(message.id);
-
-      audio.onended = () => setActiveAudioMessageId(null);
-      audio.onerror = () => setActiveAudioMessageId(null);
-      await audio.play();
+      await playTTSResponseData(data, message.content, {
+        audioRef: currentAudioRef,
+        onStart: () => setActiveAudioMessageId(message.id),
+        onEnd: () => setActiveAudioMessageId(null),
+        onError: () => setActiveAudioMessageId(null),
+      });
     } catch (err) {
       console.warn('Cloud TTS unavailable, using browser speech synthesis:', err);
       if (!speakWithBrowserFallback()) {
@@ -1131,16 +1163,17 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     try {
       const res = await fetch(`/api/chat/reset/${session.uuid}`, { method: 'POST' });
       if (res.ok) {
-        setMessages([
-          {
-            id: Date.now(),
-            sessionId: session.uuid,
-            sender: 'character',
-            content: allGreetings[activeGreetingIndex] || character.greeting,
-            swipes: [allGreetings[activeGreetingIndex] || character.greeting],
-            activeSwipeIndex: 0,
-          },
-        ]);
+        const data = await res.json();
+        const greetingMsg: ChatMessage = data.message || {
+          id: Date.now(),
+          sessionId: session.uuid,
+          sender: 'character',
+          content: allGreetings[activeGreetingIndex] || character.greeting,
+          swipes: [allGreetings[activeGreetingIndex] || character.greeting],
+          activeSwipeIndex: 0,
+        };
+        setEditingMessageId(null);
+        setMessages([greetingMsg]);
       }
     } catch (err) {
       console.error('Failed to reset chat:', err);
@@ -1151,6 +1184,93 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     navigator.clipboard.writeText(text);
     setCopiedId(id);
     setTimeout(() => setCopiedId(null), 2000);
+  };
+
+  const handleStartEditMessage = (message: ChatMessage) => {
+    setEditingMessageId(message.id);
+    setEditingContent(message.content);
+    setEditError(null);
+  };
+
+  const handleCancelEditMessage = () => {
+    setEditingMessageId(null);
+    setEditingContent('');
+    setEditError(null);
+  };
+
+  const handleSaveEditedMessage = async (message: ChatMessage) => {
+    const cleaned = normalizeEditedMessageText(editingContent);
+    if (!cleaned) {
+      setEditError('Message text cannot be empty.');
+      return;
+    }
+    if (!session) return;
+
+    const applied = applyEditedSwipe({
+      swipesJsonOrArray: message.swipes,
+      activeSwipeIndex: message.activeSwipeIndex,
+      newContent: cleaned,
+    });
+
+    try {
+      setSavingEdit(true);
+      setEditError(null);
+
+      if (message.id > 0 && message.id < 1_000_000_000_000) {
+        const token = await getIdToken();
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+
+        const res = await fetch(`/api/chat/message/${message.id}`, {
+          method: 'PATCH',
+          headers,
+          body: JSON.stringify({
+            sessionUuid: session.uuid,
+            content: cleaned,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error || 'Failed to save message edit');
+        }
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === message.id
+              ? {
+                  ...m,
+                  ...data.message,
+                  content: data.message?.content || applied.content,
+                  swipes: Array.isArray(data.message?.swipes) ? data.message.swipes : applied.swipes,
+                  activeSwipeIndex:
+                    typeof data.message?.activeSwipeIndex === 'number'
+                      ? data.message.activeSwipeIndex
+                      : applied.activeSwipeIndex,
+                }
+              : m
+          )
+        );
+      } else {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === message.id
+              ? {
+                  ...m,
+                  content: applied.content,
+                  swipes: applied.swipes,
+                  activeSwipeIndex: applied.activeSwipeIndex,
+                }
+              : m
+          )
+        );
+      }
+
+      setEditingMessageId(null);
+      setEditingContent('');
+    } catch (err: any) {
+      setEditError(err?.message || 'Failed to save edit');
+    } finally {
+      setSavingEdit(false);
+    }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -1562,7 +1682,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             const keepMounted =
               msgIdx >= messages.length - 8 ||
               isInitialGreeting ||
-              activeAudioMessageId === message.id;
+              activeAudioMessageId === message.id ||
+              editingMessageId === message.id;
 
             const swipesList = message.swipes || [message.content];
             const currentSwipeIndex = message.activeSwipeIndex || 0;
@@ -1694,23 +1815,73 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                       </div>
                     )}
 
-                    {/* Roleplay Formatted Content */}
-                    <div className="space-y-2">
-                      {segments.map((seg, idx) =>
-                        seg.type === 'action' ? (
-                          <p
-                            key={idx}
-                            className="font-serif italic text-purple-300/95 leading-relaxed"
-                          >
-                            *{seg.text}*
-                          </p>
-                        ) : (
-                          <p key={idx} className="font-sans leading-relaxed text-zinc-100">
-                            {seg.text}
-                          </p>
-                        )
-                      )}
-                    </div>
+                    {/* Roleplay Formatted Content OR Inline Text Editor */}
+                    {editingMessageId === message.id ? (
+                      <div className="space-y-2.5 min-w-[260px] sm:min-w-[420px]">
+                        <textarea
+                          data-testid={`edit-message-textarea-${message.id}`}
+                          value={editingContent}
+                          onChange={(e) => setEditingContent(e.target.value)}
+                          onKeyDown={(e) => {
+                            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                              e.preventDefault();
+                              handleSaveEditedMessage(message);
+                            } else if (e.key === 'Escape') {
+                              e.preventDefault();
+                              handleCancelEditMessage();
+                            }
+                          }}
+                          rows={Math.max(3, Math.min(12, editingContent.split('\n').length + 1))}
+                          className="w-full rounded-2xl border border-purple-500/50 bg-zinc-950/90 p-3 text-sm text-zinc-100 leading-relaxed focus:border-purple-400 focus:outline-none resize-y"
+                          autoFocus
+                        />
+                        {editError && (
+                          <p className="text-[11px] font-medium text-rose-300">{editError}</p>
+                        )}
+                        <div className="flex items-center justify-between gap-2 text-xs">
+                          <span className="text-[10px] text-zinc-500">
+                            Ctrl/Cmd+Enter to save &bull; Esc to cancel
+                          </span>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={handleCancelEditMessage}
+                              disabled={savingEdit}
+                              className="rounded-xl border border-zinc-700 bg-zinc-900 px-3 py-1 font-semibold text-zinc-300 hover:bg-zinc-800 cursor-pointer"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="button"
+                              data-testid={`save-edit-message-btn-${message.id}`}
+                              onClick={() => handleSaveEditedMessage(message)}
+                              disabled={savingEdit}
+                              className="flex items-center gap-1 rounded-xl bg-purple-600 px-3 py-1 font-bold text-white hover:bg-purple-500 disabled:opacity-50 cursor-pointer"
+                            >
+                              <Save className="h-3 w-3" />
+                              <span>{savingEdit ? 'Saving...' : 'Save Edit'}</span>
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        {segments.map((seg, idx) =>
+                          seg.type === 'action' ? (
+                            <p
+                              key={idx}
+                              className="font-serif italic text-purple-300/95 leading-relaxed"
+                            >
+                              *{seg.text}*
+                            </p>
+                          ) : (
+                            <p key={idx} className="font-sans leading-relaxed text-zinc-100">
+                              {seg.text}
+                            </p>
+                          )
+                        )}
+                      </div>
+                    )}
 
                     {/* AI Scenario Scene Image Illustration */}
                     {showAiImages && message.imageUrl && (
@@ -1820,6 +1991,28 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                         <span className="text-[10px] font-semibold">
                           {activeAudioMessageId === message.id ? 'Playing' : 'Speak'}
                         </span>
+                      </button>
+                    )}
+
+                    {/* Edit Bot / Message Text */}
+                    {!isSystem && (
+                      <button
+                        type="button"
+                        data-testid={`edit-message-btn-${message.id}`}
+                        onClick={() =>
+                          editingMessageId === message.id
+                            ? handleCancelEditMessage()
+                            : handleStartEditMessage(message)
+                        }
+                        className={`flex items-center gap-1 rounded-xl border px-2 py-0.5 transition-colors cursor-pointer ${
+                          editingMessageId === message.id
+                            ? 'border-purple-400 bg-purple-600/25 text-purple-200'
+                            : 'border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-purple-500/40 hover:text-purple-200'
+                        }`}
+                        title={isCharacter ? 'Edit bot message text' : 'Edit message text'}
+                      >
+                        <Edit2 className="h-3 w-3" />
+                        <span className="text-[10px] font-semibold">Edit</span>
                       </button>
                     )}
 

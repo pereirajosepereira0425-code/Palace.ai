@@ -12,7 +12,9 @@ import {
   Shield,
   HelpCircle,
   ExternalLink,
+  AudioWaveform,
 } from 'lucide-react';
+import type { CustomVoiceRecord } from '../types/index.ts';
 
 import {
   CHUB_API_PROVIDERS,
@@ -45,6 +47,9 @@ export interface GenerationPresets {
   highThinking: boolean;
   searchGrounding: boolean;
   voiceName: string;
+  customVoiceUuid?: string;
+  ttsEndpointUrl?: string;
+  ttsApiKey?: string;
 }
 
 export const DEFAULT_PRESETS: GenerationPresets = {
@@ -81,11 +86,20 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
   const [fetchingModels, setFetchingModels] = useState(false);
   const [liveModels, setLiveModels] = useState<string[]>([]);
   const [testResult, setTestResult] = useState<ApiConnectionTestResult | null>(null);
+  const [customVoices, setCustomVoices] = useState<CustomVoiceRecord[]>([]);
 
   useEffect(() => {
     setFormData(presets);
     setTestResult(null);
     setLiveModels([]);
+    if (isOpen) {
+      fetch('/api/voices')
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (Array.isArray(data?.voices)) setCustomVoices(data.voices);
+        })
+        .catch(() => {});
+    }
   }, [presets, isOpen]);
 
   if (!isOpen) return null;
@@ -188,6 +202,9 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
           promptStructure: formData.promptStructure || existing.promptStructure || 'tavern_v2',
           ttsApi: formData.ttsApi || existing.ttsApi || 'gemini_flash_tts',
           defaultVoice: formData.voiceName,
+          customVoiceUuid: formData.customVoiceUuid || '',
+          ttsEndpointUrl: formData.ttsEndpointUrl || '',
+          ttsApiKey: formData.ttsApiKey || '',
           contextSize: formData.maxContextTokens || existing.contextSize || 8192,
           stagingUrl: formData.chubApiUrl || existing.stagingUrl,
         })
@@ -426,6 +443,48 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
                   ))}
                 </select>
               </div>
+
+              {(formData.ttsApi === 'chub_custom_voice' || customVoices.length > 0) && (
+                <div className="space-y-1.5">
+                  <label className="font-bold text-amber-300 flex items-center gap-1">
+                    <AudioWaveform className="h-3.5 w-3.5" />
+                    <span>Global Chub Custom Audio Voice</span>
+                  </label>
+                  <select
+                    value={formData.customVoiceUuid || ''}
+                    onChange={(e) =>
+                      setFormData({ ...formData, customVoiceUuid: e.target.value })
+                    }
+                    className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 focus:border-amber-400 focus:outline-none"
+                  >
+                    <option value="">Use Character&apos;s Default / Base Voice</option>
+                    {customVoices.map((cv) => (
+                      <option key={cv.uuid} value={cv.uuid}>
+                        🎙️ {cv.name} ({cv.baseVoiceName})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {formData.ttsApi === 'chub_custom_voice' && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <input
+                    type="url"
+                    value={formData.ttsEndpointUrl || ''}
+                    onChange={(e) => setFormData({ ...formData, ttsEndpointUrl: e.target.value })}
+                    placeholder="Chub / XTTS Clone URL (optional)"
+                    className="rounded-xl border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-[11px] font-mono text-zinc-200 focus:border-amber-400 focus:outline-none"
+                  />
+                  <input
+                    type="password"
+                    value={formData.ttsApiKey || ''}
+                    onChange={(e) => setFormData({ ...formData, ttsApiKey: e.target.value })}
+                    placeholder="TTS API Key (optional)"
+                    className="rounded-xl border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-[11px] font-mono text-zinc-200 focus:border-amber-400 focus:outline-none"
+                  />
+                </div>
+              )}
             </div>
           </div>
 

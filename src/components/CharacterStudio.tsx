@@ -28,19 +28,23 @@ import {
   Edit3,
   Heart,
   Layers,
+  AudioWaveform,
+  Mic,
 } from 'lucide-react';
 import {
   parseTavernCard,
   exportTavernCard,
   extractChubPngCard,
 } from '../utils/characterUtils.ts';
-import { Character, ContentRating, SharedLorebookRecord } from '../types/index.ts';
+import { Character, ContentRating, CustomVoiceRecord, SharedLorebookRecord } from '../types/index.ts';
 import { useAuth } from '../context/AuthContext.tsx';
 import { WikiEditor } from './WikiEditor.tsx';
 import { ThreeAvatarViewer } from './ThreeAvatarViewer.tsx';
 import { TagInput } from './TagInput.tsx';
 import { ViewportSlot } from './ViewportSlot.tsx';
+import { CustomVoiceStudioModal } from './CustomVoiceStudioModal.tsx';
 import { mergeCharacterLoreEntries, parseLorebookEntries } from '../utils/communityUtils.ts';
+import { playTTSResponseData, stopActiveTTSPlayback } from '../utils/ttsPlayer.ts';
 
 interface AttachedCharacterFile {
   id: string;
@@ -110,6 +114,9 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
   const [selectedTags, setSelectedTags] = useState<string[]>(['Anime', 'RPG']);
   const [voiceName, setVoiceName] = useState('Puck');
   const [voiceStyle, setVoiceStyle] = useState('Expressive, natural character dialogue');
+  const [customVoiceUuid, setCustomVoiceUuid] = useState<string>('');
+  const [customVoices, setCustomVoices] = useState<CustomVoiceRecord[]>([]);
+  const [isVoiceStudioOpen, setIsVoiceStudioOpen] = useState(false);
   const [thinkingDefault, setThinkingDefault] = useState(false);
   const [searchDefault, setSearchDefault] = useState(false);
   const [gender, setGender] = useState('Unknown');
@@ -171,6 +178,7 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
     }
     setVoiceName(sourceChar.voiceName || 'Puck');
     setVoiceStyle(sourceChar.voiceStyle || 'Expressive, natural character dialogue');
+    setCustomVoiceUuid(sourceChar.customVoiceUuid || '');
     setThinkingDefault(Boolean(sourceChar.thinkingDefault));
     setSearchDefault(Boolean(sourceChar.searchDefault));
 
@@ -246,8 +254,29 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
   const [errorMsg, setErrorMsg] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
   const [testingVoice, setTestingVoice] = useState(false);
-  const [audioElement, setAudioElement] = useState<HTMLAudioElement | null>(null);
+  const voiceAudioRef = React.useRef<HTMLAudioElement | null>(null);
   const [avatarDims, setAvatarDims] = useState<{ w: number; h: number } | null>(null);
+
+  React.useEffect(() => {
+    let active = true;
+    const loadVoices = async () => {
+      try {
+        const res = await fetch(`/api/voices?guestId=${encodeURIComponent(guestId)}`);
+        if (res.ok && active) {
+          const data = await res.json();
+          if (Array.isArray(data.voices)) {
+            setCustomVoices(data.voices);
+          }
+        }
+      } catch (err) {
+        console.warn('Could not load custom voices:', err);
+      }
+    };
+    loadVoices();
+    return () => {
+      active = false;
+    };
+  }, [guestId]);
 
   // URL Import Handler (Chub.ai, Janitor.ai, SpicyChat.ai)
   const handleImportFromUrl = async () => {
@@ -678,8 +707,8 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
   };
 
   const handleTestVoice = async () => {
-    if (testingVoice && audioElement) {
-      audioElement.pause();
+    if (testingVoice) {
+      stopActiveTTSPlayback(voiceAudioRef);
       setTestingVoice(false);
       return;
     }
@@ -695,17 +724,19 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
           text: sampleText.slice(0, 140),
           voiceName,
           voiceStyle,
+          customVoiceUuid: customVoiceUuid || undefined,
+          ttsApi: customVoiceUuid ? 'chub_custom_voice' : 'gemini_flash_tts',
         }),
       });
 
       if (!res.ok) throw new Error('TTS voice generation failed');
       const data = await res.json();
-      const audio = new Audio(`data:audio/wav;base64,${data.audioBase64}`);
-      setAudioElement(audio);
-
-      audio.onended = () => setTestingVoice(false);
-      audio.onerror = () => setTestingVoice(false);
-      await audio.play();
+      await playTTSResponseData(data, sampleText.slice(0, 140), {
+        audioRef: voiceAudioRef,
+        onStart: () => setTestingVoice(true),
+        onEnd: () => setTestingVoice(false),
+        onError: () => setTestingVoice(false),
+      });
     } catch (err) {
       console.error(err);
       setTestingVoice(false);
@@ -805,6 +836,7 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
           tags: selectedTags,
           voiceName,
           voiceStyle,
+          customVoiceUuid: customVoiceUuid || null,
           thinkingDefault,
           searchDefault,
           gender: gender === 'Custom' ? customGender || 'Unknown' : gender,
@@ -1362,29 +1394,40 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
               </div>
             </div>
 
-            {/* Voice & TTS Configuration */}
-            <div className="rounded-2xl border border-zinc-800 bg-zinc-950/80 p-3.5 space-y-2">
-              <div className="flex items-center justify-between">
+            {/* Voice & TTS Configuration (Gemini + Chub.ai Custom Voices Engine) */}
+            <div className="rounded-2xl border border-zinc-800 bg-zinc-950/80 p-3.5 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-xs font-bold text-amber-300 flex items-center gap-1.5">
                   <Volume2 className="h-4 w-4" />
-                  Voice Persona (Gemini 3.8 Flash TTS)
+                  Voice Persona &amp; Chub.ai Custom Voices Engine
                 </span>
-                <button
-                  type="button"
-                  onClick={handleTestVoice}
-                  className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[11px] font-semibold border ${
-                    testingVoice
-                      ? 'bg-amber-500/30 text-amber-200 border-amber-400 animate-pulse'
-                      : 'bg-zinc-800 text-zinc-200 border-zinc-700 hover:bg-zinc-700'
-                  }`}
-                >
-                  {testingVoice ? (
-                    <Square className="h-3 w-3 fill-current" />
-                  ) : (
-                    <Play className="h-3 w-3 fill-current" />
-                  )}
-                  <span>Test Voice Sample</span>
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    data-testid="open-custom-voice-studio-btn"
+                    onClick={() => setIsVoiceStudioOpen(true)}
+                    className="flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/15 px-2.5 py-1 text-[11px] font-bold text-amber-200 hover:bg-amber-500/25 transition-all cursor-pointer"
+                  >
+                    <Mic className="h-3 w-3" />
+                    <span>+ Custom Audio Voice</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleTestVoice}
+                    className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[11px] font-semibold border cursor-pointer ${
+                      testingVoice
+                        ? 'bg-amber-500/30 text-amber-200 border-amber-400 animate-pulse'
+                        : 'bg-zinc-800 text-zinc-200 border-zinc-700 hover:bg-zinc-700'
+                    }`}
+                  >
+                    {testingVoice ? (
+                      <Square className="h-3 w-3 fill-current" />
+                    ) : (
+                      <Play className="h-3 w-3 fill-current" />
+                    )}
+                    <span>Test Voice Sample</span>
+                  </button>
+                </div>
               </div>
 
               <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
@@ -1393,7 +1436,7 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
                     key={v}
                     type="button"
                     onClick={() => setVoiceName(v)}
-                    className={`rounded-xl border py-1.5 text-xs font-semibold transition-all ${
+                    className={`rounded-xl border py-1.5 text-xs font-semibold transition-all cursor-pointer ${
                       voiceName === v
                         ? 'border-amber-400/80 bg-amber-500/20 text-amber-200'
                         : 'border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-200'
@@ -1402,6 +1445,51 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
                     {v}
                   </button>
                 ))}
+              </div>
+
+              <div className="border-t border-zinc-800/80 pt-2.5 space-y-2">
+                <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+                  <div className="flex items-center gap-1.5 text-[11px] font-bold text-orange-300 shrink-0">
+                    <AudioWaveform className="h-3.5 w-3.5" />
+                    <span>Chub Custom Audio Clone:</span>
+                  </div>
+                  <select
+                    data-testid="studio-custom-voice-select"
+                    value={customVoiceUuid}
+                    onChange={(e) => setCustomVoiceUuid(e.target.value)}
+                    className="flex-1 rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-100 focus:border-amber-400 focus:outline-none"
+                  >
+                    <option value="">None (Use Base Voice: {voiceName})</option>
+                    {customVoices.map((cv) => (
+                      <option key={cv.uuid} value={cv.uuid}>
+                        🎙️ {cv.name} ({cv.baseVoiceName}, {cv.pitchShift >= 0 ? `+${cv.pitchShift}` : cv.pitchShift}st, {cv.speakingRate}%)
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {customVoiceUuid && (() => {
+                  const selectedCustom = customVoices.find((cv) => cv.uuid === customVoiceUuid);
+                  if (!selectedCustom) return null;
+                  return (
+                    <div
+                      data-testid="studio-custom-voice-preview"
+                      className="rounded-xl border border-amber-500/30 bg-amber-950/20 p-2.5 space-y-1.5"
+                    >
+                      <div className="flex items-center justify-between text-[11px]">
+                        <span className="font-bold text-amber-200">
+                          🎙️ Active Chub Custom Voice: {selectedCustom.name}
+                        </span>
+                        <span className="text-zinc-400 font-mono text-[10px]">
+                          {selectedCustom.description || `${selectedCustom.pitchShift}st • ${selectedCustom.speakingRate}%`}
+                        </span>
+                      </div>
+                      {selectedCustom.referenceAudioData && (
+                        <audio controls src={selectedCustom.referenceAudioData} className="w-full h-8" />
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
             </div>
 
@@ -1993,6 +2081,20 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
           </div>
         </div>
       </form>
+
+      <CustomVoiceStudioModal
+        isOpen={isVoiceStudioOpen}
+        onClose={() => setIsVoiceStudioOpen(false)}
+        defaultCharacterName={name}
+        onVoiceCreated={(voice) => {
+          setCustomVoices((prev) => [voice, ...prev.filter((v) => v.uuid !== voice.uuid)]);
+          setCustomVoiceUuid(voice.uuid);
+          setVoiceName(voice.baseVoiceName || voiceName);
+          if (voice.description && !voiceStyle) {
+            setVoiceStyle(voice.description);
+          }
+        }}
+      />
     </div>
   );
 };

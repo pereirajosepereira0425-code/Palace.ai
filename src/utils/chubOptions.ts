@@ -20,6 +20,12 @@ export const CHUB_TTS_APIS: ChubOptionItem[] = [
     description: 'Disable automatic and manual text-to-speech synthesis.',
   },
   {
+    id: 'chub_custom_voice',
+    label: 'Chub.ai Custom Voices Engine (Zero-Shot Audio Clone)',
+    badge: 'Chub Clone',
+    description: 'Clone any character voice from an uploaded or recorded audio reference sample using Chub.ai Custom Voices.',
+  },
+  {
     id: 'chub_tts',
     label: 'Chub TTS (Native Chub Voice)',
     badge: 'Chub.ai',

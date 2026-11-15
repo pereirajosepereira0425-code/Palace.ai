@@ -38,6 +38,7 @@ import { CharacterDetailView } from './components/CharacterDetailView.tsx';
 import { UserProfileView } from './components/UserProfileView.tsx';
 import { UserProfileModal } from './components/UserProfileModal.tsx';
 import { ViewportSlot } from './components/ViewportSlot.tsx';
+import { OfflineIndicator } from './components/PWAInstallButton.tsx';
 import { Character, ContentRating, SharedLorebookRecord, SharedPersona, TagRecord } from './types/index.ts';
 import { isOwnedByRequester } from './utils/ownership.ts';
 import { chunkItems } from './utils/viewportUnload.ts';
@@ -913,6 +914,9 @@ function PalaceApp() {
         isOpen={isProfileModalOpen}
         onClose={() => setIsProfileModalOpen(false)}
       />
+
+      {/* PWA Offline Status Banner */}
+      <OfflineIndicator />
     </div>
   );
 }

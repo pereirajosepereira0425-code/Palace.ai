@@ -20,6 +20,7 @@ import {
   Users,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.tsx';
+import { PWAInstallButton } from './PWAInstallButton.tsx';
 
 export type PalaceNavTab =
   | 'explore'
@@ -231,6 +232,9 @@ export const Navbar: React.FC<NavbarProps> = ({
             <option value="NSFL">NSFL</option>
             <option value="NSFW + NSFL">NSFW+NSFL</option>
           </select>
+          {/* Download Chub.ai as PWA App */}
+          <PWAInstallButton />
+
           {/* Presets Modal Button (/my_presets) */}
           <button
             onClick={onOpenPresetsModal}

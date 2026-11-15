@@ -19,7 +19,11 @@ import {
   buildEnsembleSynthesisPrompt,
   normalizeEnsembleConfig,
 } from '../utils/chatOrchestration.ts';
-import type { ModelEnsembleConfig } from '../types/index.ts';
+import {
+  buildChubCustomVoicePayload,
+  computeSpeechCalibration,
+} from '../utils/customVoiceUtils.ts';
+import type { CustomVoiceRecord, ModelEnsembleConfig } from '../types/index.ts';
 
 // Initialize server-side GoogleGenAI client with telemetry User-Agent header
 const ai = new GoogleGenAI({
@@ -895,48 +899,196 @@ Updated Long-Term Memory Summary:`;
   }
 }
 
+export interface TtsGenerationResult {
+  mode: 'audio' | 'client_voice_profile';
+  audioBase64?: string;
+  mimeType?: string;
+  engineUsed: string;
+  voiceProfile?: {
+    uuid?: string;
+    name: string;
+    engine: string;
+    pitchShift: number;
+    speakingRate: number;
+    webSpeechPitch: number;
+    webSpeechRate: number;
+    baseVoiceName: string;
+    referenceAudioData?: string;
+    referenceAudioMime?: string;
+    transcript?: string;
+  };
+}
+
 /**
- * Text-to-Speech generation using gemini-3.8-flash-tts
- * Returns base64 encoded WAV audio bytes
+ * Text-to-Speech generation powered by Chub.ai Custom Voices Engine (audio reference cloning)
+ * and Gemini 3.8 Flash TTS, with calibrated browser speech profile fallback.
  */
-export async function generateSpeechTTS(textToSpeak: string, voiceName: string = 'Puck', voiceStyle?: string): Promise<string> {
+export async function generateSpeechTTS(
+  textToSpeak: string,
+  voiceName: string = 'Puck',
+  voiceStyle?: string,
+  options?: {
+    ttsApi?: string;
+    ttsEndpointUrl?: string;
+    ttsApiKey?: string;
+    chubApiKey?: string;
+    customVoice?: CustomVoiceRecord | null;
+  }
+): Promise<TtsGenerationResult> {
   const cleanText = textToSpeak.replace(/\*([^*]+)\*/g, '($1)').trim();
   const truncatedText = cleanText.length > 500 ? cleanText.slice(0, 500) + '...' : cleanText;
 
+  const customVoice = options?.customVoice || null;
+  const effectiveBaseVoice = customVoice?.baseVoiceName || voiceName || 'Puck';
   const validVoices = ['Puck', 'Charon', 'Kore', 'Fenrir', 'Zephyr'];
-  const selectedVoice = validVoices.includes(voiceName) ? voiceName : 'Puck';
+  const selectedVoice = validVoices.includes(effectiveBaseVoice) ? effectiveBaseVoice : 'Puck';
 
-  try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash-tts',
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            {
-              text: truncatedText,
-              speechMetadata: {
-                style: voiceStyle || 'Expressive, immersive roleplay character voice',
-              },
-            },
-          ],
-        },
-      ],
-      config: {
-        responseModalities: ['AUDIO'],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: selectedVoice },
-          },
-        },
-      },
-    });
+  const chubClonePayload = customVoice
+    ? buildChubCustomVoicePayload({
+        text: truncatedText,
+        voice: customVoice,
+        voiceStyle,
+      })
+    : null;
 
-    const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-    if (base64Audio) return base64Audio;
-  } catch (ttsErr: any) {
-    console.warn('TTS generation failed or quota reached:', ttsErr?.message);
+  const calibration = computeSpeechCalibration({
+    pitchShift: customVoice?.pitchShift ?? 0,
+    speakingRate: customVoice?.speakingRate ?? 100,
+    baseVoiceName: selectedVoice,
+  });
+
+  // 1. Try external Chub.ai Custom Voices / XTTSv2 / Custom TTS endpoint when explicitly configured
+  const externalTtsUrl = (options?.ttsEndpointUrl || '').trim();
+  const externalTtsKey = (options?.ttsApiKey || options?.chubApiKey || '').trim();
+  if (
+    externalTtsUrl &&
+    (options?.ttsApi === 'chub_custom_voice' ||
+      options?.ttsApi === 'chub_tts' ||
+      options?.ttsApi === 'custom_tts' ||
+      options?.ttsApi === 'xttsv2' ||
+      options?.ttsApi === 'alltalk' ||
+      customVoice)
+  ) {
+    try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (externalTtsKey) {
+        headers['Authorization'] = `Bearer ${externalTtsKey}`;
+        headers['CH-API-KEY'] = externalTtsKey;
+      }
+      const extRes = await fetch(externalTtsUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(
+          chubClonePayload || {
+            text: truncatedText,
+            voice: selectedVoice,
+            style: voiceStyle,
+          }
+        ),
+        signal: AbortSignal.timeout(12000),
+      });
+
+      if (extRes.ok) {
+        const ct = (extRes.headers.get('content-type') || '').toLowerCase();
+        if (ct.includes('audio/')) {
+          const buf = Buffer.from(await extRes.arrayBuffer());
+          if (buf.length > 0) {
+            return {
+              mode: 'audio',
+              audioBase64: buf.toString('base64'),
+              mimeType: ct.split(';')[0] || 'audio/wav',
+              engineUsed: customVoice
+                ? `Chub.ai Custom Voices (${customVoice.name})`
+                : 'Chub / Custom TTS Engine',
+            };
+          }
+        } else {
+          const json = await extRes.json().catch(() => null);
+          const b64 = json?.audioBase64 || json?.audio || json?.data;
+          if (typeof b64 === 'string' && b64.length > 20) {
+            return {
+              mode: 'audio',
+              audioBase64: b64.replace(/^data:audio\/[^;]+;base64,/, ''),
+              mimeType: json?.mimeType || 'audio/wav',
+              engineUsed: customVoice
+                ? `Chub.ai Custom Voices (${customVoice.name})`
+                : 'Chub / Custom TTS Engine',
+            };
+          }
+        }
+      }
+    } catch (extErr: any) {
+      console.warn('External Chub TTS endpoint fallback:', extErr?.message);
+    }
   }
 
-  throw new Error('TTS service currently reaching quota limits. Please try again in a few moments.');
+  // 2. Try Gemini 3.8 Flash TTS conditioned with Chub Custom Voice timbre & cadence
+  try {
+    const response = await callGeminiWithTimeout(
+      () =>
+        ai.models.generateContent({
+          model: 'gemini-3.8-flash-tts',
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                {
+                  text: truncatedText,
+                  speechMetadata: {
+                    style:
+                      chubClonePayload?.derivedStyle ||
+                      voiceStyle ||
+                      'Expressive, immersive roleplay character voice',
+                  },
+                },
+              ],
+            },
+          ],
+          config: {
+            responseModalities: ['AUDIO'],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: { voiceName: selectedVoice },
+              },
+            },
+          },
+        }),
+      8000
+    );
+
+    const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+    if (base64Audio) {
+      return {
+        mode: 'audio',
+        audioBase64: base64Audio,
+        mimeType: 'audio/wav',
+        engineUsed: customVoice
+          ? `Chub Custom Voice · ${customVoice.name}`
+          : `Gemini 3.8 Flash TTS (${selectedVoice})`,
+      };
+    }
+  } catch (ttsErr: any) {
+    console.warn('Cloud TTS unavailable, returning calibrated client voice profile:', ttsErr?.message);
+  }
+
+  // 3. Clean client voice profile fallback (with pitch/rate calibration + reference audio metadata)
+  return {
+    mode: 'client_voice_profile',
+    engineUsed: customVoice
+      ? `Chub.ai Custom Voices (${customVoice.name})`
+      : `Browser Voice (${selectedVoice})`,
+    voiceProfile: {
+      uuid: customVoice?.uuid,
+      name: customVoice?.name || selectedVoice,
+      engine: customVoice?.engine || options?.ttsApi || 'chub_custom_voice',
+      pitchShift: calibration.pitchShift,
+      speakingRate: calibration.speakingRate,
+      webSpeechPitch: calibration.webSpeechPitch,
+      webSpeechRate: calibration.webSpeechRate,
+      baseVoiceName: calibration.baseVoiceName,
+      referenceAudioData: customVoice?.referenceAudioData,
+      referenceAudioMime: customVoice?.referenceAudioMime,
+      transcript: customVoice?.transcript,
+    },
+  };
 }

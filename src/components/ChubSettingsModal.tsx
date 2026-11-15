@@ -16,8 +16,11 @@ import {
   HelpCircle,
   Key,
   ExternalLink,
+  AudioWaveform,
+  Mic,
 } from 'lucide-react';
-import { ChubChatSettings } from '../types/index.ts';
+import { ChubChatSettings, CustomVoiceRecord } from '../types/index.ts';
+import { CustomVoiceStudioModal } from './CustomVoiceStudioModal.tsx';
 import {
   CHUB_TTS_APIS,
   CHUB_API_PROVIDERS,
@@ -107,6 +110,8 @@ export const ChubSettingsModal: React.FC<ChubSettingsModalProps> = ({
   const [fetchingModels, setFetchingModels] = useState(false);
   const [liveModels, setLiveModels] = useState<string[]>([]);
   const [testResult, setTestResult] = useState<ApiConnectionTestResult | null>(null);
+  const [customVoices, setCustomVoices] = useState<CustomVoiceRecord[]>([]);
+  const [isVoiceStudioOpen, setIsVoiceStudioOpen] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
@@ -125,6 +130,12 @@ export const ChubSettingsModal: React.FC<ChubSettingsModalProps> = ({
       } catch {
         // ignore
       }
+      fetch('/api/voices')
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (Array.isArray(data?.voices)) setCustomVoices(data.voices);
+        })
+        .catch(() => {});
     }
   }, [isOpen, settings]);
 
@@ -255,6 +266,9 @@ export const ChubSettingsModal: React.FC<ChubSettingsModalProps> = ({
           customModel: current.model,
           promptStructure: current.promptStructure,
           ttsApi: current.ttsApi,
+          customVoiceUuid: current.customVoiceUuid || '',
+          ttsEndpointUrl: current.ttsEndpointUrl || '',
+          ttsApiKey: current.ttsApiKey || '',
           maxContextTokens: current.contextSize,
         })
       );
@@ -480,7 +494,41 @@ export const ChubSettingsModal: React.FC<ChubSettingsModalProps> = ({
                     {CHUB_TTS_APIS.find((t) => t.id === current.ttsApi)?.description ||
                       'Select TTS voice synthesis backend.'}
                   </p>
-                  {['elevenlabs', 'openai_tts', 'silero', 'alltalk', 'xttsv2', 'kokoro', 'edge_tts', 'custom_tts'].includes(
+                  <div className="pt-1 space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[11px] font-bold text-amber-300 flex items-center gap-1">
+                        <AudioWaveform className="h-3.5 w-3.5" />
+                        <span>Chub Custom Audio Voice</span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setIsVoiceStudioOpen(true)}
+                        className="flex items-center gap-1 rounded-lg border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 text-[10px] font-bold text-amber-200 hover:bg-amber-500/25 cursor-pointer"
+                      >
+                        <Mic className="h-3 w-3" />
+                        <span>+ Upload / Record</span>
+                      </button>
+                    </div>
+                    <select
+                      value={current.customVoiceUuid || ''}
+                      onChange={(e) =>
+                        setCurrent({
+                          ...current,
+                          customVoiceUuid: e.target.value,
+                          ...(e.target.value ? { ttsApi: 'chub_custom_voice' } : {}),
+                        })
+                      }
+                      className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-1.5 text-xs text-zinc-100 focus:border-amber-400 focus:outline-none"
+                    >
+                      <option value="">Use Character&apos;s Voice / Base Neural Voice</option>
+                      {customVoices.map((cv) => (
+                        <option key={cv.uuid} value={cv.uuid}>
+                          🎙️ {cv.name} ({cv.baseVoiceName})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  {['elevenlabs', 'openai_tts', 'silero', 'alltalk', 'xttsv2', 'kokoro', 'edge_tts', 'custom_tts', 'chub_custom_voice'].includes(
                     current.ttsApi
                   ) && (
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
@@ -488,14 +536,14 @@ export const ChubSettingsModal: React.FC<ChubSettingsModalProps> = ({
                         type="url"
                         value={current.ttsEndpointUrl || ''}
                         onChange={(e) => setCurrent({ ...current, ttsEndpointUrl: e.target.value })}
-                        placeholder="TTS Server URL (optional)"
+                        placeholder="TTS / Chub Clone Server URL (optional)"
                         className="rounded-xl border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-[11px] font-mono text-zinc-200 focus:border-purple-500 focus:outline-none"
                       />
                       <input
                         type="password"
                         value={current.ttsApiKey || ''}
                         onChange={(e) => setCurrent({ ...current, ttsApiKey: e.target.value })}
-                        placeholder="TTS API Key (e.g. ElevenLabs / OpenAI)"
+                        placeholder="TTS API Key (optional)"
                         className="rounded-xl border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-[11px] font-mono text-zinc-200 focus:border-purple-500 focus:outline-none"
                       />
                     </div>
@@ -1030,6 +1078,20 @@ export const ChubSettingsModal: React.FC<ChubSettingsModalProps> = ({
           </button>
         </div>
       </div>
+
+      <CustomVoiceStudioModal
+        isOpen={isVoiceStudioOpen}
+        onClose={() => setIsVoiceStudioOpen(false)}
+        onVoiceCreated={(voice) => {
+          setCustomVoices((prev) => [voice, ...prev.filter((v) => v.uuid !== voice.uuid)]);
+          setCurrent((prev) => ({
+            ...prev,
+            ttsApi: 'chub_custom_voice',
+            customVoiceUuid: voice.uuid,
+            defaultVoice: voice.baseVoiceName || prev.defaultVoice,
+          }));
+        }}
+      />
     </div>
   );
 };

@@ -953,3 +953,98 @@ test('BrawlChat text fighting detects real combat triggers, avoids casual false 
   assert.equal(fleeState.outcome, 'fled');
 });
 
+test('Chub.ai Custom Voices Engine validates audio clips, computes pitch/tempo calibration, and builds clone payloads', async () => {
+  const {
+    validateCustomVoiceInput,
+    computeSpeechCalibration,
+    buildChubCustomVoicePayload,
+  } = await import('./customVoiceUtils.ts');
+
+  // Validation rejects missing name or missing audio
+  assert.equal(validateCustomVoiceInput({ name: 'A', referenceAudioData: 'data:audio/wav;base64,UklG' }).ok, false);
+  assert.equal(validateCustomVoiceInput({ name: 'Velvet Noir', referenceAudioData: '' }).ok, false);
+  assert.equal(
+    validateCustomVoiceInput({ name: 'BadMime', referenceAudioData: 'data:text/plain;base64,aGVsbG8=' }).ok,
+    false
+  );
+
+  // Valid base64 WAV data URL & valid HTTPS URL
+  const wavB64 = Buffer.from('RIFF\x24\x00\x00\x00WAVEfmt ', 'latin1').toString('base64');
+  const dataUrlRes = validateCustomVoiceInput({
+    name: 'Velvet Noir',
+    referenceAudioData: `data:audio/wav;base64,${wavB64}`,
+  });
+  assert.equal(dataUrlRes.ok, true);
+  assert.equal(dataUrlRes.mimeType, 'audio/wav');
+
+  const urlRes = validateCustomVoiceInput({
+    name: 'Remote Sample',
+    referenceAudioData: 'https://cdn.example.com/voice.mp3',
+  });
+  assert.equal(urlRes.ok, true);
+
+  // Calibration clamps extreme pitch & tempo cleanly
+  const clamped = computeSpeechCalibration({ pitchShift: -12, speakingRate: 220, baseVoiceName: 'Charon' });
+  assert.equal(clamped.pitchShift, -6);
+  assert.equal(clamped.speakingRate, 140);
+  assert.ok(clamped.webSpeechPitch >= 0.5 && clamped.webSpeechPitch <= 1.8);
+  assert.equal(clamped.webSpeechRate, 1.4);
+
+  const payload = buildChubCustomVoicePayload({
+    text: '*leans in* Watch your step.',
+    voice: {
+      id: 1,
+      uuid: 'voice_test_1',
+      userId: 'guest',
+      creatorName: 'Tester',
+      name: 'Velvet Noir',
+      description: 'Smoky midnight contralto',
+      engine: 'chub_custom_voice',
+      referenceAudioData: `data:audio/wav;base64,${wavB64}`,
+      referenceAudioMime: 'audio/wav',
+      referenceDurationSec: 4.5,
+      transcript: 'Watch your step.',
+      pitchShift: -2,
+      speakingRate: 95,
+      baseVoiceName: 'Kore',
+      isPublic: true,
+      useCount: 0,
+      createdAt: new Date().toISOString(),
+    },
+  });
+  assert.equal(payload.engine, 'chub_custom_voice');
+  assert.equal(payload.voice_id, 'voice_test_1');
+  assert.equal(payload.pitch_shift, -2);
+  assert.equal(payload.speed, 0.95);
+  assert.ok(payload.derivedStyle.includes('Velvet Noir'));
+  assert.ok(payload.derivedStyle.includes('Smoky midnight contralto'));
+});
+
+test('applyEditedSwipe and normalizeEditedMessageText update bot text and preserve active swipe index', async () => {
+  const { normalizeEditedMessageText, applyEditedSwipe } = await import('./customVoiceUtils.ts');
+
+  assert.equal(normalizeEditedMessageText('  Hello\r\nWorld  '), 'Hello\nWorld');
+
+  const edited = applyEditedSwipe({
+    swipesJsonOrArray: ['First draft reply.', 'Second swipe reply.'],
+    activeSwipeIndex: 1,
+    newContent: '  *Adjusts coat* Edited second swipe reply.\r\nLooking sharper. ',
+  });
+
+  assert.equal(edited.content, '*Adjusts coat* Edited second swipe reply.\nLooking sharper.');
+  assert.deepEqual(edited.swipes, [
+    'First draft reply.',
+    '*Adjusts coat* Edited second swipe reply.\nLooking sharper.',
+  ]);
+  assert.equal(edited.activeSwipeIndex, 1);
+
+  const emptySwipes = applyEditedSwipe({
+    swipesJsonOrArray: null,
+    activeSwipeIndex: 0,
+    newContent: 'Edited greeting',
+  });
+  assert.deepEqual(emptySwipes.swipes, ['Edited greeting']);
+  assert.equal(emptySwipes.activeSwipeIndex, 0);
+});
+
+

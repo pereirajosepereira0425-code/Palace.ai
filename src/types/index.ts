@@ -25,6 +25,7 @@ export interface Character {
   likeCount: number;
   voiceName: string;
   voiceStyle?: string | null;
+  customVoiceUuid?: string | null;
   thinkingDefault: boolean;
   searchDefault: boolean;
   lorebook?: string | null;
@@ -216,6 +217,7 @@ export interface ChubChatSettings {
   ttsApi: string;
   ttsEndpointUrl?: string;
   ttsApiKey?: string;
+  customVoiceUuid?: string | null;
   defaultModel: string;
   defaultVoice: string;
   autoGeneration: boolean;
@@ -316,5 +318,25 @@ export interface UserFollowSummary {
   isFollowing: boolean;
   followers: FollowUserSummary[];
   following: FollowUserSummary[];
+}
+
+export interface CustomVoiceRecord {
+  id: number;
+  uuid: string;
+  userId: string;
+  creatorName: string;
+  name: string;
+  description: string;
+  engine: string;
+  referenceAudioData: string;
+  referenceAudioMime: string;
+  referenceDurationSec: number;
+  transcript: string;
+  pitchShift: number;
+  speakingRate: number;
+  baseVoiceName: string;
+  isPublic: boolean;
+  useCount: number;
+  createdAt?: string;
 }
 

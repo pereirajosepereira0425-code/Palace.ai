@@ -35,8 +35,9 @@ import {
   Trash2,
   Globe,
   Search,
+  AudioWaveform,
 } from 'lucide-react';
-import { Character, ChatSession, SharedLorebookRecord } from '../types/index.ts';
+import { Character, ChatSession, CustomVoiceRecord, SharedLorebookRecord } from '../types/index.ts';
 import { ThreeAvatarViewer } from './ThreeAvatarViewer.tsx';
 import {
   renderWikiMarkup,
@@ -215,6 +216,7 @@ export const CharacterDetailView: React.FC<CharacterDetailViewProps> = ({
   // Chats State (Your active chats for this character + public previews)
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
+  const [attachedCustomVoice, setAttachedCustomVoice] = useState<CustomVoiceRecord | null>(null);
 
   // Follow Creator & Ratings/Reviews State
   const [isFollowingCreator, setIsFollowingCreator] = useState(false);
@@ -274,6 +276,25 @@ export const CharacterDetailView: React.FC<CharacterDetailViewProps> = ({
       active = false;
     };
   }, [character.uuid, guestId, getIdToken]);
+
+  useEffect(() => {
+    if (!character.customVoiceUuid) {
+      setAttachedCustomVoice(null);
+      return;
+    }
+    let active = true;
+    fetch(`/api/voices?guestId=${encodeURIComponent(guestId)}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!active || !Array.isArray(data?.voices)) return;
+        const found = data.voices.find((v: CustomVoiceRecord) => v.uuid === character.customVoiceUuid);
+        setAttachedCustomVoice(found || null);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [character.customVoiceUuid, guestId]);
 
   useEffect(() => {
     if (activeTab !== 'lorebook' || !canModify) return;
@@ -850,8 +871,26 @@ export const CharacterDetailView: React.FC<CharacterDetailViewProps> = ({
                   </div>
                   <div className="flex justify-between text-zinc-400">
                     <span>Voice Persona</span>
-                    <span className="text-zinc-200 font-semibold">{character.voiceName || 'Puck'}</span>
+                    <span className="text-zinc-200 font-semibold flex items-center gap-1">
+                      {attachedCustomVoice ? (
+                        <>
+                          <AudioWaveform className="h-3 w-3 text-amber-400" />
+                          <span>{attachedCustomVoice.name}</span>
+                        </>
+                      ) : (
+                        character.voiceName || 'Puck'
+                      )}
+                    </span>
                   </div>
+                  {attachedCustomVoice?.referenceAudioData && (
+                    <div className="pt-1">
+                      <audio
+                        controls
+                        src={attachedCustomVoice.referenceAudioData}
+                        className="w-full h-7"
+                      />
+                    </div>
+                  )}
                   <div className="flex justify-between text-zinc-400">
                     <span>Rating &amp; Chats</span>
                     <span className="text-amber-300 font-bold">

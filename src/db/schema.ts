@@ -51,6 +51,7 @@ export const characters = pgTable('characters', {
   likeCount: integer('like_count').notNull().default(0),
   voiceName: text('voice_name').notNull().default('Puck'), // 'Puck', 'Charon', 'Kore', 'Fenrir', 'Zephyr'
   voiceStyle: text('voice_style').default('Expressive, natural character dialogue'),
+  customVoiceUuid: text('custom_voice_uuid'), // Reference to custom_voices.uuid (Chub.ai Custom Voices Engine)
   thinkingDefault: boolean('thinking_default').notNull().default(false),
   searchDefault: boolean('search_default').notNull().default(false),
   lorebook: text('lorebook').default('[]'), // JSON array of lorebook entries: { key: string, content: string }[]
@@ -198,6 +199,27 @@ export const userFollows = pgTable('user_follows', {
   followerName: text('follower_name').notNull().default('Palace Explorer'),
   followerAvatar: text('follower_avatar'),
   followingUid: text('following_uid').notNull(),
+  createdAt: timestamp('created_at').defaultNow(),
+});
+
+// Chub.ai Custom Voices (Audio Reference Clones)
+export const customVoices = pgTable('custom_voices', {
+  id: serial('id').primaryKey(),
+  uuid: text('uuid').notNull().unique(),
+  userId: text('user_id').notNull(),
+  creatorName: text('creator_name').notNull().default('Anonymous'),
+  name: text('name').notNull(),
+  description: text('description').notNull().default(''),
+  engine: text('engine').notNull().default('chub_custom_voice'),
+  referenceAudioData: text('reference_audio_data').notNull(),
+  referenceAudioMime: text('reference_audio_mime').notNull().default('audio/wav'),
+  referenceDurationSec: integer('reference_duration_sec').notNull().default(0),
+  transcript: text('transcript').notNull().default(''),
+  pitchShift: integer('pitch_shift').notNull().default(0),
+  speakingRate: integer('speaking_rate').notNull().default(100),
+  baseVoiceName: text('base_voice_name').notNull().default('Puck'),
+  isPublic: boolean('is_public').notNull().default(true),
+  useCount: integer('use_count').notNull().default(0),
   createdAt: timestamp('created_at').defaultNow(),
 });
 

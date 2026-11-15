@@ -20,11 +20,20 @@ import {
   getUserSessions,
   addChatMessage,
   updateMessageSwipe,
+  updateChatMessageContent,
   updateSessionSettings,
   updateSessionSummary,
   deleteSession,
   resetSessionMessages,
 } from '../src/db/chats.ts';
+import {
+  getCustomVoices,
+  getCustomVoiceByUuid,
+  createCustomVoice,
+  deleteCustomVoice,
+  incrementCustomVoiceUseCount,
+} from '../src/db/voices.ts';
+import { validateCustomVoiceInput } from '../src/utils/customVoiceUtils.ts';
 import {
   getOrCreateUser,
   getUserProfile,
@@ -233,6 +242,7 @@ apiRouter.post('/characters', optionalAuth, async (req: AuthRequest, res) => {
       creatorName: req.user?.name || req.user?.email?.split('@')[0] || body.creatorName || 'Anonymous',
       voiceName: body.voiceName || 'Puck',
       voiceStyle: body.voiceStyle || 'Expressive, natural character dialogue',
+      customVoiceUuid: body.customVoiceUuid || null,
       thinkingDefault: Boolean(body.thinkingDefault),
       searchDefault: Boolean(body.searchDefault),
       lorebook: typeof body.lorebook === 'string' ? body.lorebook : JSON.stringify(body.lorebook || []),
@@ -308,6 +318,7 @@ apiRouter.put('/characters/:uuid', optionalAuth, async (req: AuthRequest, res) =
       rating: validRating,
       voiceName: body.voiceName,
       voiceStyle: body.voiceStyle,
+      customVoiceUuid: body.customVoiceUuid,
       thinkingDefault: body.thinkingDefault !== undefined ? Boolean(body.thinkingDefault) : undefined,
       searchDefault: body.searchDefault !== undefined ? Boolean(body.searchDefault) : undefined,
       lorebook:
@@ -1669,13 +1680,39 @@ apiRouter.post('/chat/reset/:sessionUuid', optionalAuth, async (req: AuthRequest
       return res.status(404).json({ error: 'Session not found' });
     }
 
-    await resetSessionMessages(req.params.sessionUuid, details.character.greeting);
-    res.json({ success: true, greeting: details.character.greeting });
+    const resetResult = await resetSessionMessages(req.params.sessionUuid, details.character.greeting);
+    res.json({ success: true, greeting: details.character.greeting, message: resetResult.message });
   } catch (error: any) {
     console.error('Failed to reset session:', error);
     res.status(500).json({ error: error.message || 'Failed to reset session' });
   }
 });
+
+// Edit bot or user message text in a chat session (persists content & active swipe)
+const handleEditChatMessage = async (req: AuthRequest, res: express.Response) => {
+  try {
+    const messageId = Number(req.params.messageId);
+    const { sessionUuid, content } = req.body || {};
+    if (!Number.isFinite(messageId) || messageId <= 0) {
+      return res.status(400).json({ error: 'Valid numeric messageId is required' });
+    }
+    if (!sessionUuid || typeof content !== 'string' || !content.trim()) {
+      return res.status(400).json({ error: 'sessionUuid and non-empty content are required' });
+    }
+
+    const updated = await updateChatMessageContent(messageId, sessionUuid, content);
+    if (!updated) {
+      return res.status(404).json({ error: 'Message not found in this chat session' });
+    }
+    res.json({ message: updated });
+  } catch (error: any) {
+    console.error('Failed to edit chat message:', error);
+    res.status(500).json({ error: error.message || 'Failed to edit chat message' });
+  }
+};
+
+apiRouter.patch('/chat/message/:messageId', optionalAuth, handleEditChatMessage);
+apiRouter.put('/chat/message/:messageId', optionalAuth, handleEditChatMessage);
 
 apiRouter.delete('/chat/session/:sessionUuid', optionalAuth, async (req: AuthRequest, res) => {
   try {
@@ -1687,20 +1724,111 @@ apiRouter.delete('/chat/session/:sessionUuid', optionalAuth, async (req: AuthReq
   }
 });
 
-// ----------------- TEXT-TO-SPEECH (TTS) -----------------
-// Uses model gemini-3.8-flash-tts
+// ----------------- CHUB.AI CUSTOM VOICES ENGINE -----------------
+apiRouter.get('/voices', optionalAuth, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.user?.uid || (req.query.guestId as string) || undefined;
+    const voices = await getCustomVoices(userId);
+    res.json({ voices });
+  } catch (error: any) {
+    console.error('Failed to list custom voices:', error);
+    res.status(500).json({ error: error.message || 'Failed to fetch custom voices' });
+  }
+});
+
+apiRouter.post('/voices', optionalAuth, async (req: AuthRequest, res) => {
+  try {
+    const body = req.body || {};
+    const validation = validateCustomVoiceInput({
+      name: body.name,
+      referenceAudioData: body.referenceAudioData,
+      referenceDurationSec: body.referenceDurationSec,
+    });
+    if (!validation.ok || !validation.normalizedAudioData) {
+      return res.status(400).json({ error: validation.error || 'Invalid voice sample' });
+    }
+
+    const uuid =
+      'voice_' + Math.random().toString(36).substring(2, 10) + Date.now().toString(36);
+    const created = await createCustomVoice({
+      uuid,
+      userId: req.user?.uid || body.guestId || 'guest',
+      creatorName:
+        req.user?.name || req.user?.email?.split('@')[0] || body.creatorName || 'Anonymous',
+      name: String(body.name).trim(),
+      description: String(body.description || '').trim(),
+      engine: String(body.engine || 'chub_custom_voice'),
+      referenceAudioData: validation.normalizedAudioData,
+      referenceAudioMime: String(body.referenceAudioMime || validation.mimeType || 'audio/wav'),
+      referenceDurationSec: Number(body.referenceDurationSec || 0),
+      transcript: String(body.transcript || '').trim(),
+      pitchShift: Number(body.pitchShift ?? 0),
+      speakingRate: Number(body.speakingRate ?? 100),
+      baseVoiceName: String(body.baseVoiceName || 'Puck'),
+      isPublic: body.isPublic !== false,
+    });
+
+    res.status(201).json({ voice: created });
+  } catch (error: any) {
+    console.error('Failed to create custom voice:', error);
+    res.status(500).json({ error: error.message || 'Failed to create custom voice' });
+  }
+});
+
+apiRouter.delete('/voices/:uuid', optionalAuth, async (req: AuthRequest, res) => {
+  try {
+    const requester = {
+      userUid: req.user?.uid || null,
+      guestId: (req.query.guestId as string) || (req.body?.guestId as string) || null,
+    };
+    const result = await deleteCustomVoice(req.params.uuid, requester);
+    if (result.status === 'not_found') {
+      return res.status(404).json({ error: 'Custom voice not found' });
+    }
+    if (result.status === 'forbidden') {
+      return res.status(403).json({ error: 'You can only delete custom voices you created' });
+    }
+    res.json({ success: true });
+  } catch (error: any) {
+    console.error('Failed to delete custom voice:', error);
+    res.status(500).json({ error: error.message || 'Failed to delete custom voice' });
+  }
+});
+
+// ----------------- TEXT-TO-SPEECH (TTS & CHUB CUSTOM VOICES) -----------------
 apiRouter.post('/tts', async (req, res) => {
   try {
-    const { text, voiceName, voiceStyle } = req.body;
+    const {
+      text,
+      voiceName,
+      voiceStyle,
+      ttsApi,
+      customVoiceUuid,
+      ttsEndpointUrl,
+      ttsApiKey,
+      chubApiKey,
+    } = req.body || {};
     if (!text || typeof text !== 'string') {
       return res.status(400).json({ error: 'Text is required for TTS' });
     }
 
-    const audioBase64 = await generateSpeechTTS(text, voiceName || 'Puck', voiceStyle);
-    res.json({
-      audioBase64,
-      mimeType: 'audio/wav',
+    let customVoice: any = null;
+    if (typeof customVoiceUuid === 'string' && customVoiceUuid.trim()) {
+      customVoice = await getCustomVoiceByUuid(customVoiceUuid.trim());
+      if (customVoice) {
+        await incrementCustomVoiceUseCount(customVoice.uuid);
+      }
+    }
+
+    const result = await generateSpeechTTS(text, voiceName || 'Puck', voiceStyle, {
+      ttsApi,
+      ttsEndpointUrl,
+      ttsApiKey,
+      chubApiKey,
+      customVoice,
     });
+
+    res.json(result);
   } catch (error: any) {
     console.error('TTS generation failed:', error);
     res.status(500).json({ error: error.message || 'TTS generation failed' });

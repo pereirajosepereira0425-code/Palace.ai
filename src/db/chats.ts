@@ -2,6 +2,7 @@ import { db } from './index.ts';
 import { chatSessions, chatMessages, characters } from './schema.ts';
 import { desc, eq, and, asc, sql } from 'drizzle-orm';
 import { incrementChatCount } from './characters.ts';
+import { applyEditedSwipe } from '../utils/customVoiceUtils.ts';
 
 export async function getOrCreateSession(characterUuid: string, userId: string = 'guest') {
   try {
@@ -307,17 +308,68 @@ export async function deleteSession(sessionUuid: string) {
   }
 }
 
+export async function updateChatMessageContent(
+  messageId: number,
+  sessionUuid: string,
+  newContent: string
+) {
+  try {
+    const existingList = await db
+      .select()
+      .from(chatMessages)
+      .where(and(eq(chatMessages.id, messageId), eq(chatMessages.sessionId, sessionUuid)))
+      .limit(1);
+
+    const existing = existingList[0];
+    if (!existing) return null;
+
+    const applied = applyEditedSwipe({
+      swipesJsonOrArray: existing.swipes,
+      activeSwipeIndex: existing.activeSwipeIndex,
+      newContent,
+    });
+
+    const res = await db
+      .update(chatMessages)
+      .set({
+        content: applied.content,
+        swipes: applied.swipesJson,
+        activeSwipeIndex: applied.activeSwipeIndex,
+      })
+      .where(eq(chatMessages.id, existing.id))
+      .returning();
+
+    await db
+      .update(chatSessions)
+      .set({ updatedAt: new Date() })
+      .where(eq(chatSessions.uuid, sessionUuid));
+
+    const updated = res[0];
+    return {
+      ...updated,
+      swipes: applied.swipes,
+      activeSwipeIndex: applied.activeSwipeIndex,
+    };
+  } catch (error) {
+    console.error('updateChatMessageContent failed:', error);
+    throw new Error('Failed to update chat message', { cause: error });
+  }
+}
+
 export async function resetSessionMessages(sessionUuid: string, characterGreeting: string) {
   try {
     await db.delete(chatMessages).where(eq(chatMessages.sessionId, sessionUuid));
-    await db.insert(chatMessages).values({
-      sessionId: sessionUuid,
-      sender: 'character',
-      content: characterGreeting,
-      swipes: JSON.stringify([characterGreeting]),
-      activeSwipeIndex: 0,
-    });
-    return { success: true };
+    const inserted = await db
+      .insert(chatMessages)
+      .values({
+        sessionId: sessionUuid,
+        sender: 'character',
+        content: characterGreeting,
+        swipes: JSON.stringify([characterGreeting]),
+        activeSwipeIndex: 0,
+      })
+      .returning();
+    return { success: true, message: inserted[0] || null };
   } catch (error) {
     console.error('resetSessionMessages failed:', error);
     throw new Error('Failed to reset messages', { cause: error });

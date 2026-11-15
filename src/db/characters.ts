@@ -26,6 +26,7 @@ export interface CharacterInsert {
   creatorName?: string;
   voiceName?: string;
   voiceStyle?: string;
+  customVoiceUuid?: string | null;
   thinkingDefault?: boolean;
   searchDefault?: boolean;
   lorebook?: string;
@@ -132,6 +133,7 @@ export async function createCharacter(data: CharacterInsert) {
       creatorName: data.creatorName || 'Anonymous',
       voiceName: data.voiceName || 'Puck',
       voiceStyle: data.voiceStyle || 'Expressive, natural character dialogue',
+      customVoiceUuid: data.customVoiceUuid || null,
       thinkingDefault: data.thinkingDefault ?? false,
       searchDefault: data.searchDefault ?? false,
       lorebook: data.lorebook || '[]',
@@ -178,6 +180,7 @@ export async function updateCharacter(
     if (data.rating !== undefined) updatePayload.rating = data.rating;
     if (data.voiceName !== undefined) updatePayload.voiceName = data.voiceName;
     if (data.voiceStyle !== undefined) updatePayload.voiceStyle = data.voiceStyle;
+    if (data.customVoiceUuid !== undefined) updatePayload.customVoiceUuid = data.customVoiceUuid;
     if (data.thinkingDefault !== undefined) updatePayload.thinkingDefault = data.thinkingDefault;
     if (data.searchDefault !== undefined) updatePayload.searchDefault = data.searchDefault;
     if (data.lorebook !== undefined) updatePayload.lorebook = data.lorebook;
