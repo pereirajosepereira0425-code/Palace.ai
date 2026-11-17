@@ -421,12 +421,16 @@ apiRouter.delete('/characters/:uuid', optionalAuth, async (req: AuthRequest, res
 // Import character from URL (Chub.ai, Janitor.ai, SpicyChat.ai, Fandom/Miraheze)
 apiRouter.post('/characters/import-url', async (req, res) => {
   try {
-    const { url } = req.body;
+    const { url, authToken, rawDefinition } = req.body;
     if (!url || typeof url !== 'string') {
       return res.status(400).json({ error: 'URL is required' });
     }
 
-    const result = await importCharacterFromUrl(url);
+    const result = await importCharacterFromUrl(url, fetch, {
+      authToken: typeof authToken === 'string' && authToken.trim() ? authToken.trim() : undefined,
+      rawDefinition:
+        typeof rawDefinition === 'string' && rawDefinition.trim() ? rawDefinition.trim() : undefined,
+    });
 
     // Sync any newly discovered tags from the imported card into the global Chub.ai tag database
     if (Array.isArray(result.character.tags) && result.character.tags.length > 0) {

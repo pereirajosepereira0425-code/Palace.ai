@@ -248,6 +248,9 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
   // URL Importer State
   const [importUrl, setImportUrl] = useState('');
   const [importingUrl, setImportingUrl] = useState(false);
+  const [showAdvancedImport, setShowAdvancedImport] = useState(false);
+  const [importAuthToken, setImportAuthToken] = useState('');
+  const [importRawDefinition, setImportRawDefinition] = useState('');
 
   // Status
   const [saving, setSaving] = useState(false);
@@ -289,7 +292,11 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
       const res = await fetch('/api/characters/import-url', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: importUrl.trim() }),
+        body: JSON.stringify({
+          url: importUrl.trim(),
+          authToken: importAuthToken.trim() || undefined,
+          rawDefinition: importRawDefinition.trim() || undefined,
+        }),
       });
 
       if (!res.ok) {
@@ -317,22 +324,40 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
       setRating(imported.rating || 'SFW');
       setVoiceName(imported.voiceName || 'Puck');
       if (imported.voiceStyle) setVoiceStyle(imported.voiceStyle);
-      if (imported.gender) {
+      const inferredGender =
+        imported.gender ||
+        (Array.isArray(imported.tags) && imported.tags.some((t: string) => /^female$/i.test(t))
+          ? 'Female'
+          : Array.isArray(imported.tags) && imported.tags.some((t: string) => /^male$/i.test(t))
+          ? 'Male'
+          : Array.isArray(imported.tags) && imported.tags.some((t: string) => /^non-?binary$/i.test(t))
+          ? 'Non-Binary'
+          : '');
+      if (inferredGender) {
         const presetGenders = ['Female', 'Male', 'Non-Binary', 'Agender', 'Unknown'];
-        if (presetGenders.includes(imported.gender)) {
-          setGender(imported.gender);
+        if (presetGenders.includes(inferredGender)) {
+          setGender(inferredGender);
         } else {
           setGender('Custom');
-          setCustomGender(imported.gender);
+          setCustomGender(inferredGender);
         }
       }
-      if (imported.pronouns) {
+      const inferredPronouns =
+        imported.pronouns ||
+        (inferredGender === 'Female'
+          ? 'She/Her'
+          : inferredGender === 'Male'
+          ? 'He/Him'
+          : inferredGender === 'Non-Binary'
+          ? 'They/Them'
+          : '');
+      if (inferredPronouns) {
         const presetPronouns = ['She/Her', 'He/Him', 'They/Them', 'It/Its', 'Any'];
-        if (presetPronouns.includes(imported.pronouns)) {
-          setPronouns(imported.pronouns);
+        if (presetPronouns.includes(inferredPronouns)) {
+          setPronouns(inferredPronouns);
         } else {
           setPronouns('Custom');
-          setCustomPronouns(imported.pronouns);
+          setCustomPronouns(inferredPronouns);
         }
       }
       setLoreEntries(imported.lorebook || []);
@@ -1011,10 +1036,14 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
           </button>
           <button
             type="button"
-            onClick={() => setImportUrl('https://janitorai.com/characters/68b75f5b-9ffb-4be8-897f-4428bdf0f031_character-peppa-pig-multiverse')}
+            onClick={() =>
+              setImportUrl(
+                'https://janitorai.com/characters/683af453-907c-42b9-b72a-1d850818193e_character-velvet-by-arzy-parzy'
+              )
+            }
             className="rounded-lg bg-zinc-900 px-2 py-1 hover:bg-zinc-800 text-pink-300 transition-colors border border-zinc-800"
           >
-            🐷 JanitorAI: Peppa Pig Multiverse
+            🐱 JanitorAI: Velvet
           </button>
           <button
             type="button"
@@ -1032,11 +1061,58 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
           </button>
           <button
             type="button"
-            onClick={() => setImportUrl('https://spicychat.ai/characters/chub-valerie-mercenary')}
+            onClick={() => setImportUrl('https://spicychat.ai/chatbot/e0c477e0-9a56-4918-a624-586bb3762dc3')}
             className="rounded-lg bg-zinc-900 px-2 py-1 hover:bg-zinc-800 text-amber-300 transition-colors border border-zinc-800"
           >
-            ⚔️ SpicyChat: Valerie Combat
+            🌶️ SpicyChat: Velvet
           </button>
+        </div>
+
+        {/* Optional Collapsible JanitorAI Token / Pasted Definition Override */}
+        <div className="mt-3 pt-2.5 border-t border-zinc-800/70">
+          <button
+            type="button"
+            aria-expanded={showAdvancedImport}
+            onClick={() => setShowAdvancedImport((prev) => !prev)}
+            className="text-[11px] font-semibold text-purple-300 hover:text-purple-200 transition-colors flex items-center gap-1.5"
+          >
+            <span>{showAdvancedImport ? '▾' : '▸'}</span>
+            <span>Unlock Hidden JanitorAI Definition (Optional Token or Pasted Card Text)</span>
+          </button>
+
+          {showAdvancedImport && (
+            <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 rounded-2xl border border-zinc-800 bg-zinc-950/80 p-3.5">
+              <div>
+                <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">
+                  JanitorAI Bearer Token (Optional)
+                </label>
+                <input
+                  type="password"
+                  aria-label="JanitorAI Bearer Token"
+                  value={importAuthToken}
+                  onChange={(e) => setImportAuthToken(e.target.value)}
+                  placeholder="Paste JanitorAI Bearer token to fetch login-gated card JSON..."
+                  className="w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs text-zinc-100 placeholder-zinc-500 focus:border-purple-500 focus:outline-none"
+                />
+                <p className="mt-1 text-[10px] text-zinc-500">
+                  Sent only for this import request and never stored.
+                </p>
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">
+                  Paste Verbatim Card Text / JSON (Optional)
+                </label>
+                <textarea
+                  rows={2}
+                  aria-label="Paste Verbatim Definition or V2 JSON"
+                  value={importRawDefinition}
+                  onChange={(e) => setImportRawDefinition(e.target.value)}
+                  placeholder="Paste Personality / Scenario / Initial Message text or Tavern V2 JSON to override..."
+                  className="w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs text-zinc-100 placeholder-zinc-500 focus:border-purple-500 focus:outline-none"
+                />
+              </div>
+            </div>
+          )}
         </div>
       </div>
 

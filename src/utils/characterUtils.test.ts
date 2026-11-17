@@ -1047,71 +1047,230 @@ test('applyEditedSwipe and normalizeEditedMessageText update bot text and preser
   assert.equal(emptySwipes.activeSwipeIndex, 0);
 });
 
-test('JanitorAI and SpicyChat URL parsers & importer handle Velvet slug, /chatbot/ UUID, typo prefix yhttps, and 403/401 fallbacks cleanly', async () => {
+test('JanitorAI and SpicyChat URL parsers & importers extract real hampter/v2 character data and reject dead/blocked endpoints cleanly', async () => {
   const {
     normalizePastedUrl,
     parseJanitorSlug,
     parseCharacterUrl,
   } = await import('./characterUtils.ts');
-  const { importCharacterFromUrl } = await import('../../server/urlImporter.ts');
+  const {
+    importCharacterFromUrl,
+    cleanRichHtmlToText,
+    extractJsonFromTextOrMarkdown,
+    separateJanitorDescriptionAndNotes,
+    parseJanitorDefinitionText,
+  } = await import('../../server/urlImporter.ts');
 
   const janitorUrl =
-    'https://janitorai.com/characters/683af453-907c-42b9-b72a-1d850818193e_character-velvet-by-arzy-parz';
+    'https://janitorai.com/characters/683af453-907c-42b9-b72a-1d850818193e_character-velvet-by-arzy-parzy';
   const typoSpicyUrl = 'yhttps://spicychat.ai/chatbot/e0c477e0-9a56-4918-a624-586bb3762dc3';
 
   assert.equal(normalizePastedUrl(typoSpicyUrl), 'https://spicychat.ai/chatbot/e0c477e0-9a56-4918-a624-586bb3762dc3');
 
   const janitorSlug = parseJanitorSlug(
-    '683af453-907c-42b9-b72a-1d850818193e_character-velvet-by-arzy-parz'
+    '683af453-907c-42b9-b72a-1d850818193e_character-velvet-by-arzy-parzy'
   );
   assert.equal(janitorSlug.uuid, '683af453-907c-42b9-b72a-1d850818193e');
   assert.equal(janitorSlug.name, 'Velvet');
-  assert.equal(janitorSlug.creator, 'Arzy Parz');
+  assert.equal(janitorSlug.creator, 'Arzy Parzy');
 
   assert.deepEqual(parseCharacterUrl(janitorUrl), {
     source: 'janitor',
-    idOrPath: '683af453-907c-42b9-b72a-1d850818193e_character-velvet-by-arzy-parz',
+    idOrPath: '683af453-907c-42b9-b72a-1d850818193e_character-velvet-by-arzy-parzy',
   });
   assert.deepEqual(parseCharacterUrl(typoSpicyUrl), {
     source: 'spicychat',
     idOrPath: 'e0c477e0-9a56-4918-a624-586bb3762dc3',
   });
 
-  // Mock 403 Cloudflare block for JanitorAI -> returns clean editable Velvet card instead of crashing 422
-  const cf403Fetch = async () =>
-    new Response('<!DOCTYPE html><title>Attention Required! | Cloudflare</title>', {
-      status: 403,
-      headers: { 'content-type': 'text/html' },
-    });
-  const janitorFallback = await importCharacterFromUrl(janitorUrl, cf403Fetch);
-  assert.equal(janitorFallback.source, 'janitor');
-  assert.equal(janitorFallback.character.name, 'Velvet');
-  assert.equal(janitorFallback.character.creatorName, '@arzy-parz');
-  assert.ok(janitorFallback.warning && janitorFallback.warning.includes('Velvet'));
+  // Verify HTML cleaner and Jina JSON extractor helpers
+  assert.equal(
+    cleanRichHtmlToText('<p>Hello <strong>World</strong></p><p>Line &amp; 2</p>'),
+    'Hello World\n\nLine & 2'
+  );
+  assert.deepEqual(
+    extractJsonFromTextOrMarkdown('Title:\n\nMarkdown Content:\n{"name":"Velvet","id":"123"}'),
+    { name: 'Velvet', id: '123' }
+  );
 
-  // Mock 401 token-gated fallback for SpicyChat -> avoids hex UUID name and pre-populates starter card
-  const spicy401Fetch = async () =>
-    new Response(JSON.stringify({ code: 'SC-001-6004' }), {
-      status: 401,
-      headers: { 'content-type': 'application/json' },
-    });
-  const spicyFallback = await importCharacterFromUrl(typoSpicyUrl, spicy401Fetch);
-  assert.equal(spicyFallback.source, 'spicychat');
-  assert.ok(spicyFallback.character.name.startsWith('SpicyChat Bot'));
-  assert.ok(!/e0c477e0-9a56-4918/i.test(spicyFallback.character.name));
-  assert.ok(spicyFallback.warning && spicyFallback.warning.length > 10);
+  // Verify creator break note & art credit are separated from the character premise
+  const separated = separateJanitorDescriptionAndNotes(
+    '☢️⚠️Getting hit on by a dorky radioactive cat(?) girl🐈‍⬛️💚\n\nHad to take a small break, so here\'s a smaller-size bot to get my head back in the game.\n\nOC & art by ArzyParzy.'
+  );
+  assert.equal(separated.hookLine, '☢️⚠️Getting hit on by a dorky radioactive cat(?) girl🐈‍⬛️💚');
+  assert.equal(separated.premiseLines.length, 1);
+  assert.equal(separated.creatorMetaLines.length, 2);
 
-  // Mock 200 live SpicyChat JSON response -> imports full card fields
-  const spicy200Fetch = async (input: string) => {
-    if (input.includes('prod.nd-api.com')) {
+  // Verify verbatim pasted definition parser
+  const parsedPaste = parseJanitorDefinitionText(
+    'Personality:\nGoofy neon catgirl.\n\nScenario:\nConvenience store at midnight.\n\nInitial Message:\n*waves!* "Hi!"\n\nExample Dialogs:\n<START>\n{{user}}: yo\n{{char}}: *purrs*'
+  );
+  assert.equal(parsedPaste.personality, 'Goofy neon catgirl.');
+  assert.equal(parsedPaste.scenario, 'Convenience store at midnight.');
+  assert.equal(parsedPaste.firstMessage, '*waves!* "Hi!"');
+  assert.ok(parsedPaste.exampleDialogs?.includes('{{char}}: *purrs*'));
+
+  // 1) Mock Datacat anonymous session API + Jina hampter metadata -> extracts 100% verbatim full card definitions + full-res JanitorAI avatar
+  const janitorDatacatFetch = async (input: string, init?: RequestInit) => {
+    if (input === 'https://datacat.run/api/liberator/identify') {
+      return new Response(JSON.stringify({ success: true, sessionToken: 'tok_test_123' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (input.startsWith('https://datacat.run/api/characters/683af453-907c-42b9-b72a-1d850818193e')) {
+      assert.equal((init?.headers as Record<string, string>)['X-Session-Token'], 'tok_test_123');
       return new Response(
         JSON.stringify({
-          name: 'Seraphina Vale',
-          title: 'Starship Navigator',
-          persona: 'Quick-witted astrogator aboard the Dawnbreaker.',
-          greeting: '*Taps the holographic star chart.* "Next jump in five."',
-          creator_username: 'VoidWalker',
-          is_nsfw: false,
+          success: true,
+          character: {
+            character_id: '683af453-907c-42b9-b72a-1d850818193e',
+            name: 'Velvet (by @ArzyParzy)',
+            chat_name: 'Velvet',
+            creator_name: 'ThatShadowGuy',
+            avatar: 'https://media.datacat.run/fallback.webp',
+            description:
+              '<p>☢️⚠️Getting hit on by a dorky radioactive cat(?) girl</p><p>Had to take a small break.</p>',
+            personality: 'Velvet is a tall anthropomorphic gray-furred cat girl addicted to Monster Energy.',
+            scenario: 'While out shopping at 6:30 AM, Velvet approaches {{user}} in the baked goods aisle.',
+            first_message: '*Today is shopping day!* "W-Would you like being the stone of my kidney?"',
+            tags: [{ name: '👩‍🦰 Female' }, { name: '😂 Comedy' }],
+            custom_tags: ['monsterenergy', 'dork'],
+            is_nsfw: true,
+            chara_card_v2_json: {
+              spec: 'chara_card_v2',
+              data: {
+                description: 'Velvet is a tall anthropomorphic gray-furred cat girl addicted to Monster Energy.',
+                personality: '',
+                scenario: 'While out shopping at 6:30 AM, Velvet approaches {{user}} in the baked goods aisle.',
+                first_mes: '*Today is shopping day!* "W-Would you like being the stone of my kidney?"',
+                mes_example: 'Velvet: **Hey, help me to get out!**',
+              },
+            },
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (input.startsWith('https://r.jina.ai/https://janitorai.com/hampter/characters/')) {
+      return new Response(
+        `Title:\n\nMarkdown Content:\n` +
+          JSON.stringify({
+            id: '683af453-907c-42b9-b72a-1d850818193e',
+            avatar: 'uQgfHkybczOHFmBkVs6zp.webp',
+            tags: [{ name: '👩‍🦰 Female' }, { name: '😂 Comedy' }],
+            custom_tags: ['monsterenergy', 'dork'],
+          }),
+        { status: 200, headers: { 'content-type': 'text/plain' } }
+      );
+    }
+    return new Response('Access Restricted', { status: 403 });
+  };
+  const janitorVerbatim = await importCharacterFromUrl(janitorUrl, janitorDatacatFetch);
+  assert.equal(janitorVerbatim.source, 'janitor');
+  assert.equal(janitorVerbatim.warning, undefined);
+  assert.equal(janitorVerbatim.character.name, 'Velvet (by @ArzyParzy)');
+  assert.equal(
+    janitorVerbatim.character.avatar,
+    'https://ella.janitorai.com/bot-avatars/uQgfHkybczOHFmBkVs6zp.webp'
+  );
+  assert.equal(
+    janitorVerbatim.character.description,
+    'Velvet is a tall anthropomorphic gray-furred cat girl addicted to Monster Energy.'
+  );
+  assert.ok(!janitorVerbatim.character.description.includes('Had to take a small break'));
+  assert.equal(
+    janitorVerbatim.character.greeting,
+    '*Today is shopping day!* "W-Would you like being the stone of my kidney?"'
+  );
+  assert.equal(
+    janitorVerbatim.character.scenario,
+    'While out shopping at 6:30 AM, Velvet approaches {{user}} in the baked goods aisle.'
+  );
+  assert.equal(janitorVerbatim.character.exampleDialogues, 'Velvet: **Hey, help me to get out!**');
+  assert.ok(janitorVerbatim.character.creatorNotes?.includes('Had to take a small break'));
+
+  // 2) Mock Datacat 404 + JanitorAI hampter login-gated nulls -> strictly ZERO fabricated/auto-made fields
+  const janitorJinaOnlyFetch = async (input: string) => {
+    if (input === 'https://datacat.run/api/liberator/identify') {
+      return new Response('Not found', { status: 404 });
+    }
+    if (input.startsWith('https://r.jina.ai/https://janitorai.com/hampter/characters/')) {
+      return new Response(
+        `Title:\n\nURL Source: https://janitorai.com/hampter/characters/683af453-907c-42b9-b72a-1d850818193e\n\nMarkdown Content:\n` +
+          JSON.stringify({
+            id: '683af453-907c-42b9-b72a-1d850818193e',
+            name: 'Velvet (by @ArzyParzy)',
+            chat_name: 'Velvet',
+            avatar: 'uQgfHkybczOHFmBkVs6zp.webp',
+            creator_name: 'ThatShadowGuy',
+            description:
+              '<p>☢️⚠️<strong><em>Getting hit on by a dorky radioactive cat(?) girl</em></strong></p><p>Had to take a small break, so here\'s a smaller-size bot to get my head back in the game.</p><p>OC &amp; art by ArzyParzy.</p>',
+            is_nsfw: true,
+            tags: [{ name: '👩‍🦰 Female' }, { name: '😂 Comedy' }],
+            custom_tags: ['monsterenergy', 'dork'],
+            first_message: null,
+            personality: null,
+            scenario: null,
+            example_dialogs: null,
+          }),
+        { status: 200, headers: { 'content-type': 'text/plain' } }
+      );
+    }
+    return new Response('Access Restricted', { status: 403 });
+  };
+  const janitorRealOnly = await importCharacterFromUrl(janitorUrl, janitorJinaOnlyFetch);
+  assert.equal(janitorRealOnly.source, 'janitor');
+  assert.equal(janitorRealOnly.character.name, 'Velvet (by @ArzyParzy)');
+  assert.equal(
+    janitorRealOnly.character.description,
+    '☢️⚠️Getting hit on by a dorky radioactive cat(?) girl'
+  );
+  assert.ok(!janitorRealOnly.character.description.includes('Had to take a small break'));
+  assert.ok(janitorRealOnly.character.creatorNotes?.includes('Had to take a small break'));
+  assert.equal(janitorRealOnly.character.greeting, '');
+  assert.equal(janitorRealOnly.character.personality, '');
+  assert.equal(janitorRealOnly.character.scenario, '');
+  assert.equal(janitorRealOnly.character.exampleDialogues, '');
+  assert.deepEqual(janitorRealOnly.character.lorebook, []);
+  assert.ok(janitorRealOnly.warning && janitorRealOnly.warning.includes('nothing was auto-generated'));
+
+  // 3) Test rawDefinition verbatim override
+  const janitorOverride = await importCharacterFromUrl(janitorUrl, janitorJinaOnlyFetch, {
+    rawDefinition:
+      'Appearance:\nNeon green cat ears.\n\nPersonality:\nVerbatim personality.\n\nScenario:\nVerbatim scenario.\n\nInitial Message:\nVerbatim greeting!',
+  });
+  assert.equal(janitorOverride.character.description, 'Neon green cat ears.');
+  assert.equal(janitorOverride.character.personality, 'Verbatim personality.');
+  assert.equal(janitorOverride.character.scenario, 'Verbatim scenario.');
+  assert.equal(janitorOverride.character.greeting, 'Verbatim greeting!');
+  assert.equal(janitorOverride.warning, undefined);
+
+  // Mock total block across all endpoints/mirrors -> throws honest UrlImportError instead of faking a bot
+  const totalFailFetch = async () => new Response('Forbidden', { status: 403 });
+  await assert.rejects(() => importCharacterFromUrl(janitorUrl, totalFailFetch), /Could not retrieve character data/);
+  await assert.rejects(() => importCharacterFromUrl(typoSpicyUrl, totalFailFetch), /Could not retrieve character/);
+
+  // Mock SpicyChat v2 API verifying guest headers (x-guest-userid & x-app-id) + rulebook + persona parsing
+  let capturedHeaders: Record<string, string> = {};
+  const spicy200Fetch = async (input: string, init?: RequestInit) => {
+    if (input.includes('prod.nd-api.com/v2/characters/')) {
+      capturedHeaders = (init?.headers as Record<string, string>) || {};
+      return new Response(
+        JSON.stringify({
+          name: 'Velvet',
+          title: 'She filled the machine "Herself"',
+          avatar_url: 'avatars/33901c8e-81c9-492a-b9c5-98f49d641529.png',
+          persona: 'Name: Velvet\nAge: 19\nPersonality: Bubbly Monster-loving cat girl.\nAppearance: Grey fur and neon green eyes.',
+          greeting: '*You walk into the gas station.* "Well hello, {{user}}!"',
+          scenario: 'Night shift at a 24-hour gas station.',
+          dialogue: '<START>\n{{user}}: Hey\n{{char}}: *purrs*',
+          creator_username: 'spectre1233',
+          tags: ['NSFW', 'Female', 'Furry'],
+          is_nsfw: true,
+          rulebook: {
+            entries: [{ keys: ['Monster'], content: 'Velvet drinks endless Monster Energy.' }],
+          },
         }),
         { status: 200, headers: { 'content-type': 'application/json' } }
       );
@@ -1119,9 +1278,17 @@ test('JanitorAI and SpicyChat URL parsers & importer handle Velvet slug, /chatbo
     return new Response('', { status: 404 });
   };
   const spicyLive = await importCharacterFromUrl(typoSpicyUrl, spicy200Fetch);
-  assert.equal(spicyLive.character.name, 'Seraphina Vale');
-  assert.equal(spicyLive.character.creatorName, 'VoidWalker');
-  assert.equal(spicyLive.character.rating, 'SFW');
+  assert.equal(capturedHeaders['x-app-id'], 'spicychat');
+  assert.ok(capturedHeaders['x-guest-userid'] && capturedHeaders['x-guest-userid'].length > 10);
+  assert.equal(spicyLive.character.name, 'Velvet');
+  assert.equal(spicyLive.character.tagline, 'She filled the machine "Herself"');
+  assert.equal(spicyLive.character.avatar, 'https://cdn.nd-api.com/avatars/33901c8e-81c9-492a-b9c5-98f49d641529.png');
+  assert.equal(spicyLive.character.personality, 'Bubbly Monster-loving cat girl.');
+  assert.equal(spicyLive.character.scenario, 'Night shift at a 24-hour gas station.');
+  assert.equal(spicyLive.character.creatorName, 'spectre1233');
+  assert.deepEqual(spicyLive.character.lorebook, [
+    { key: 'Monster', content: 'Velvet drinks endless Monster Energy.' },
+  ]);
 });
 
 test('Palace Free API supports all models (including Claude Opus 5.5) with zero API key, and APK Kit ZIP + semver updater work cleanly', async () => {
