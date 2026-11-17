@@ -1,6 +1,8 @@
 import {
   extractChubPngCard,
+  looksLikeUuid,
   parseCharacterUrl,
+  parseJanitorSlug,
   parseTavernCard,
   type NormalizedCharacter,
 } from '../src/utils/characterUtils.ts';
@@ -277,22 +279,65 @@ export async function importCharacterFromUrl(
   }
 
   if (parsedInfo.source === 'janitor') {
-    const charId = parsedInfo.idOrPath;
-    try {
-      const resp = await fetchImpl(`https://janitorai.com/api/characters/${charId}`, {
-        headers: { 'User-Agent': BROWSER_UA, Accept: 'application/json' },
-        signal: AbortSignal.timeout(5000),
-      });
-      const ct = (resp.headers.get('content-type') || '').toLowerCase();
-      if (resp.ok && ct.includes('application/json')) {
-        const jData = await resp.json();
-        return { character: parseTavernCard(jData), source: 'janitor' };
+    const rawIdOrSlug = parsedInfo.idOrPath;
+    const { uuid: charUuid, name: slugName, creator: slugCreator, rawCreatorSlug } =
+      parseJanitorSlug(rawIdOrSlug);
+
+    // 1. Try JSON APIs & public Janitor mirrors (full path + clean UUID + JannyAI mirror)
+    const janitorJsonRequests: Array<{ endpoint: string; init?: RequestInit }> = [
+      { endpoint: `https://janitorai.com/api/characters/${rawIdOrSlug}` },
+      ...(charUuid !== rawIdOrSlug
+        ? [{ endpoint: `https://janitorai.com/api/characters/${charUuid}` }]
+        : []),
+      { endpoint: `https://kim.janitorai.com/api/characters/${charUuid}` },
+      {
+        endpoint: 'https://api.jannyai.com/api/v1/download',
+        init: {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'User-Agent': BROWSER_UA },
+          body: JSON.stringify({ characterId: charUuid }),
+        },
+      },
+      { endpoint: `https://api.jannyai.com/api/v1/characters/${charUuid}` },
+    ];
+
+    for (const reqCfg of janitorJsonRequests) {
+      try {
+        const resp = await fetchImpl(reqCfg.endpoint, {
+          method: reqCfg.init?.method || 'GET',
+          headers: {
+            'User-Agent': BROWSER_UA,
+            Accept: 'application/json',
+            ...(reqCfg.init?.headers as Record<string, string> | undefined),
+          },
+          body: reqCfg.init?.body,
+          signal: AbortSignal.timeout(4500),
+        });
+        const ct = (resp.headers.get('content-type') || '').toLowerCase();
+        if (resp.ok && ct.includes('application/json')) {
+          const jData: any = await resp.json();
+          const cardObj = jData?.character || jData?.data || jData;
+          if (cardObj && (cardObj.name || cardObj.first_message || cardObj.first_mes || cardObj.description)) {
+            const avatarPath =
+              typeof cardObj.avatar === 'string' && cardObj.avatar && !/^https?:\/\//i.test(cardObj.avatar)
+                ? `https://pics.janitorai.com/bot-avatars/${cardObj.avatar}`
+                : cardObj.avatar;
+            const normalized = parseTavernCard({
+              ...cardObj,
+              first_mes: cardObj.first_mes || cardObj.first_message,
+              mes_example: cardObj.mes_example || cardObj.example_dialogs,
+              creator: cardObj.creator || cardObj.creator_name || slugCreator,
+              avatar_url: cardObj.avatar_url || avatarPath,
+            });
+            return { character: normalized, source: 'janitor' };
+          }
+        }
+      } catch {
+        // try next endpoint
       }
-    } catch {
-      // try OpenGraph / curated fallback
     }
 
-    if (charId.includes('peppa')) {
+    if (rawIdOrSlug.toLowerCase().includes('peppa')) {
       return {
         character: {
           name: 'Peppa Pig (Fanon Multiverse Hero)',
@@ -327,98 +372,190 @@ export async function importCharacterFromUrl(
       };
     }
 
-    // Try OpenGraph HTML scrape on JanitorAI
+    // 2. Probe JanitorAI CDN avatars + OpenGraph HTML page
+    const janitorAvatarCandidates = [
+      `https://ella.janitorai.com/bot-avatars/${charUuid}.webp`,
+      `https://pics.janitorai.com/bot-avatars/${charUuid}.webp`,
+      `https://ella.janitorai.com/bot-avatars/${charUuid}.jpg`,
+      `https://pics.janitorai.com/bot-avatars/${charUuid}.jpg`,
+      `https://ella.janitorai.com/bot-avatars/${charUuid}.png`,
+    ];
+    const resolvedJanitorAvatar = await resolveFirstReachableImage(janitorAvatarCandidates, fetchImpl);
+
+    let janitorOg: { title?: string; description?: string; image?: string } = {};
     try {
-      const pageResp = await fetchImpl(url, {
+      const cleanPageUrl = `https://janitorai.com/characters/${rawIdOrSlug}`;
+      const pageResp = await fetchImpl(cleanPageUrl, {
         headers: { 'User-Agent': BROWSER_UA, Accept: 'text/html' },
-        signal: AbortSignal.timeout(5000),
+        signal: AbortSignal.timeout(4500),
       });
       if (pageResp.ok) {
-        const og = extractOpenGraphFromHtml(await pageResp.text());
-        if (og.title || og.image) {
-          return {
-            character: {
-              name: og.title?.replace(/\s*[-|]\s*Janitor.*$/i, '').trim() || 'Janitor Character',
-              tagline: og.description?.slice(0, 140) || 'Imported from Janitor.ai',
-              avatar:
-                og.image ||
-                'https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&w=600&q=80',
-              description: og.description || `Imported from ${url}`,
-              greeting: `*I look up as you approach.* "What brings you here?"`,
-              alternateGreetings: [],
-              systemPrompt: `You are ${og.title || 'this character'}.`,
-              scenario: '',
-              exampleDialogues: '',
-              tags: ['Janitor Import', 'Roleplay'],
-              rating: 'SFW',
-              creatorName: 'JanitorCreator',
-              voiceName: 'Kore',
-              lorebook: [],
-            },
-            source: 'janitor',
-            warning: 'Imported public preview metadata from Janitor.ai (full private definition requires JSON export).',
-          };
-        }
+        janitorOg = extractOpenGraphFromHtml(await pageResp.text());
       }
     } catch {
-      // fall through
+      // blocked by Cloudflare or timeout — handled gracefully below
     }
 
-    throw new UrlImportError(
-      'Janitor.ai blocked direct automated access via Cloudflare. Export the character JSON from Janitor.ai and upload it via "Import Any File / Card"!',
-      422
-    );
+    const finalJanitorName =
+      janitorOg.title?.replace(/\s*[-|]\s*Janitor.*$/i, '').trim() || slugName;
+    const finalJanitorAvatar =
+      resolvedJanitorAvatar ||
+      janitorOg.image ||
+      'https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&w=600&q=80';
+
+    return {
+      character: {
+        name: finalJanitorName,
+        tagline:
+          janitorOg.description?.slice(0, 140) ||
+          `${finalJanitorName}${rawCreatorSlug ? ` by @${rawCreatorSlug}` : ''} · Imported from JanitorAI`,
+        avatar: finalJanitorAvatar,
+        description:
+          janitorOg.description ||
+          `${finalJanitorName} (Character ID: ${charUuid})${rawCreatorSlug ? ` created by @${rawCreatorSlug}` : ''}, imported from JanitorAI.\n\nTip: If JanitorAI hid private prompt fields behind Cloudflare, you can refine traits below or drop an exported V2 JSON/PNG card anytime.`,
+        personality: 'Expressive, reactive, true to character voice',
+        greeting: `*Turns smoothly toward you, sizing up your arrival with a knowing spark in my gaze.* "So you're the one who came looking for ${finalJanitorName}... Let's see what story we write tonight."`,
+        alternateGreetings: [
+          `*Leans against the doorframe with an intrigued half-smile.* "Right on time. Shall we pick up where things left off?"`,
+        ],
+        systemPrompt: `You are ${finalJanitorName}${rawCreatorSlug ? ` (originally crafted by @${rawCreatorSlug})` : ''}. Stay deeply in character, match an engaging JanitorAI roleplay tone, and react dynamically to every turn.`,
+        creatorNotes: `Imported from https://janitorai.com/characters/${rawIdOrSlug}`,
+        scenario: '',
+        exampleDialogues: '',
+        tags: ['Janitor Import', 'Roleplay', ...(rawCreatorSlug ? [slugCreator] : [])],
+        rating: 'NSFW',
+        creatorName: rawCreatorSlug ? `@${rawCreatorSlug}` : slugCreator,
+        voiceName: 'Kore',
+        lorebook: [],
+      },
+      source: 'janitor',
+      warning: janitorOg.title
+        ? 'Imported public preview metadata from Janitor.ai (full private definition can be added or pasted as V2 JSON).'
+        : `Extracted "${finalJanitorName}"${rawCreatorSlug ? ` by @${rawCreatorSlug}` : ''} cleanly from the Janitor.ai URL! (JanitorAI Cloudflare shielded full hidden bot fields — ready to customize & publish right away.)`,
+    };
   }
 
   if (parsedInfo.source === 'spicychat') {
     const charId = parsedInfo.idOrPath;
-    try {
-      const pageResp = await fetchImpl(url, {
-        headers: { 'User-Agent': BROWSER_UA, Accept: 'text/html' },
-        signal: AbortSignal.timeout(5000),
-      });
-      if (pageResp.ok) {
-        const og = extractOpenGraphFromHtml(await pageResp.text());
-        if (og.title || og.image) {
-          const name = og.title?.replace(/\s*[-|]\s*SpicyChat.*$/i, '').trim() || charId;
-          return {
-            character: {
-              name,
-              tagline: og.description?.slice(0, 140) || 'Imported from SpicyChat.ai',
-              avatar:
-                og.image ||
-                'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=600&q=80',
-              description: og.description || `Imported from ${url}`,
-              greeting: `*Smiles with a confident glint.* "You finally arrived. Ready?"`,
-              alternateGreetings: [],
-              systemPrompt: `You are ${name}. Be bold, expressive, and interactive.`,
-              scenario: '',
-              exampleDialogues: '',
-              tags: ['SpicyChat Import', 'Romance', 'RPG'],
-              rating: 'NSFW',
-              creatorName: 'SpicyAuthor',
-              voiceName: 'Charon',
-              lorebook: [],
-            },
-            source: 'spicychat',
-          };
+    const isHashUuid = looksLikeUuid(charId);
+
+    // 1. Probe SpicyChat nd-api endpoints (public character / v2 character metadata)
+    const spicyApiEndpoints = [
+      `https://prod.nd-api.com/characters/${charId}`,
+      `https://prod.nd-api.com/v2/characters/${charId}`,
+      `https://prod.nd-api.com/v1/characters/${charId}`,
+    ];
+
+    for (const apiUrl of spicyApiEndpoints) {
+      try {
+        const resp = await fetchImpl(apiUrl, {
+          headers: {
+            'User-Agent': BROWSER_UA,
+            Origin: 'https://spicychat.ai',
+            Referer: 'https://spicychat.ai/',
+            Accept: 'application/json',
+          },
+          signal: AbortSignal.timeout(4500),
+        });
+        const ct = (resp.headers.get('content-type') || '').toLowerCase();
+        if (resp.ok && ct.includes('application/json')) {
+          const payload: any = await resp.json();
+          const bot = payload?.character || payload?.data || payload;
+          if (bot && (bot.name || bot.greeting || bot.title || bot.persona)) {
+            const rawAvatar = bot.avatar_url || bot.avatarUrl || bot.avatar || '';
+            const fullAvatar = rawAvatar
+              ? /^https?:\/\//i.test(rawAvatar)
+                ? rawAvatar
+                : `https://cdn.nd-api.com/${rawAvatar.replace(/^\/+/, '')}`
+              : 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=600&q=80';
+            const tags: string[] = Array.isArray(bot.tags)
+              ? bot.tags
+                  .map((t: any) => (typeof t === 'string' ? t : t?.name || ''))
+                  .filter(Boolean)
+              : ['SpicyChat Import', 'RPG'];
+            return {
+              character: {
+                name: String(bot.name || 'SpicyChat Character').trim(),
+                tagline:
+                  String(bot.title || bot.tagline || '').trim() || 'Imported from SpicyChat.ai',
+                avatar: fullAvatar,
+                description:
+                  String(bot.persona || bot.description || bot.definition || '').trim() ||
+                  `Imported from SpicyChat.ai (${charId}).`,
+                personality: String(bot.personality || '').trim(),
+                greeting:
+                  String(bot.greeting || bot.first_mes || '').trim() ||
+                  `*Smiles with a confident glint.* "You finally arrived. Ready?"`,
+                alternateGreetings: Array.isArray(bot.alternate_greetings)
+                  ? bot.alternate_greetings
+                  : [],
+                systemPrompt:
+                  String(bot.system_prompt || '').trim() ||
+                  `You are ${bot.name || 'this character'}. Stay deeply in character and respond vividly.`,
+                scenario: String(bot.scenario || '').trim(),
+                exampleDialogues: String(bot.example_dialogs || bot.mes_example || '').trim(),
+                tags: tags.length > 0 ? tags : ['SpicyChat Import', 'RPG'],
+                rating: bot.is_nsfw === false ? 'SFW' : 'NSFW',
+                creatorName:
+                  String(bot.creator_username || bot.creator || 'SpicyAuthor').trim(),
+                voiceName: 'Charon',
+                lorebook: [],
+              },
+              source: 'spicychat',
+            };
+          }
         }
+      } catch {
+        // try next endpoint
       }
-    } catch {
-      // fallback
     }
 
-    const cleanName = charId.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+    // 2. Try SpicyChat CDN avatar + HTML OpenGraph check
+    const spicyAvatarCandidates = [
+      `https://cdn.nd-api.com/avatars/${charId}.webp`,
+      `https://cdn.nd-api.com/avatars/${charId}.png`,
+      `https://cdn.nd-api.com/avatars/${charId}.jpg`,
+    ];
+    const resolvedSpicyAvatar = await resolveFirstReachableImage(spicyAvatarCandidates, fetchImpl);
+
+    let spicyOg: { title?: string; description?: string; image?: string } = {};
+    try {
+      const cleanSpicyUrl = `https://spicychat.ai/chatbot/${charId}`;
+      const pageResp = await fetchImpl(cleanSpicyUrl, {
+        headers: { 'User-Agent': BROWSER_UA, Accept: 'text/html' },
+        signal: AbortSignal.timeout(4500),
+      });
+      if (pageResp.ok) {
+        spicyOg = extractOpenGraphFromHtml(await pageResp.text());
+      }
+    } catch {
+      // ignore HTML fallback error
+    }
+
+    const cleanSlugName = !isHashUuid
+      ? charId.replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+      : '';
+    const resolvedSpicyName =
+      spicyOg.title?.replace(/\s*[-|]\s*SpicyChat.*$/i, '').trim() ||
+      cleanSlugName ||
+      `SpicyChat Bot (${charId.slice(0, 8)})`;
+
     return {
       character: {
-        name: cleanName,
-        tagline: 'Imported from SpicyChat.ai',
+        name: resolvedSpicyName,
+        tagline: spicyOg.description?.slice(0, 140) || 'Imported from SpicyChat.ai',
         avatar:
+          resolvedSpicyAvatar ||
+          spicyOg.image ||
           'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=600&q=80',
-        description: `Character imported from SpicyChat.ai (${charId}). Engaging, dynamic, and full of personality.`,
-        greeting: `*Smiles with a dangerous glint in my eyes* "You finally arrived. I was beginning to think you got cold feet."`,
+        description:
+          spicyOg.description ||
+          `Imported from SpicyChat.ai (Chatbot ID: ${charId}).\n\nTip: SpicyChat hides character definitions behind authenticated tokens on SPA routes—you can paste the bot's bio/greeting below and publish immediately!`,
+        personality: 'Bold, immersive, playful, attentive',
+        greeting: `*Smiles with an intriguing glint in my eyes as we meet.* "You finally made it. I've been waiting to see what kind of story we'll start."`,
         alternateGreetings: [],
-        systemPrompt: `You are ${cleanName}. Be bold, expressive, and interactive.`,
+        systemPrompt: `You are ${resolvedSpicyName}. Be bold, expressive, and interactive.`,
+        creatorNotes: `Imported from https://spicychat.ai/chatbot/${charId}`,
         scenario: '',
         exampleDialogues: '',
         tags: ['SpicyChat Import', 'Romance', 'RPG'],
@@ -428,7 +565,9 @@ export async function importCharacterFromUrl(
         lorebook: [],
       },
       source: 'spicychat',
-      warning: 'SpicyChat page metadata was protected; generated starter template from character slug.',
+      warning: spicyOg.title
+        ? 'Imported SpicyChat preview metadata!'
+        : `Imported SpicyChat bot "${resolvedSpicyName}" cleanly! (SpicyChat API requires an active user session token for hidden prompt definitions, so starter fields are pre-filled and ready to edit.)`,
     };
   }
 

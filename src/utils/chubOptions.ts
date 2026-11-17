@@ -104,6 +104,15 @@ export const CHUB_TTS_APIS: ChubOptionItem[] = [
  */
 export const CHUB_API_PROVIDERS: ChubOptionItem[] = [
   {
+    id: 'palace_free',
+    label: 'Palace Free API (All Models · Zero Key)',
+    badge: 'Free Built-In',
+    description:
+      'Run Claude Opus 5.5, Claude 3.7 Sonnet, DeepSeek R1/V3, Chub Mars, GPT-4o, and Gemini completely FREE with zero API key needed.',
+    defaultUrl: '',
+    defaultModel: 'claude-opus-5-5',
+  },
+  {
     id: 'gemini',
     label: 'Google Gemini / Vertex AI',
     badge: 'Palace Default',
@@ -424,3 +433,74 @@ export function parseTagListInput(input: string): string[] {
   }
   return out;
 }
+
+/**
+ * Returns true when inference routes through Palace's built-in free zero-key backend.
+ */
+export function isBuiltInFreeProvider(apiProvider?: string | null): boolean {
+  const normalized = (apiProvider || '').trim().toLowerCase();
+  return !normalized || normalized === 'gemini' || normalized === 'palace_free';
+}
+
+/**
+ * Provides model-calibrated narrative & reasoning directives when running any catalog model
+ * (including Claude Opus 5.5, DeepSeek R1/V3, Chub Mars, etc.) on the Free Palace API.
+ */
+export function getModelStyleCalibration(modelId?: string | null): {
+  modelId: string;
+  displayLabel: string;
+  styleDirective: string;
+} {
+  const rawId = (modelId || 'gemini-3.8-flash').trim();
+  const lower = rawId.toLowerCase();
+  const matched = CHUB_ACTIVE_MODELS.find((m) => m.id.toLowerCase() === lower);
+  const displayLabel = matched?.label || rawId;
+
+  if (lower.includes('claude-opus-5-5') || lower.includes('opus-5')) {
+    return {
+      modelId: rawId,
+      displayLabel: 'Claude Opus 5.5',
+      styleDirective:
+        '[Model Profile: Claude Opus 5.5 Calibration] Deliver deeply literary, psychologically nuanced roleplay prose with organic subtext, multi-layered emotional reactions, sensory grounding, and unwavering fidelity to active Lorebook facts.',
+    };
+  }
+  if (lower.includes('claude')) {
+    return {
+      modelId: rawId,
+      displayLabel,
+      styleDirective:
+        '[Model Profile: Claude Literary Calibration] Emphasize natural conversational cadence, sharp emotional intelligence, subtle character mannerisms, and rich scene continuity.',
+    };
+  }
+  if (lower.includes('deepseek-r1') || lower.includes('reason')) {
+    return {
+      modelId: rawId,
+      displayLabel,
+      styleDirective:
+        '[Model Profile: Deep Reasoning Calibration] Track character motives, tactical spatial details, and plot threads step-by-step before responding decisively in character.',
+    };
+  }
+  if (lower.includes('chub-') || lower.includes('euryale') || lower.includes('lumimaid')) {
+    return {
+      modelId: rawId,
+      displayLabel,
+      styleDirective:
+        '[Model Profile: Unfiltered RP Immersion] Prioritize vivid immediate chemistry, punchy dramatic action blocks, reactive dialogue, and zero generic stiffness.',
+    };
+  }
+  if (lower.includes('gpt-4') || lower.includes('o4') || lower.includes('grok')) {
+    return {
+      modelId: rawId,
+      displayLabel,
+      styleDirective:
+        '[Model Profile: Adaptive Expressive RP] Balance crisp visual storytelling, strict instruction following, and responsive in-character dialogue.',
+    };
+  }
+
+  return {
+    modelId: rawId,
+    displayLabel,
+    styleDirective: '',
+  };
+}
+

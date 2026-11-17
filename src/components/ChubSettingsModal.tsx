@@ -26,6 +26,7 @@ import {
   CHUB_API_PROVIDERS,
   CHUB_ACTIVE_MODELS,
   CHUB_PROMPT_STRUCTURES,
+  isBuiltInFreeProvider,
 } from '../utils/chubOptions.ts';
 import {
   CHUB_CREATE_TOKEN_URL,
@@ -400,6 +401,21 @@ export const ChubSettingsModal: React.FC<ChubSettingsModalProps> = ({
                       'Select the backend inference provider.'}
                   </p>
                   <div className="mt-2 flex flex-wrap items-center gap-2">
+                    {!isBuiltInFreeProvider(current.apiProvider) && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setCurrent({
+                            ...current,
+                            apiProvider: 'palace_free',
+                            stagingUrl: '',
+                          })
+                        }
+                        className="rounded-xl border border-emerald-500/50 bg-emerald-600/25 px-2.5 py-1 text-[11px] font-bold text-emerald-200 hover:bg-emerald-600/40 transition-all cursor-pointer"
+                      >
+                        🎁 Use Free API (No Key)
+                      </button>
+                    )}
                     <a
                       href={getProviderApiKeyInfo(current.apiProvider).url}
                       target="_blank"
@@ -408,13 +424,13 @@ export const ChubSettingsModal: React.FC<ChubSettingsModalProps> = ({
                     >
                       <Key className="h-3 w-3 text-amber-300" />
                       <span>
-                        {current.apiProvider === 'gemini'
+                        {isBuiltInFreeProvider(current.apiProvider)
                           ? 'Create Chub.ai Token'
                           : getProviderApiKeyInfo(current.apiProvider).label.replace(/^🔑\s*/, '')}
                       </span>
                       <ExternalLink className="h-3 w-3" />
                     </a>
-                    {current.apiProvider === 'gemini' && (
+                    {isBuiltInFreeProvider(current.apiProvider) && (
                       <a
                         href={CHUB_CREATE_TOKEN_URL}
                         target="_blank"
@@ -889,13 +905,26 @@ export const ChubSettingsModal: React.FC<ChubSettingsModalProps> = ({
                 <div>
                   <h4 className="text-xs font-bold text-purple-200 flex items-center gap-1.5">
                     <Key className="h-4 w-4 text-amber-300" />
-                    <span>Chub.ai Tokens, Mars &amp; External Keys</span>
+                    <span>Chub.ai Tokens, Free Built-In API &amp; External Keys</span>
                   </h4>
                   <p className="text-[11px] text-zinc-400 mt-0.5">
-                    {getProviderApiKeyInfo(current.apiProvider).helperText}
+                    {isBuiltInFreeProvider(current.apiProvider)
+                      ? `Palace Free API Active for ${current.model || 'claude-opus-5-5'} — Zero API Key Needed!`
+                      : getProviderApiKeyInfo(current.apiProvider).helperText}
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  {!isBuiltInFreeProvider(current.apiProvider) && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setCurrent({ ...current, apiProvider: 'palace_free', stagingUrl: '' })
+                      }
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-500/50 bg-emerald-600/25 px-3 py-2 text-xs font-bold text-emerald-200 hover:bg-emerald-600/40 transition-all cursor-pointer"
+                    >
+                      <span>🎁 Use Free API (No Key)</span>
+                    </button>
+                  )}
                   <a
                     href={CHUB_CREATE_TOKEN_URL}
                     target="_blank"
@@ -916,6 +945,14 @@ export const ChubSettingsModal: React.FC<ChubSettingsModalProps> = ({
                   </a>
                 </div>
               </div>
+
+              {isBuiltInFreeProvider(current.apiProvider) && (
+                <div className="rounded-2xl border border-emerald-500/40 bg-emerald-950/25 px-4 py-3 text-xs text-emerald-200 flex items-center justify-between gap-2">
+                  <span>
+                    ✨ <strong>Palace Free API</strong> runs <strong>{current.model || 'Claude Opus 5.5'}</strong> &amp; all catalog models without requiring any paid API key.
+                  </span>
+                </div>
+              )}
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>

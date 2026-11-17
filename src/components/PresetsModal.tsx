@@ -21,6 +21,7 @@ import {
   CHUB_ACTIVE_MODELS,
   CHUB_PROMPT_STRUCTURES,
   CHUB_TTS_APIS,
+  isBuiltInFreeProvider,
 } from '../utils/chubOptions.ts';
 import {
   CHUB_CREATE_TOKEN_URL,
@@ -275,13 +276,22 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2 shrink-0">
-              {formData.apiProvider === 'gemini' && (
+              {!isBuiltInFreeProvider(formData.apiProvider) ? (
+                <button
+                  type="button"
+                  onClick={() => handleProviderSelect('palace_free')}
+                  data-testid="presets-use-free-api-btn"
+                  className="rounded-xl border border-emerald-500/50 bg-emerald-600/25 px-3 py-2 text-[11px] font-bold text-emerald-200 hover:bg-emerald-600/40 transition-all cursor-pointer"
+                >
+                  🎁 Use Free API (No Key)
+                </button>
+              ) : (
                 <button
                   type="button"
                   onClick={() => handleProviderSelect('chub_mars')}
                   className="rounded-xl border border-purple-500/40 bg-purple-900/40 px-3 py-2 text-[11px] font-bold text-purple-200 hover:bg-purple-800/50 transition-all cursor-pointer"
                 >
-                  Use Chub API
+                  Use Custom Key
                 </button>
               )}
               <a
@@ -488,9 +498,48 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
             </div>
           </div>
 
-          {/* Chub / Custom API configuration fields */}
-          {formData.apiProvider !== 'gemini' && (
+          {/* Palace Free API Banner OR Chub / External API Credentials */}
+          {isBuiltInFreeProvider(formData.apiProvider) ? (
+            <div
+              data-testid="presets-free-api-active"
+              className="rounded-2xl border border-emerald-500/40 bg-gradient-to-r from-emerald-950/45 via-zinc-900/70 to-teal-950/35 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+            >
+              <div className="space-y-1">
+                <div className="font-bold text-emerald-200 flex items-center gap-1.5">
+                  <Sparkles className="h-4 w-4 text-emerald-400" />
+                  <span>Palace Free API Active — Zero Key Needed</span>
+                </div>
+                <p className="text-[11px] text-zinc-300 leading-relaxed">
+                  Currently routing <span className="font-mono font-bold text-emerald-300">{formData.customModel || 'claude-opus-5-5'}</span> through Palace&apos;s built-in free roleplay engine. Works for <strong>Claude Opus 5.5</strong>, DeepSeek R1/V3, Chub Mars, GPT-4o &amp; Gemini!
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleTestConnection}
+                disabled={testingConn}
+                className="rounded-xl border border-emerald-400/50 bg-emerald-600/25 px-3 py-2 text-[11px] font-bold text-emerald-100 hover:bg-emerald-600/40 shrink-0 cursor-pointer"
+              >
+                {testingConn ? 'Verifying...' : 'Verify Free Engine'}
+              </button>
+            </div>
+          ) : (
             <div className="rounded-2xl border border-purple-500/30 bg-purple-950/20 p-4 space-y-4">
+              {!formData.chubApiKey.trim() && (
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-emerald-500/35 bg-emerald-950/25 px-3 py-2 text-[11px] text-emerald-200">
+                  <span>
+                    <strong>No API key entered:</strong> Leave blank to run{' '}
+                    <span className="font-mono text-emerald-300">{formData.customModel || 'selected model'}</span>{' '}
+                    via Palace Free API, or switch directly:
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleProviderSelect('palace_free')}
+                    className="rounded-lg bg-emerald-600/30 border border-emerald-400/50 px-2.5 py-1 font-bold text-emerald-100 hover:bg-emerald-600/50 cursor-pointer"
+                  >
+                    Switch to Free API
+                  </button>
+                </div>
+              )}
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="font-bold text-purple-300 flex items-center gap-1.5">
                   <Key className="h-4 w-4" />
@@ -606,6 +655,28 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
                   className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3.5 py-2 text-xs text-zinc-100 placeholder-zinc-600 focus:border-purple-500 focus:outline-none font-mono"
                 />
               </div>
+            </div>
+          )}
+          {isBuiltInFreeProvider(formData.apiProvider) && testResult && (
+            <div
+              data-testid="presets-test-result"
+              className={`rounded-xl border px-3.5 py-2.5 text-[11px] space-y-1 ${
+                testResult.ok
+                  ? 'border-emerald-500/40 bg-emerald-950/30 text-emerald-200'
+                  : 'border-amber-500/40 bg-amber-950/30 text-amber-100'
+              }`}
+            >
+              <div className="flex items-center justify-between gap-2 font-bold">
+                <span>{testResult.message}</span>
+                {testResult.code && (
+                  <span className="rounded bg-black/40 px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider shrink-0">
+                    {testResult.code}
+                  </span>
+                )}
+              </div>
+              {testResult.hint && (
+                <p className="text-[10px] opacity-85 leading-relaxed">{testResult.hint}</p>
+              )}
             </div>
           )}
 

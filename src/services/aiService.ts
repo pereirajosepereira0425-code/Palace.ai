@@ -1,5 +1,10 @@
 import { GoogleGenAI, ThinkingLevel } from '@google/genai';
-import { CHUB_API_PROVIDERS, getPromptStructureGuidance } from '../utils/chubOptions.ts';
+import {
+  CHUB_API_PROVIDERS,
+  getModelStyleCalibration,
+  getPromptStructureGuidance,
+  isBuiltInFreeProvider,
+} from '../utils/chubOptions.ts';
 import {
   buildBudgetedContext,
   normalizeChatCompletionsUrl,
@@ -349,6 +354,14 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
     systemInstructionParts.push(options.brawlContextPrompt.trim());
   }
 
+  const requestedModelId = (chatSettings.model || modelPreference || 'gemini-3.8-flash').trim();
+  const activeProvider = chatSettings.apiProvider;
+  const useBuiltInFree = isBuiltInFreeProvider(activeProvider) || !options.chubApiKey;
+  const calibration = useBuiltInFree ? getModelStyleCalibration(requestedModelId) : null;
+  if (calibration?.styleDirective) {
+    systemInstructionParts.push(calibration.styleDirective);
+  }
+
   systemInstructionParts.push(
     `Writing Style Rules:`,
     `- Use asterisks *like this* for actions, thoughts, sensory observations, and physical movements.`,
@@ -358,16 +371,15 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
 
   const systemInstruction = systemInstructionParts.join('\n\n');
 
-  // Check if external/Chub.ai OpenAI-compatible API endpoint was configured by user
-  const activeProvider = chatSettings.apiProvider;
+  // Check if external/Chub.ai OpenAI-compatible API endpoint was configured by user with a real key
   const providerMeta = CHUB_API_PROVIDERS.find((p) => p.id === activeProvider);
   const rawExternalUrl =
-    options.chubApiUrl ||
-    (activeProvider && activeProvider !== 'gemini'
-      ? chatSettings.stagingUrl || providerMeta?.defaultUrl
-      : null);
+    !isBuiltInFreeProvider(activeProvider)
+      ? options.chubApiUrl ||
+        (activeProvider ? chatSettings.stagingUrl || providerMeta?.defaultUrl : null)
+      : null;
 
-  if (options.chubApiKey && rawExternalUrl) {
+  if (!isBuiltInFreeProvider(activeProvider) && options.chubApiKey && rawExternalUrl) {
     const completionsUrl = normalizeChatCompletionsUrl(rawExternalUrl);
     if (completionsUrl) {
       try {
@@ -488,6 +500,12 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
   // Only invoke High Thinking (gemini-4-argon) when explicitly enabled ('HIGH')
   const isHighThinking = shouldUseHighThinking(thinkingLevel, modelPreference);
 
+  const isCustomCalibratedFree =
+    Boolean(calibration?.styleDirective) && requestedModelId !== 'gemini-3.8-flash';
+  const baseModelBadge = isCustomCalibratedFree
+    ? `Palace Free API (${calibration!.displayLabel})`
+    : 'gemini-3.8-flash';
+
   if (isHighThinking) {
     try {
       const response = await callGeminiWithTimeout(
@@ -519,7 +537,7 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
           reply: generateSmartRoleplayFallback(character, userMessage, history, options.brawlContextPrompt),
           thinkingProcess: 'Gemini credentials unavailable in local runtime. Resonant in-character continuity active.',
           groundingSources: [],
-          modelUsed: 'gemini-3.8-flash (Safe Continuity)',
+          modelUsed: `${baseModelBadge} (Safe Continuity)`,
         };
       }
     }
@@ -568,7 +586,7 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
     return {
       reply,
       groundingSources,
-      modelUsed: searchGrounding ? 'gemini-3.8-flash (Search Grounded)' : 'gemini-3.8-flash',
+      modelUsed: searchGrounding ? `${baseModelBadge} (Search Grounded)` : baseModelBadge,
     };
   } catch (err: any) {
     console.warn('Initial generateContent failed, attempting safe fallback:', err?.message);
@@ -589,7 +607,7 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
         return {
           reply: ungroundedResponse.text || '...',
           groundingSources: [],
-          modelUsed: 'gemini-3.8-flash (Offline Mode)',
+          modelUsed: `${baseModelBadge} (Offline Mode)`,
         };
       } catch (retryErr: any) {
         console.warn('Ungrounded retry also failed:', retryErr?.message);
@@ -602,7 +620,7 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
         reply: generateSmartRoleplayFallback(character, userMessage, history, options.brawlContextPrompt),
         thinkingProcess: 'Quota limitation reached on API key. Intelligent contextual roleplay fallback generated.',
         groundingSources: [],
-        modelUsed: 'gemini-3.8-flash (Resonant Roleplay Mode)',
+        modelUsed: `${baseModelBadge} (Resonant Roleplay Mode)`,
       };
     }
 
@@ -610,7 +628,7 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
       reply: generateSmartRoleplayFallback(character, userMessage, history, options.brawlContextPrompt),
       thinkingProcess: 'Temporary connection anomaly. Roleplay continuity preserved.',
       groundingSources: [],
-      modelUsed: 'gemini-3.8-flash (Safe Continuity)',
+      modelUsed: `${baseModelBadge} (Safe Continuity)`,
     };
   }
 }
@@ -642,16 +660,19 @@ export async function generateMultiModelCharacterReply(
     const slotId = slot.id;
     const isGeminiArgon = slotId === 'gemini-4-argon';
     const isGeminiNative = slotId.startsWith('gemini-');
+    const slotProvider = slot.apiProvider || options.chatSettings?.apiProvider;
     const slotKey = (slot.apiKey || options.chubApiKey || '').trim();
     const slotUrl = (
       slot.apiUrl ||
-      (slot.apiProvider && slot.apiProvider !== 'gemini'
+      (slot.apiProvider && !isBuiltInFreeProvider(slot.apiProvider)
         ? CHUB_API_PROVIDERS.find((p) => p.id === slot.apiProvider)?.defaultUrl
         : undefined) ||
-      (!isGeminiNative ? options.chubApiUrl || undefined : undefined)
+      (!isGeminiNative && !isBuiltInFreeProvider(slotProvider)
+        ? options.chubApiUrl || undefined
+        : undefined)
     )?.trim();
 
-    if (!isGeminiNative && slotKey && slotUrl) {
+    if (!isGeminiNative && !isBuiltInFreeProvider(slotProvider) && slotKey && slotUrl) {
       const extRes = await generateCharacterReply({
         ...options,
         userMessage: stageInstruction,
@@ -662,7 +683,7 @@ export async function generateMultiModelCharacterReply(
         chubApiUrl: slotUrl,
         chatSettings: {
           ...options.chatSettings,
-          apiProvider: slot.apiProvider || options.chatSettings?.apiProvider || 'custom_openai',
+          apiProvider: slotProvider || 'custom_openai',
           model: slotId,
           temperature: Math.min(1.4, Math.max(0.2, (options.chatSettings?.temperature ?? 0.85) + tempOffset)),
           maxNewTokens: Math.min(500, options.chatSettings?.maxNewTokens ?? 400),
@@ -671,6 +692,7 @@ export async function generateMultiModelCharacterReply(
       return extRes.reply;
     }
 
+    const slotCalibration = getModelStyleCalibration(slotId);
     const geminiModel = isGeminiArgon ? 'gemini-4-argon' : 'gemini-3.8-flash';
     if (!geminiNativeAuthBlocked) {
       try {
@@ -687,8 +709,8 @@ export async function generateMultiModelCharacterReply(
               ],
               config: {
                 systemInstruction: `Stay in character as "${options.character.name}". ${options.character.systemPrompt}${
-                  options.brawlContextPrompt ? `\n\n${options.brawlContextPrompt}` : ''
-                }`,
+                  slotCalibration.styleDirective ? `\n\n${slotCalibration.styleDirective}` : ''
+                }${options.brawlContextPrompt ? `\n\n${options.brawlContextPrompt}` : ''}`,
                 temperature: Math.min(1.35, Math.max(0.3, (options.chatSettings?.temperature ?? 0.85) + tempOffset)),
                 ...(isGeminiArgon ? { thinkingConfig: { thinkingLevel: ThinkingLevel.HIGH } } : {}),
               },

@@ -62,6 +62,7 @@ import {
   safeParseJsonResponse,
   tryBrowserExternalCompletion,
 } from '../utils/apiErrorUtils.ts';
+import { isBuiltInFreeProvider } from '../utils/chubOptions.ts';
 import { ThreeAvatarViewer } from './ThreeAvatarViewer.tsx';
 import { ViewportSlot } from './ViewportSlot.tsx';
 import { mergeGlobalActiveLorebook } from '../utils/communityUtils.ts';
@@ -172,9 +173,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
     const chubApiKey = (presetsData.chubApiKey || '').trim() || undefined;
     const chubApiUrl =
-      (latestSettings.apiProvider && latestSettings.apiProvider !== 'gemini'
+      (latestSettings.apiProvider && !isBuiltInFreeProvider(latestSettings.apiProvider)
         ? latestSettings.stagingUrl || presetsData.chubApiUrl
-        : presetsData.apiProvider && presetsData.apiProvider !== 'gemini'
+        : presetsData.apiProvider && !isBuiltInFreeProvider(presetsData.apiProvider)
           ? presetsData.chubApiUrl
           : undefined) || undefined;
 
@@ -812,7 +813,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       const shouldTryBrowserDirect =
         isSingleStandardSpeaker &&
         effectiveSettings.apiProvider &&
-        effectiveSettings.apiProvider !== 'gemini' &&
+        !isBuiltInFreeProvider(effectiveSettings.apiProvider) &&
+        (Boolean(chubApiKey) || isLocalProviderOrUrl(effectiveSettings.apiProvider, chubApiUrl)) &&
         (isChubUrlOrProvider(effectiveSettings.apiProvider, chubApiUrl) ||
           isLocalProviderOrUrl(effectiveSettings.apiProvider, chubApiUrl));
 
@@ -984,7 +986,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
           const shouldTryBrowserDirect =
             mergedSettings.apiProvider &&
-            mergedSettings.apiProvider !== 'gemini' &&
+            !isBuiltInFreeProvider(mergedSettings.apiProvider) &&
+            (Boolean(chubApiKey) || isLocalProviderOrUrl(mergedSettings.apiProvider, chubApiUrl)) &&
             (isChubUrlOrProvider(mergedSettings.apiProvider, chubApiUrl) ||
               isLocalProviderOrUrl(mergedSettings.apiProvider, chubApiUrl));
 

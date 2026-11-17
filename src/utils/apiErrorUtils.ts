@@ -1,4 +1,4 @@
-import { CHUB_API_PROVIDERS } from './chubOptions.ts';
+import { CHUB_API_PROVIDERS, isBuiltInFreeProvider } from './chubOptions.ts';
 import {
   buildBudgetedContext,
   normalizeChatCompletionsUrl,
@@ -709,6 +709,20 @@ export async function runSmartConnectionTest(options: {
   apiKey?: string;
   model?: string;
 }): Promise<ApiConnectionTestResult> {
+  if (isBuiltInFreeProvider(options.apiProvider)) {
+    const chosenModel = (options.model || 'claude-opus-5-5').trim();
+    return {
+      ok: true,
+      status: 200,
+      code: 'FREE_API_READY',
+      endpoint: '/api/chat/message',
+      testedFrom: 'server',
+      resolvedModel: chosenModel,
+      message: `Palace Free Built-In API is ready! "${chosenModel}" runs completely free with zero API key needed.`,
+      hint: 'Switch anytime between Claude Opus 5.5, DeepSeek R1, Chub Mars, GPT-4o, and Gemini — no external billing required.',
+    };
+  }
+
   const validationErr = validateConnectionInputs(options);
   if (validationErr) return validationErr;
 

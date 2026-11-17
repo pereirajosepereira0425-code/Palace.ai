@@ -1,4 +1,11 @@
 import { useEffect, useState } from 'react';
+import {
+  type AppUpdateState,
+  applyPalaceUpdate,
+  checkForPalaceUpdates,
+  CLIENT_APP_VERSION,
+  subscribeAppUpdate,
+} from '../utils/appVersion.ts';
 
 interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>;
@@ -10,8 +17,19 @@ export function usePWAInstall() {
   const [isInstalled, setIsInstalled] = useState(false);
   const [isIOS, setIsIOS] = useState(false);
   const [isEmbeddedFrame, setIsEmbeddedFrame] = useState(false);
+  const [appUpdate, setAppUpdate] = useState<AppUpdateState>({
+    currentVersion: CLIENT_APP_VERSION,
+    serverVersion: CLIENT_APP_VERSION,
+    needRefresh: false,
+    offlineReady: false,
+    checking: false,
+    lastCheckedAt: null,
+    statusMessage: null,
+  });
 
   useEffect(() => {
+    const unsubscribeUpdate = subscribeAppUpdate(setAppUpdate);
+
     const isStandalone =
       window.matchMedia('(display-mode: standalone)').matches ||
       (window.navigator as unknown as { standalone?: boolean }).standalone === true;
@@ -40,6 +58,7 @@ export function usePWAInstall() {
     window.addEventListener('appinstalled', handleAppInstalled);
 
     return () => {
+      unsubscribeUpdate();
       window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
       window.removeEventListener('appinstalled', handleAppInstalled);
     };
@@ -63,6 +82,9 @@ export function usePWAInstall() {
     isIOS,
     isEmbeddedFrame,
     install,
+    appUpdate,
+    checkForUpdates: checkForPalaceUpdates,
+    applyUpdate: applyPalaceUpdate,
   };
 }
 

@@ -349,6 +349,12 @@ const PROVIDER_KEY_PORTALS: Record<string, ProviderApiKeyInfo> = {
     url: 'https://novelai.net/account',
     helperText: 'Generate a Persistent API Token in your NovelAI Account settings.',
   },
+  palace_free: {
+    label: '🎁 Free Built-In API Active',
+    url: CHUB_CREATE_TOKEN_URL,
+    helperText:
+      'Palace Free Built-In API requires ZERO keys — works directly with Claude Opus 5.5, DeepSeek R1, Chub Mars, GPT-4o & Gemini.',
+  },
   gemini: {
     label: '🔑 Google AI Studio Key',
     url: 'https://aistudio.google.com/app/apikey',

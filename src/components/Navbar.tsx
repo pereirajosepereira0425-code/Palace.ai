@@ -68,17 +68,19 @@ export const Navbar: React.FC<NavbarProps> = ({
             className="group flex items-center gap-2 text-left focus:outline-none cursor-pointer"
             aria-label="Palace.ai Home"
           >
-            <div className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-tr from-purple-600 via-fuchsia-600 to-amber-400 p-0.5 shadow-lg shadow-purple-500/25 transition-transform group-hover:scale-105">
-              <div className="flex h-full w-full items-center justify-center rounded-[9px] bg-zinc-950 text-lg">
-                👑
-              </div>
+            <div className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-tr from-orange-500 via-amber-500 to-purple-600 p-0.5 shadow-lg shadow-orange-500/25 transition-transform group-hover:scale-105">
+              <img
+                src="/assets/aistudio/Screenshot_20261115_142839_Chrome_45bd0e27.jpg"
+                alt="Palace.ai Logo"
+                className="h-full w-full rounded-[9px] object-cover"
+              />
             </div>
             <div className="hidden min-[380px]:block">
               <div className="flex items-center gap-1">
                 <span className="bg-gradient-to-r from-purple-300 via-fuchsia-200 to-amber-200 bg-clip-text text-base sm:text-lg font-black tracking-tight text-transparent">
                   palace<span className="text-amber-400">.ai</span>
                 </span>
-                <span className="rounded-full bg-purple-500/20 px-1.5 py-0.5 text-[9px] font-bold text-purple-300 border border-purple-500/30">
+                <span className="hidden 2xl:inline rounded-full bg-purple-500/20 px-1.5 py-0.5 text-[9px] font-bold text-purple-300 border border-purple-500/30">
                   HUB
                 </span>
               </div>
@@ -89,7 +91,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           </button>
 
           {/* Quick Search on Desktop */}
-          <div className="relative ml-1 hidden md:block w-24 xl:w-28">
+          <div className="relative ml-1 hidden md:block w-24">
             <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400" />
             <input
               type="text"
@@ -232,7 +234,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             <option value="NSFL">NSFL</option>
             <option value="NSFW + NSFL">NSFW+NSFL</option>
           </select>
-          {/* Download Chub.ai as PWA App */}
+          {/* Download Palace.ai as PWA App & Updater */}
           <PWAInstallButton />
 
           {/* Presets Modal Button (/my_presets) */}
@@ -252,7 +254,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             title="Edit your Active Persona"
           >
             <User className="h-3.5 w-3.5 text-amber-400" />
-            <span className="max-w-[60px] xl:max-w-[76px] truncate font-medium">
+            <span className="max-w-[56px] xl:max-w-[64px] truncate font-medium">
               {persona.name}
             </span>
           </button>
@@ -314,7 +316,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                 ) : (
                   <User className="h-3.5 w-3.5 text-purple-300" />
                 )}
-                <span className="hidden md:inline text-xs font-bold max-w-[68px] truncate">
+                <span className="hidden md:inline text-xs font-bold max-w-[56px] truncate">
                   {profile?.displayName || 'Profile'}
                 </span>
               </button>

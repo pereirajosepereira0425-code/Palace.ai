@@ -1,5 +1,8 @@
 import express from 'express';
+import fs from 'fs';
+import path from 'path';
 import { optionalAuth, requireAuth, type AuthRequest } from '../src/middleware/auth.ts';
+import { createZipBuffer } from '../src/utils/zipBuilder.ts';
 import {
   getCharacters,
   getCharacterByUuid,
@@ -1832,5 +1835,152 @@ apiRouter.post('/tts', async (req, res) => {
   } catch (error: any) {
     console.error('TTS generation failed:', error);
     res.status(500).json({ error: error.message || 'TTS generation failed' });
+  }
+});
+
+// ----------------- PALACE.AI APP VERSION & ANDROID APK KIT -----------------
+function readPackageVersion(): string {
+  try {
+    const pkgPath = path.resolve(process.cwd(), 'package.json');
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+    return String(pkg.version || '2.5.0');
+  } catch {
+    return '2.5.0';
+  }
+}
+
+apiRouter.get('/app/version', (_req, res) => {
+  const version = readPackageVersion();
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({
+    appName: 'Palace.ai',
+    packageId: 'ai.palace.app',
+    version,
+    releaseNotes: [
+      'Palace Free Built-In API for all models (including Claude Opus 5.5) with zero API key needed',
+      'JanitorAI (/characters/...) and SpicyChat (/chatbot/...) URL importers upgraded',
+      'Chub.ai Custom Voices Engine + Inline Chat Message Editing',
+      'Palace.ai Brand Logo & Android WebAPK / TWA Builder Kit',
+    ],
+    supportsWebApkInstall: true,
+    twaKitDownloadUrl: '/api/app/android-apk-kit.zip',
+  });
+});
+
+apiRouter.get('/app/android-apk-kit.zip', (req, res) => {
+  try {
+    const version = readPackageVersion();
+    const hostHeader = req.get('host') || 'localhost:3000';
+    const proto = req.headers['x-forwarded-proto'] || req.protocol || 'https';
+    const origin = `${Array.isArray(proto) ? proto[0] : proto}://${hostHeader}`;
+
+    const entries: Array<{ name: string; content: string | Buffer }> = [
+      {
+        name: 'palace-ai-android-twa/twa-manifest.json',
+        content: JSON.stringify(
+          {
+            packageId: 'ai.palace.app',
+            host: hostHeader.split(':')[0],
+            name: 'Palace.ai',
+            launcherName: 'Palace.ai',
+            display: 'standalone',
+            themeColor: '#09090B',
+            navigationColor: '#09090B',
+            backgroundColor: '#EDF6FF',
+            enableNotifications: true,
+            startUrl: '/',
+            iconUrl: `${origin}/pwa-512x512.png`,
+            maskableIconUrl: `${origin}/pwa-maskable-512x512.png`,
+            appVersionName: version,
+            appVersionCode: 250,
+            shortcuts: [],
+            generatorApp: 'Palace.ai TWA Kit',
+          },
+          null,
+          2
+        ),
+      },
+      {
+        name: 'palace-ai-android-twa/build-apk.sh',
+        content: `#!/usr/bin/env bash
+set -euo pipefail
+echo "Building Palace.ai v${version} signed Android APK via Bubblewrap..."
+npx @bubblewrap/cli init --manifest="${origin}/manifest.webmanifest"
+npx @bubblewrap/cli build
+echo "Done! Install app-release-signed.apk onto your Android device."
+`,
+      },
+      {
+        name: 'palace-ai-android-twa/AndroidManifest.xml',
+        content: `<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="ai.palace.app"
+    android:versionCode="250"
+    android:versionName="${version}">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="Palace.ai"
+        android:theme="@android:style/Theme.Translucent.NoTitleBar">
+        <activity
+            android:name="com.google.androidbrowserhelper.trusted.LauncherActivity"
+            android:exported="true"
+            android:label="Palace.ai">
+            <meta-data
+                android:name="android.support.customtabs.trusted.DEFAULT_URL"
+                android:value="${origin}/" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
+`,
+      },
+      {
+        name: 'palace-ai-android-twa/README_BUILD_APK.md',
+        content: `# Palace.ai Android APK Builder Kit (v${version})
+
+## Fast Option 1: Install Instantly on Android (Zero Computer Required)
+1. Open **${origin}** in **Google Chrome** or **Edge** on Android.
+2. Tap **Get App** -> **Install Palace.ai Now** (or tap Chrome's menu \`⋮ -> Add to Home screen -> Install\`).
+3. Android Chrome automatically builds and installs a signed **WebAPK** on your phone with the Palace.ai app icon.
+
+## Option 2: Compile a Standalone Distributable .apk File
+Because compiling & signing a binary Android \`.apk\` requires Java JDK 17+ and Android SDK Build-Tools (\`aapt2\` / \`apksigner\`), run this bundle on any Mac, Windows, or Linux machine:
+
+\`\`\`bash
+npx @bubblewrap/cli init --manifest="${origin}/manifest.webmanifest"
+npx @bubblewrap/cli build
+\`\`\`
+
+This compiles and signs \`app-release-signed.apk\` pointing to **Palace.ai** (${origin}) using your Palace.ai icon assets!
+`,
+      },
+    ];
+
+    const iconFiles = [
+      { disk: 'public/pwa-192x192.png', zip: 'palace-ai-android-twa/res/mipmap-xxxhdpi/ic_launcher.png' },
+      { disk: 'public/pwa-512x512.png', zip: 'palace-ai-android-twa/icon-512x512.png' },
+    ];
+    for (const ic of iconFiles) {
+      const abs = path.resolve(process.cwd(), ic.disk);
+      if (fs.existsSync(abs)) {
+        entries.push({ name: ic.zip, content: fs.readFileSync(abs) });
+      }
+    }
+
+    const zipBuf = createZipBuffer(entries);
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="palace-ai-android-apk-kit-v${version}.zip"`
+    );
+    res.setHeader('Content-Length', String(zipBuf.length));
+    res.send(zipBuf);
+  } catch (error: any) {
+    console.error('Failed to build Android APK kit:', error);
+    res.status(500).json({ error: error.message || 'Failed to build Android APK kit' });
   }
 });

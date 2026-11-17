@@ -1047,4 +1047,122 @@ test('applyEditedSwipe and normalizeEditedMessageText update bot text and preser
   assert.equal(emptySwipes.activeSwipeIndex, 0);
 });
 
+test('JanitorAI and SpicyChat URL parsers & importer handle Velvet slug, /chatbot/ UUID, typo prefix yhttps, and 403/401 fallbacks cleanly', async () => {
+  const {
+    normalizePastedUrl,
+    parseJanitorSlug,
+    parseCharacterUrl,
+  } = await import('./characterUtils.ts');
+  const { importCharacterFromUrl } = await import('../../server/urlImporter.ts');
+
+  const janitorUrl =
+    'https://janitorai.com/characters/683af453-907c-42b9-b72a-1d850818193e_character-velvet-by-arzy-parz';
+  const typoSpicyUrl = 'yhttps://spicychat.ai/chatbot/e0c477e0-9a56-4918-a624-586bb3762dc3';
+
+  assert.equal(normalizePastedUrl(typoSpicyUrl), 'https://spicychat.ai/chatbot/e0c477e0-9a56-4918-a624-586bb3762dc3');
+
+  const janitorSlug = parseJanitorSlug(
+    '683af453-907c-42b9-b72a-1d850818193e_character-velvet-by-arzy-parz'
+  );
+  assert.equal(janitorSlug.uuid, '683af453-907c-42b9-b72a-1d850818193e');
+  assert.equal(janitorSlug.name, 'Velvet');
+  assert.equal(janitorSlug.creator, 'Arzy Parz');
+
+  assert.deepEqual(parseCharacterUrl(janitorUrl), {
+    source: 'janitor',
+    idOrPath: '683af453-907c-42b9-b72a-1d850818193e_character-velvet-by-arzy-parz',
+  });
+  assert.deepEqual(parseCharacterUrl(typoSpicyUrl), {
+    source: 'spicychat',
+    idOrPath: 'e0c477e0-9a56-4918-a624-586bb3762dc3',
+  });
+
+  // Mock 403 Cloudflare block for JanitorAI -> returns clean editable Velvet card instead of crashing 422
+  const cf403Fetch = async () =>
+    new Response('<!DOCTYPE html><title>Attention Required! | Cloudflare</title>', {
+      status: 403,
+      headers: { 'content-type': 'text/html' },
+    });
+  const janitorFallback = await importCharacterFromUrl(janitorUrl, cf403Fetch);
+  assert.equal(janitorFallback.source, 'janitor');
+  assert.equal(janitorFallback.character.name, 'Velvet');
+  assert.equal(janitorFallback.character.creatorName, '@arzy-parz');
+  assert.ok(janitorFallback.warning && janitorFallback.warning.includes('Velvet'));
+
+  // Mock 401 token-gated fallback for SpicyChat -> avoids hex UUID name and pre-populates starter card
+  const spicy401Fetch = async () =>
+    new Response(JSON.stringify({ code: 'SC-001-6004' }), {
+      status: 401,
+      headers: { 'content-type': 'application/json' },
+    });
+  const spicyFallback = await importCharacterFromUrl(typoSpicyUrl, spicy401Fetch);
+  assert.equal(spicyFallback.source, 'spicychat');
+  assert.ok(spicyFallback.character.name.startsWith('SpicyChat Bot'));
+  assert.ok(!/e0c477e0-9a56-4918/i.test(spicyFallback.character.name));
+  assert.ok(spicyFallback.warning && spicyFallback.warning.length > 10);
+
+  // Mock 200 live SpicyChat JSON response -> imports full card fields
+  const spicy200Fetch = async (input: string) => {
+    if (input.includes('prod.nd-api.com')) {
+      return new Response(
+        JSON.stringify({
+          name: 'Seraphina Vale',
+          title: 'Starship Navigator',
+          persona: 'Quick-witted astrogator aboard the Dawnbreaker.',
+          greeting: '*Taps the holographic star chart.* "Next jump in five."',
+          creator_username: 'VoidWalker',
+          is_nsfw: false,
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    return new Response('', { status: 404 });
+  };
+  const spicyLive = await importCharacterFromUrl(typoSpicyUrl, spicy200Fetch);
+  assert.equal(spicyLive.character.name, 'Seraphina Vale');
+  assert.equal(spicyLive.character.creatorName, 'VoidWalker');
+  assert.equal(spicyLive.character.rating, 'SFW');
+});
+
+test('Palace Free API supports all models (including Claude Opus 5.5) with zero API key, and APK Kit ZIP + semver updater work cleanly', async () => {
+  const { isBuiltInFreeProvider, getModelStyleCalibration } = await import('./chubOptions.ts');
+  const { runSmartConnectionTest } = await import('./apiErrorUtils.ts');
+  const { compareSemverStrings } = await import('./appVersion.ts');
+  const { createZipBuffer } = await import('./zipBuilder.ts');
+
+  assert.equal(isBuiltInFreeProvider('palace_free'), true);
+  assert.equal(isBuiltInFreeProvider('gemini'), true);
+  assert.equal(isBuiltInFreeProvider('anthropic'), false);
+  assert.equal(isBuiltInFreeProvider('chub_mars'), false);
+
+  const opusCal = getModelStyleCalibration('claude-opus-5-5');
+  assert.equal(opusCal.displayLabel, 'Claude Opus 5.5');
+  assert.ok(opusCal.styleDirective.includes('Claude Opus 5.5'));
+
+  const freeConn = await runSmartConnectionTest({
+    apiProvider: 'palace_free',
+    apiUrl: '',
+    apiKey: '',
+    model: 'claude-opus-5-5',
+  });
+  assert.equal(freeConn.ok, true);
+  assert.equal(freeConn.code, 'FREE_API_READY');
+  assert.equal(freeConn.resolvedModel, 'claude-opus-5-5');
+
+  assert.equal(compareSemverStrings('2.6.0', '2.5.0'), 1);
+  assert.equal(compareSemverStrings('2.5.0', '2.5.0'), 0);
+  assert.equal(compareSemverStrings('2.4.9', '2.5.0'), -1);
+
+  const zip = createZipBuffer([
+    { name: 'twa-manifest.json', content: '{"name":"Palace.ai"}' },
+    { name: 'build-apk.sh', content: '#!/usr/bin/env bash\necho build' },
+  ]);
+  // Verify PK\x03\x04 local header and End of Central Directory PK\x05\x06
+  assert.equal(zip.readUInt32LE(0), 0x04034b50);
+  assert.equal(zip.readUInt32LE(zip.length - 22), 0x06054b50);
+  assert.ok(zip.toString('utf-8').includes('twa-manifest.json'));
+  assert.ok(zip.toString('utf-8').includes('build-apk.sh'));
+});
+
+
 

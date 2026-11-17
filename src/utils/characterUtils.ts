@@ -401,13 +401,74 @@ export function formatRoleplaySegments(content: string): RoleplaySegment[] {
 }
 
 /**
+ * Extracts UUID, human-readable name, and creator handle from a JanitorAI character path segment.
+ * Example: "683af453-907c-42b9-b72a-1d850818193e_character-velvet-by-arzy-parz"
+ *   -> { uuid: "683af453-...", name: "Velvet", creator: "Arzy Parz", rawCreatorSlug: "arzy-parz" }
+ */
+export function parseJanitorSlug(idOrSlug: string): {
+  uuid: string;
+  name: string;
+  creator: string;
+  rawCreatorSlug: string;
+} {
+  const trimmed = decodeURIComponent((idOrSlug || '').trim());
+  const uuidMatch = trimmed.match(/^([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i);
+  const uuid = uuidMatch ? uuidMatch[1] : trimmed.split('_')[0] || trimmed;
+
+  const afterUuid = trimmed
+    .replace(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}_?/i, '')
+    .replace(/^character[-_]/i, '');
+
+  let nameSlug = afterUuid;
+  let creatorSlug = '';
+  const byIdx = afterUuid.lastIndexOf('-by-');
+  if (byIdx > 0) {
+    nameSlug = afterUuid.slice(0, byIdx);
+    creatorSlug = afterUuid.slice(byIdx + 4);
+  }
+
+  const formatWords = (s: string) =>
+    s
+      .replace(/[-_]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .replace(/\b\w/g, (c) => c.toUpperCase());
+
+  const name = formatWords(nameSlug) || 'Janitor Character';
+  const creator = formatWords(creatorSlug) || 'JanitorCreator';
+
+  return {
+    uuid,
+    name,
+    creator,
+    rawCreatorSlug: creatorSlug,
+  };
+}
+
+export function looksLikeUuid(value: string): boolean {
+  return /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test((value || '').trim());
+}
+
+/**
+ * Normalizes accidentally prefixed pasted URLs (e.g. "yhttps://spicychat.ai/..." -> "https://spicychat.ai/...")
+ */
+export function normalizePastedUrl(url: string): string {
+  const trimmed = url.trim();
+  const accidentalPrefix = trimmed.match(/^[^\s]{1,4}(https?:\/\/\S+)/i);
+  if (accidentalPrefix && !/^https?:\/\//i.test(trimmed)) {
+    return accidentalPrefix[1];
+  }
+  return trimmed;
+}
+
+/**
  * Parses and identifies character identifiers from Chub.ai, Janitor.ai, SpicyChat.ai, or Fandom/Miraheze URLs
  */
 export function parseCharacterUrl(url: string): {
   source: 'chub' | 'janitor' | 'spicychat' | 'fandom' | 'unknown';
   idOrPath: string;
 } {
-  const clean = url.trim();
+  const clean = normalizePastedUrl(url);
 
   // Fandom & Miraheze Wikis (e.g. dandysworldcreepypasta.fandom.com/wiki/Nextor,w%C6%B4x or peppafanon.miraheze.org)
   const wikiMatch = clean.match(/(?:fandom\.com|miraheze\.org)\/wiki\/([^?#\s]+)/i);
@@ -430,14 +491,18 @@ export function parseCharacterUrl(url: string): {
     return { source: 'chub', idOrPath: `${creator}/${slug}` };
   }
 
-  // JanitorAI: https://janitorai.com/characters/uuid_or_name or https://janitor.ai/characters/...
-  const janitorMatch = clean.match(/(?:janitorai\.com|janitor\.ai)\/(?:profiles\/[^\/]+\/)?characters\/([a-zA-Z0-9_-]+)/i);
+  // JanitorAI: https://janitorai.com/characters/uuid_or_name or https://www.janitorai.com/characters/...
+  const janitorMatch = clean.match(
+    /(?:www\.|kim\.)?(?:janitorai\.com|janitor\.ai)\/(?:profiles\/[^\/]+\/)?characters\/([^\s/?#]+)/i
+  );
   if (janitorMatch) {
     return { source: 'janitor', idOrPath: janitorMatch[1] };
   }
 
-  // SpicyChat: https://spicychat.ai/chat/bot-id or /characters/bot-id
-  const spicyMatch = clean.match(/spicychat\.ai\/(?:chat|characters)\/([a-zA-Z0-9_-]+)/i);
+  // SpicyChat: https://spicychat.ai/chatbot/uuid, /chat/bot-id, /characters/bot-id, /bot/bot-id
+  const spicyMatch = clean.match(
+    /(?:www\.|beta\.)?spicychat\.ai\/(?:chatbot|chat|characters?|bot|story)\/([^\s/?#]+)/i
+  );
   if (spicyMatch) {
     return { source: 'spicychat', idOrPath: spicyMatch[1] };
   }

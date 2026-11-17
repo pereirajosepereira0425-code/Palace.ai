@@ -1,11 +1,20 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
+import fs from 'fs';
 import path from 'path';
 import { defineConfig } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
+const pkgJson = JSON.parse(
+  fs.readFileSync(path.resolve(import.meta.dirname, 'package.json'), 'utf-8')
+);
+const APP_VERSION: string = pkgJson.version || '2.5.0';
+
 export default defineConfig(() => {
   return {
+    define: {
+      __PALACE_APP_VERSION__: JSON.stringify(APP_VERSION),
+    },
     plugins: [
       react(),
       tailwindcss(),
@@ -20,10 +29,10 @@ export default defineConfig(() => {
         ],
         manifest: {
           id: '/',
-          name: 'Chub.ai · Palace AI Hub',
-          short_name: 'Chub.ai',
+          name: 'Palace.ai · Character Roleplay Hub',
+          short_name: 'Palace.ai',
           description:
-            'Downloadable Chub.ai & Palace AI character roleplay app with Custom Voices, Lorebooks, Multi-Model chat, and BrawlChat text fighting.',
+            'Downloadable Palace.ai character roleplay app with Free Built-In Models (Claude Opus 5.5, Gemini, DeepSeek), Custom Voices, Lorebooks, and BrawlChat text fighting.',
           theme_color: '#09090b',
           background_color: '#edf6ff',
           display: 'standalone',
@@ -51,6 +60,7 @@ export default defineConfig(() => {
           ],
         },
         workbox: {
+          cleanupOutdatedCaches: true,
           maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
           globPatterns: ['**/*.{js,css,html,ico,png,svg,jpg,woff,woff2}'],
           navigateFallbackDenylist: [/^\/api\//],
