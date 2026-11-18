@@ -18,6 +18,7 @@ import {
   Palette,
   Sliders,
   Users,
+  Globe,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.tsx';
 import { PWAInstallButton } from './PWAInstallButton.tsx';
@@ -43,6 +44,7 @@ interface NavbarProps {
   onOpenPersonaModal: () => void;
   onOpenPresetsModal: () => void;
   onOpenProfileModal: () => void;
+  onOpenDomainSeoModal: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -55,6 +57,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenPersonaModal,
   onOpenPresetsModal,
   onOpenProfileModal,
+  onOpenDomainSeoModal,
 }) => {
   const { user, profile, signInWithGoogle, signOutUser, persona } = useAuth();
 
@@ -234,27 +237,41 @@ export const Navbar: React.FC<NavbarProps> = ({
             <option value="NSFL">NSFL</option>
             <option value="NSFW + NSFL">NSFW+NSFL</option>
           </select>
+          {/* Free .com Domain & Google Search SEO Portal */}
+          <button
+            type="button"
+            onClick={onOpenDomainSeoModal}
+            data-testid="open-domain-seo-btn"
+            className="flex items-center gap-1 rounded-xl border border-cyan-500/40 bg-cyan-950/35 px-2 py-1.5 text-xs font-semibold text-cyan-200 hover:border-cyan-400 hover:bg-cyan-900/40 transition-all cursor-pointer shrink-0 whitespace-nowrap"
+            title="Port Palace.ai to a Free .com Domain & Google Search SEO"
+            aria-label="Open .com Web Domain & Google Search Portal"
+          >
+            <Globe className="h-3.5 w-3.5 text-cyan-400 shrink-0" />
+            <span className="hidden xl:inline">.com</span>
+          </button>
+
           {/* Download Palace.ai as PWA App & Updater */}
-          <PWAInstallButton />
+          <PWAInstallButton onOpenDomainSeoModal={onOpenDomainSeoModal} />
 
           {/* Presets Modal Button (/my_presets) */}
           <button
             onClick={onOpenPresetsModal}
-            className="flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900/80 px-2.5 py-1.5 text-xs text-zinc-300 hover:border-purple-500/50 hover:bg-zinc-800 transition-all"
+            className="flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900/80 px-2 py-1.5 text-xs text-zinc-300 hover:border-purple-500/50 hover:bg-zinc-800 transition-all cursor-pointer"
             title="Configure Generation & Chub API Presets (/my_presets)"
+            aria-label="Presets"
           >
             <Sliders className="h-3.5 w-3.5 text-purple-400" />
-            <span className="hidden sm:inline font-semibold">Presets</span>
+            <span className="hidden 2xl:inline font-semibold">Presets</span>
           </button>
 
           {/* Active Persona Chip */}
           <button
             onClick={onOpenPersonaModal}
-            className="flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900/80 px-2 py-1.5 text-xs text-zinc-300 hover:border-purple-500/50 hover:bg-zinc-800 transition-all"
+            className="flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900/80 px-2 py-1.5 text-xs text-zinc-300 hover:border-purple-500/50 hover:bg-zinc-800 transition-all cursor-pointer"
             title="Edit your Active Persona"
           >
             <User className="h-3.5 w-3.5 text-amber-400" />
-            <span className="max-w-[56px] xl:max-w-[64px] truncate font-medium">
+            <span className="max-w-[52px] xl:max-w-[60px] truncate font-medium">
               {persona.name}
             </span>
           </button>
@@ -316,7 +333,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                 ) : (
                   <User className="h-3.5 w-3.5 text-purple-300" />
                 )}
-                <span className="hidden md:inline text-xs font-bold max-w-[56px] truncate">
+                <span className="hidden 2xl:inline text-xs font-bold max-w-[56px] truncate">
                   {profile?.displayName || 'Profile'}
                 </span>
               </button>

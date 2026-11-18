@@ -11,10 +11,17 @@ import {
   RefreshCw,
   Package,
   Sparkles,
+  Globe,
 } from 'lucide-react';
 import { useOnlineStatus, usePWAInstall } from '../hooks/usePWAInstall.ts';
 
-export const PWAInstallButton: React.FC = () => {
+interface PWAInstallButtonProps {
+  onOpenDomainSeoModal?: () => void;
+}
+
+export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({
+  onOpenDomainSeoModal,
+}) => {
   const {
     isInstallable,
     isInstalled,
@@ -276,6 +283,20 @@ export const PWAInstallButton: React.FC = () => {
                   <span>Download Android APK Builder Kit (.zip)</span>
                 </a>
               </div>
+
+              {onOpenDomainSeoModal && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowGuideModal(false);
+                    onOpenDomainSeoModal();
+                  }}
+                  className="w-full flex items-center justify-center gap-2 rounded-2xl border border-cyan-500/40 bg-cyan-950/30 px-4 py-2.5 font-bold text-cyan-200 hover:bg-cyan-900/40 transition-all cursor-pointer"
+                >
+                  <Globe className="h-4 w-4 text-cyan-400" />
+                  <span>Open Free .com Web Domain &amp; Google Search Portal</span>
+                </button>
+              )}
             </div>
           </div>
         </div>,

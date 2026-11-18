@@ -1331,5 +1331,82 @@ test('Palace Free API supports all models (including Claude Opus 5.5) with zero 
   assert.ok(zip.toString('utf-8').includes('build-apk.sh'));
 });
 
+test('SEO metadata lengths, robots.txt, sitemap.xml, JSON-LD, and free .com domain porting kit work cleanly', async () => {
+  const {
+    SITE_TITLE,
+    SITE_DESCRIPTION,
+    buildRobotsTxt,
+    buildSitemapXml,
+    buildSeoJsonLd,
+    sanitizeDomainSlug,
+    buildFreeComPortOptions,
+    buildComDomainHostingFiles,
+  } = await import('./seoUtils.ts');
+
+  assert.ok(SITE_TITLE.length >= 30 && SITE_TITLE.length <= 60, `Title length was ${SITE_TITLE.length}`);
+  assert.ok(
+    SITE_DESCRIPTION.length >= 120 && SITE_DESCRIPTION.length <= 160,
+    `Description length was ${SITE_DESCRIPTION.length}`
+  );
+
+  const robots = buildRobotsTxt('https://palaceai.firebaseapp.com/');
+  assert.ok(robots.includes('User-agent: *'));
+  assert.ok(robots.includes('Allow: /'));
+  assert.ok(robots.includes('Disallow: /api/'));
+  assert.ok(robots.includes('Sitemap: https://palaceai.firebaseapp.com/sitemap.xml'));
+
+  const sitemap = buildSitemapXml('https://palaceai.firebaseapp.com', [
+    { uuid: 'janitor-arzyparzy-velvet', updatedAt: '2026-11-18T10:00:00Z' },
+    { uuid: 'spicychat-arzyparzy-velvet', updatedAt: '2026-11-18T10:00:00Z' },
+  ]);
+  assert.ok(sitemap.includes('<loc>https://palaceai.firebaseapp.com/</loc>'));
+  assert.ok(sitemap.includes('<loc>https://palaceai.firebaseapp.com/character/janitor-arzyparzy-velvet</loc>'));
+  assert.ok(sitemap.includes('<loc>https://palaceai.firebaseapp.com/character/spicychat-arzyparzy-velvet</loc>'));
+
+  const ld = buildSeoJsonLd('https://palaceai.firebaseapp.com');
+  assert.equal(ld['@graph'][0]['@type'], 'WebApplication');
+  assert.equal(ld['@graph'][1]['@type'], 'WebSite');
+  assert.equal(ld['@graph'][1].potentialAction?.['@type'], 'SearchAction');
+
+  assert.equal(sanitizeDomainSlug('PalaceAi.com'), 'palaceai');
+  assert.equal(sanitizeDomainSlug('  My Palace!! '), 'my-palace');
+
+  const comOptions = buildFreeComPortOptions('PalaceAi.com', 'https://palace-preview.run.app', 'eighth-veld-fdtd0');
+  assert.ok(comOptions.some((o) => o.url === 'https://eighth-veld-fdtd0.firebaseapp.com'));
+  assert.ok(comOptions.some((o) => o.url === 'https://palaceai.firebaseapp.com'));
+  assert.ok(comOptions.some((o) => o.url === 'https://palaceai.onrender.com'));
+
+  const kitFiles = buildComDomainHostingFiles({
+    origin: 'https://palace-preview.run.app',
+    slug: 'PalaceAi',
+    firebaseProjectId: 'eighth-veld-fdtd0',
+    characters: [{ uuid: 'janitor-arzyparzy-velvet' }],
+  });
+  assert.ok(kitFiles.some((f) => f.name.endsWith('firebase.json') && f.content.includes('"site": "palaceai"')));
+  assert.ok(kitFiles.some((f) => f.name.endsWith('render.yaml') && f.content.includes('name: palaceai')));
+  assert.ok(kitFiles.some((f) => f.name.endsWith('sitemap.xml') && f.content.includes('janitor-arzyparzy-velvet')));
+});
+
+test('parseCharacterUrl supports localized JanitorAI URLs for user imports, while built-in ArzyParzy seeds are English-only', async () => {
+  const { ARZYPARZY_SEED_CHARACTERS } = await import('../db/arzyparzySeeds.ts');
+
+  const esUrl = parseCharacterUrl('https://janitorai.com/es/characters/005abad5-e65d-4de1-83c0-5f178a85cf62_character-arzy-the-bugdiver');
+  assert.equal(esUrl.source, 'janitor');
+  assert.equal(esUrl.idOrPath, '005abad5-e65d-4de1-83c0-5f178a85cf62_character-arzy-the-bugdiver');
+
+  const ptUrl = parseCharacterUrl('https://janitorai.com/pt/characters/2228b9ef-45ed-47d8-8a83-f1a3e4d2584c_character-soo-zee-democratic-bug');
+  assert.equal(ptUrl.source, 'janitor');
+  assert.equal(ptUrl.idOrPath, '2228b9ef-45ed-47d8-8a83-f1a3e4d2584c_character-soo-zee-democratic-bug');
+
+  assert.ok(ARZYPARZY_SEED_CHARACTERS.length >= 6);
+  for (const bot of ARZYPARZY_SEED_CHARACTERS) {
+    assert.ok(bot.description.length > 50, `${bot.uuid} missing real description`);
+    assert.ok(bot.greeting.length > 50, `${bot.uuid} missing real greeting`);
+    assert.ok(/^https:\/\//i.test(bot.avatar), `${bot.uuid} missing avatar URL`);
+    assert.ok(!/você|obrigado|muy|estás|gracias/i.test(bot.greeting), `${bot.uuid} must be English-only`);
+  }
+});
+
+
 
 

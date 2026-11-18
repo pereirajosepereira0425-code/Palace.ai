@@ -95,6 +95,11 @@ import {
   selectRespondingCharacters,
   toGroupParticipant,
 } from '../src/utils/chatOrchestration.ts';
+import {
+  buildComDomainHostingFiles,
+  DEFAULT_FIREBASE_PROJECT_ID,
+  sanitizeDomainSlug,
+} from '../src/utils/seoUtils.ts';
 import type { GroupParticipant } from '../src/types/index.ts';
 
 export const apiRouter = express.Router();
@@ -1986,5 +1991,54 @@ This compiles and signs \`app-release-signed.apk\` pointing to **Palace.ai** (${
   } catch (error: any) {
     console.error('Failed to build Android APK kit:', error);
     res.status(500).json({ error: error.message || 'Failed to build Android APK kit' });
+  }
+});
+
+// ----------------- FREE .COM DOMAIN HOSTING & GOOGLE SEO KIT -----------------
+apiRouter.get('/seo/com-domain-kit.zip', async (req, res) => {
+  try {
+    const hostHeader = req.get('host') || 'localhost:3000';
+    const rawProto = req.headers['x-forwarded-proto'] || req.protocol || 'https';
+    const proto = Array.isArray(rawProto) ? rawProto[0] : String(rawProto).split(',')[0].trim();
+    const requestOrigin = `${proto}://${hostHeader}`;
+    const origin =
+      typeof req.query.origin === 'string' && /^https?:\/\//i.test(req.query.origin.trim())
+        ? req.query.origin.trim()
+        : requestOrigin;
+
+    const slug = sanitizeDomainSlug(
+      typeof req.query.slug === 'string' ? req.query.slug : 'palaceai'
+    );
+
+    let firebaseProjectId = DEFAULT_FIREBASE_PROJECT_ID;
+    try {
+      const cfgPath = path.resolve(process.cwd(), 'firebase-applet-config.json');
+      if (fs.existsSync(cfgPath)) {
+        const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+        if (cfg?.projectId) firebaseProjectId = String(cfg.projectId);
+      }
+    } catch {
+      // use default firebaseProjectId
+    }
+
+    const chars = await getCharacters({ limit: 500, offset: 0, sort: 'latest' }).catch(() => []);
+    const files = buildComDomainHostingFiles({
+      origin,
+      slug,
+      firebaseProjectId,
+      characters: chars.map((c) => ({ uuid: c.uuid, updatedAt: c.createdAt })),
+    });
+
+    const zipBuf = createZipBuffer(files);
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${slug}-free-com-seo-kit.zip"`
+    );
+    res.setHeader('Content-Length', String(zipBuf.length));
+    res.send(zipBuf);
+  } catch (error: any) {
+    console.error('Failed to build .com SEO kit:', error);
+    res.status(500).json({ error: error.message || 'Failed to build .com domain kit' });
   }
 });

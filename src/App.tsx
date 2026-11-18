@@ -39,9 +39,11 @@ import { UserProfileView } from './components/UserProfileView.tsx';
 import { UserProfileModal } from './components/UserProfileModal.tsx';
 import { ViewportSlot } from './components/ViewportSlot.tsx';
 import { OfflineIndicator } from './components/PWAInstallButton.tsx';
+import { DomainSeoModal } from './components/DomainSeoModal.tsx';
 import { Character, ContentRating, SharedLorebookRecord, SharedPersona, TagRecord } from './types/index.ts';
 import { isOwnedByRequester } from './utils/ownership.ts';
 import { chunkItems } from './utils/viewportUnload.ts';
+import { SITE_DESCRIPTION, SITE_TITLE } from './utils/seoUtils.ts';
 
 const CHARACTER_PAGE_SIZE = 24;
 const EXPLORE_TAG_PAGE_SIZE = 48;
@@ -160,6 +162,45 @@ function PalaceApp() {
   const [isPersonaModalOpen, setIsPersonaModalOpen] = useState(false);
   const [isPresetsModalOpen, setIsPresetsModalOpen] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
+  const [isDomainSeoOpen, setIsDomainSeoOpen] = useState(false);
+
+  // Support direct /character/:uuid URLs (indexed via /sitemap.xml)
+  useEffect(() => {
+    const parts = window.location.pathname.split('/').filter(Boolean);
+    if (parts[0]?.toLowerCase() === 'character' && parts[1]) {
+      fetch(`/api/characters/${encodeURIComponent(parts[1])}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (data?.character) {
+            setInspectCharacter(data.character);
+          }
+        })
+        .catch(() => {});
+    }
+  }, []);
+
+  // Dynamically resolve canonical URL, OpenGraph URL, title, and description per view
+  useEffect(() => {
+    const canonicalHref = window.location.origin + window.location.pathname;
+    const activeChar = selectedCharacter || inspectCharacter;
+    const nextTitle = activeChar
+      ? `${activeChar.name} – Palace.ai Character Chat`
+      : SITE_TITLE;
+    const nextDescription = activeChar?.tagline?.trim()
+      ? `${activeChar.name}: ${activeChar.tagline.slice(0, 120)} — Chat free on Palace.ai.`
+      : SITE_DESCRIPTION;
+
+    document.title = nextTitle;
+    const setMeta = (selector: string, attr: string, content: string) => {
+      const el = document.querySelector(selector);
+      if (el) el.setAttribute(attr, content);
+    };
+    setMeta('meta[name="description"]', 'content', nextDescription);
+    setMeta('meta[property="og:title"]', 'content', nextTitle);
+    setMeta('meta[property="og:description"]', 'content', nextDescription);
+    setMeta('meta[property="og:url"]', 'content', canonicalHref);
+    setMeta('link[rel="canonical"]', 'href', canonicalHref);
+  }, [activeTab, selectedCharacter, inspectCharacter]);
 
   // Presets & Active Stage
   const [presets, setPresets] = useState<GenerationPresets>(() => {
@@ -459,6 +500,10 @@ function PalaceApp() {
 
   const handleQuickViewCharacter = useCallback((c: Character) => {
     setInspectCharacter(c);
+    const charPath = `/character/${encodeURIComponent(c.uuid)}`;
+    if (window.location.pathname !== charPath) {
+      window.history.pushState(null, '', charPath);
+    }
   }, []);
 
   const handleSelectCharacterToChat = useCallback((c: Character) => {
@@ -497,6 +542,7 @@ function PalaceApp() {
         }}
         onOpenPresetsModal={() => setIsPresetsModalOpen(true)}
         onOpenProfileModal={() => setIsProfileModalOpen(true)}
+        onOpenDomainSeoModal={() => setIsDomainSeoOpen(true)}
       />
 
       {/* Main Content Area */}
@@ -548,7 +594,12 @@ function PalaceApp() {
               setChatLaunchOptions(opts || null);
               setSelectedCharacter(char);
             }}
-            onBack={() => setInspectCharacter(null)}
+            onBack={() => {
+              setInspectCharacter(null);
+              if (window.location.pathname.startsWith('/character/')) {
+                window.history.pushState(null, '', '/');
+              }
+            }}
           />
         ) : activeTab === 'profile' ? (
           <UserProfileView
@@ -686,10 +737,20 @@ function PalaceApp() {
 
                     <button
                       onClick={() => setIsPresetsModalOpen(true)}
-                      className="flex items-center gap-2 rounded-xl border border-purple-500/40 bg-purple-950/40 px-4 py-2.5 text-xs font-bold text-purple-200 hover:bg-purple-900/40 transition-all"
+                      className="flex items-center gap-2 rounded-xl border border-purple-500/40 bg-purple-950/40 px-4 py-2.5 text-xs font-bold text-purple-200 hover:bg-purple-900/40 transition-all cursor-pointer"
                     >
                       <Sliders className="h-4 w-4 text-purple-400" />
                       <span>Configure Chub API / Engine</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setIsDomainSeoOpen(true)}
+                      data-testid="hero-domain-seo-btn"
+                      className="flex items-center gap-2 rounded-xl border border-cyan-500/40 bg-cyan-950/40 px-4 py-2.5 text-xs font-bold text-cyan-200 hover:bg-cyan-900/40 transition-all cursor-pointer"
+                    >
+                      <Globe className="h-4 w-4 text-cyan-400" />
+                      <span>Free .com Website &amp; Google SEO</span>
                     </button>
                   </div>
                 </div>
@@ -913,6 +974,12 @@ function PalaceApp() {
       <UserProfileModal
         isOpen={isProfileModalOpen}
         onClose={() => setIsProfileModalOpen(false)}
+      />
+
+      {/* Free .com Domain Port & Google Search SEO Portal */}
+      <DomainSeoModal
+        isOpen={isDomainSeoOpen}
+        onClose={() => setIsDomainSeoOpen(false)}
       />
 
       {/* PWA Offline Status Banner */}

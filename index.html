@@ -3,6 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="index, follow" />
     <meta name="theme-color" content="#09090b" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -10,16 +11,60 @@
     <meta name="apple-mobile-web-app-title" content="Palace.ai" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="icon" type="image/png" href="/favicon.png" />
-    <title>Palace.ai - Ultimate Character AI & Roleplay Hub</title>
-    <meta name="description" content="All-in-one AI character roleplay platform inspired by Chub.ai, Janitor.ai, and SpicyChat. Discover, create, and chat with AI characters featuring High-Thinking, Voice TTS, Search Grounding, Tavern lorebooks, and cloud persistence." />
-    <meta property="og:title" content="Palace.ai - Ultimate Character AI & Roleplay Hub" />
-    <meta property="og:description" content="All-in-one AI character roleplay platform inspired by Chub.ai, Janitor.ai, and SpicyChat. Discover, create, and chat with AI characters featuring High-Thinking, Voice TTS, Search Grounding, Tavern lorebooks, and cloud persistence." />
+    <link rel="canonical" href="https://eighth-veld-fdtd0.firebaseapp.com/" />
+    <title>Palace.ai – Free Character AI &amp; Tavern Roleplay</title>
+    <meta
+      name="description"
+      content="Create, import from JanitorAI and SpicyChat, and chat free with AI characters featuring custom voices, lorebooks, and battle RPGs on Palace.ai."
+    />
     <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Palace.ai" />
+    <meta property="og:title" content="Palace.ai – Free Character AI &amp; Tavern Roleplay" />
+    <meta
+      property="og:description"
+      content="Create, import from JanitorAI and SpicyChat, and chat free with AI characters featuring custom voices, lorebooks, and battle RPGs on Palace.ai."
+    />
+    <meta property="og:image" content="/pwa-512x512.png" />
+    <meta property="og:image:alt" content="Palace.ai app logo" />
     <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Palace.ai – Free Character AI &amp; Tavern Roleplay" />
+    <meta
+      name="twitter:description"
+      content="Create, import from JanitorAI and SpicyChat, and chat free with AI characters featuring custom voices, lorebooks, and battle RPGs on Palace.ai."
+    />
+    <meta name="twitter:image" content="/pwa-512x512.png" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "WebApplication",
+            "name": "Palace.ai",
+            "applicationCategory": "EntertainmentApplication",
+            "operatingSystem": "All",
+            "description": "Create, import from JanitorAI and SpicyChat, and chat free with AI characters featuring custom voices, lorebooks, and battle RPGs on Palace.ai.",
+            "image": "/pwa-512x512.png",
+            "offers": {
+              "@type": "Offer",
+              "price": "0",
+              "priceCurrency": "USD"
+            }
+          },
+          {
+            "@type": "WebSite",
+            "name": "Palace.ai",
+            "potentialAction": {
+              "@type": "SearchAction",
+              "target": "/?search={search_term_string}",
+              "query-input": "required name=search_term_string"
+            }
+          }
+        ]
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-

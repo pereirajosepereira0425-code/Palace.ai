@@ -3,6 +3,8 @@ import { characters, chatMessages, chatSessions, userFavorites } from './schema.
 import { desc, eq, ilike, and, inArray, sql } from 'drizzle-orm';
 import { isOwnedByRequester, type RequesterIdentity } from '../utils/ownership.ts';
 import { mergeCharacterLoreEntries } from '../utils/communityUtils.ts';
+import { ARZYPARZY_SEED_CHARACTERS } from './arzyparzySeeds.ts';
+import { upsertTags } from './tags.ts';
 
 export interface CharacterInsert {
   uuid: string;
@@ -609,15 +611,34 @@ Valerie is 32, a battle-hardened commander with cybernetic eye-scars, carbon-com
         voiceStyle: 'Sharp, sassy, feisty anime heroine with tsundere shifts',
         thinkingDefault: false,
         searchDefault: false
-      }
+      },
+      ...ARZYPARZY_SEED_CHARACTERS,
     ];
+
+    const seedTags = new Set<string>(['ArzyParzy', 'JanitorAI', 'SpicyChat']);
 
     for (const bot of seedBots) {
       const found = await db.select().from(characters).where(eq(characters.uuid, bot.uuid)).limit(1);
       if (found.length === 0) {
         await createCharacter(bot);
       }
+      if (bot.uuid.includes('arzyparzy') && bot.tags) {
+        try {
+          const parsedTags = JSON.parse(bot.tags);
+          if (Array.isArray(parsedTags)) {
+            for (const t of parsedTags) {
+              if (typeof t === 'string' && t.trim()) seedTags.add(t.trim());
+            }
+          }
+        } catch {
+          // ignore malformed seed tag JSON
+        }
+      }
     }
+
+    await upsertTags(Array.from(seedTags), 'system', false).catch((err) =>
+      console.warn('upsertTags for ArzyParzy seeds failed:', err)
+    );
     console.log('Seeded characters verified and up to date');
   } catch (error) {
     console.error('ensureSeedCharacters error:', error);

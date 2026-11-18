@@ -618,7 +618,7 @@ export const CharacterDetailView: React.FC<CharacterDetailViewProps> = ({
           {/* Chub.ai Top Breadcrumb + Share Bar */}
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-zinc-800/80 bg-zinc-900/60 px-4 py-2.5 text-xs">
             <div className="flex items-center gap-1.5 text-zinc-400 overflow-x-auto">
-              <span className="font-bold text-purple-400">chub.ai</span>
+              <span className="font-bold text-purple-400">palace.ai</span>
               <ChevronRight className="h-3.5 w-3.5 text-zinc-600 shrink-0" />
               <span>characters</span>
               <ChevronRight className="h-3.5 w-3.5 text-zinc-600 shrink-0" />

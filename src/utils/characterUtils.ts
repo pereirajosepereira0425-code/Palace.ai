@@ -491,9 +491,9 @@ export function parseCharacterUrl(url: string): {
     return { source: 'chub', idOrPath: `${creator}/${slug}` };
   }
 
-  // JanitorAI: https://janitorai.com/characters/uuid_or_name or https://www.janitorai.com/characters/...
+  // JanitorAI: https://janitorai.com/characters/uuid_or_name or https://janitorai.com/es/characters/...
   const janitorMatch = clean.match(
-    /(?:www\.|kim\.)?(?:janitorai\.com|janitor\.ai)\/(?:profiles\/[^\/]+\/)?characters\/([^\s/?#]+)/i
+    /(?:www\.|kim\.)?(?:janitorai\.com|janitor\.ai)\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?(?:profiles\/[^\/]+\/)?characters\/([^\s/?#]+)/i
   );
   if (janitorMatch) {
     return { source: 'janitor', idOrPath: janitorMatch[1] };
