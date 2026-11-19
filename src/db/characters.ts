@@ -3,8 +3,6 @@ import { characters, chatMessages, chatSessions, userFavorites } from './schema.
 import { desc, eq, ilike, and, inArray, sql } from 'drizzle-orm';
 import { isOwnedByRequester, type RequesterIdentity } from '../utils/ownership.ts';
 import { mergeCharacterLoreEntries } from '../utils/communityUtils.ts';
-import { ARZYPARZY_SEED_CHARACTERS } from './arzyparzySeeds.ts';
-import { upsertTags } from './tags.ts';
 
 export interface CharacterInsert {
   uuid: string;
@@ -375,7 +373,7 @@ Template f0e0db2bf614 is an intricate, multi-layered roleplay bot from Chub.ai. 
         name: 'Lord Baconus (Peppa Fanon)',
         tagline: 'The legendary sovereign of the Peppa Fanon Wiki multiverse. Master of Mud and Dark Runes.',
         avatar: 'https://images.unsplash.com/photo-1514933651103-005eec06c04b?auto=format&fit=crop&w=600&q=80',
-        backgroundImage: 'https://images.unsplash.com/photo-1548625361-195fe57904d6?auto=format&fit=crop&w=1200&q=80',
+        backgroundImage: 'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?auto=format&fit=crop&w=1200&q=80',
         description: `{| class="wikitable fandom-infobox" style="float: right; margin-left: 16px; width: 290px; background: rgba(24, 24, 27, 0.95); border: 2px solid #e11d48; border-radius: 14px; font-size: 11px;"
 |- style="background: linear-gradient(135deg, #be123c, #9333ea); color: #fff; text-align: center; font-weight: bold; font-size: 14px;"
 ! colspan="2" | Lord Baconus (Fanon Wiki)
@@ -478,7 +476,7 @@ Valerie is 32, a battle-hardened commander with cybernetic eye-scars, carbon-com
         uuid: 'chub-xylar-eldritch',
         name: 'Xylar the Unseen',
         tagline: 'Chub.ai cosmic horror entity bending time, dreams, and mortal sanity.',
-        avatar: 'https://images.unsplash.com/photo-1548625361-195fe57904d6?auto=format&fit=crop&w=600&q=80',
+        avatar: 'https://images.unsplash.com/photo-1509248961158-e54f6934749c?auto=format&fit=crop&w=600&q=80',
         backgroundImage: 'https://images.unsplash.com/photo-1506703719100-a0f3a48c0f86?auto=format&fit=crop&w=1200&q=80',
         description: 'An ancient non-Euclidean entity dwelling between the fold of reality. When perceived by mortal minds, Xylar shifts between an enigmatic masked figure and shadows of unfathomable geometry.',
         greeting: '*The ink on your desk begins to pool upwards against gravity. The candle flames turn a freezing cerulean blue as reality bends at the periphery of your vision.* "Do not shield your eyes... you called into the void, did you not? The barrier is thin tonight, fragile mind."',
@@ -612,33 +610,49 @@ Valerie is 32, a battle-hardened commander with cybernetic eye-scars, carbon-com
         thinkingDefault: false,
         searchDefault: false
       },
-      ...ARZYPARZY_SEED_CHARACTERS,
     ];
 
-    const seedTags = new Set<string>(['ArzyParzy', 'JanitorAI', 'SpicyChat']);
+    // Remove previously pre-imported ArzyParzy seed rows if present in the database
+    const removedArzyUuids = [
+      'janitor-arzyparzy-velvet',
+      'janitor-arzyparzy-alina',
+      'janitor-arzyparzy-bugdiver',
+      'janitor-arzyparzy-soozee',
+      'spicychat-arzyparzy-velvet',
+      'spicychat-arzyparzy-alma',
+      'spicychat-arzyparzy-commissar',
+      'spicychat-arzyparzy-velvet-strevortex',
+    ];
+    await db.delete(characters).where(inArray(characters.uuid, removedArzyUuids));
 
     for (const bot of seedBots) {
       const found = await db.select().from(characters).where(eq(characters.uuid, bot.uuid)).limit(1);
       if (found.length === 0) {
         await createCharacter(bot);
-      }
-      if (bot.uuid.includes('arzyparzy') && bot.tags) {
-        try {
-          const parsedTags = JSON.parse(bot.tags);
-          if (Array.isArray(parsedTags)) {
-            for (const t of parsedTags) {
-              if (typeof t === 'string' && t.trim()) seedTags.add(t.trim());
-            }
-          }
-        } catch {
-          // ignore malformed seed tag JSON
+      } else {
+        const existing = found[0];
+        const hasBrokenImage =
+          (existing.avatar || '').includes('photo-1548625361-195fe57904d6') ||
+          (existing.backgroundImage || '').includes('photo-1548625361-195fe57904d6');
+        const needsSeedSync =
+          hasBrokenImage || existing.rating !== (bot.rating || 'SFW');
+        if (needsSeedSync) {
+          await db
+            .update(characters)
+            .set({
+              avatar: bot.avatar,
+              backgroundImage: bot.backgroundImage || '',
+              systemPrompt: bot.systemPrompt,
+              postHistoryInstructions: bot.postHistoryInstructions || '',
+              creatorNotes: bot.creatorNotes || '',
+              tags: bot.tags || '[]',
+              rating: bot.rating || 'SFW',
+            })
+            .where(eq(characters.uuid, bot.uuid));
         }
       }
     }
 
-    await upsertTags(Array.from(seedTags), 'system', false).catch((err) =>
-      console.warn('upsertTags for ArzyParzy seeds failed:', err)
-    );
     console.log('Seeded characters verified and up to date');
   } catch (error) {
     console.error('ensureSeedCharacters error:', error);

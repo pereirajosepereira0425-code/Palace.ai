@@ -105,11 +105,16 @@ import type { GroupParticipant } from '../src/types/index.ts';
 export const apiRouter = express.Router();
 
 // Ensure initial seed characters, personas, stages, lorebooks, and tags exist on server start
-ensureSeedCharacters().catch(console.error);
-ensureSeedPersonas().catch(console.error);
-ensureSeedStages().catch(console.error);
-ensureSeedLorebooks().catch(console.error);
-ensureSeedTags().catch(console.error);
+if (process.env.SQL_HOST && process.env.SQL_DB_NAME) {
+  ensureSeedCharacters()
+    .then(() => ensureSeedTags())
+    .catch((err) => console.warn('Character/tag startup seed skipped:', err?.message || err));
+  ensureSeedPersonas().catch((err) => console.warn('Persona startup seed skipped:', err?.message || err));
+  ensureSeedStages().catch((err) => console.warn('Stage startup seed skipped:', err?.message || err));
+  ensureSeedLorebooks().catch((err) => console.warn('Lorebook startup seed skipped:', err?.message || err));
+} else {
+  console.warn('SQL_HOST/SQL_DB_NAME not set; skipping startup DB seed.');
+}
 
 // ----------------- TAGS (CHUB.AI DYNAMIC TAXONOMY) -----------------
 apiRouter.get('/tags', async (req, res) => {

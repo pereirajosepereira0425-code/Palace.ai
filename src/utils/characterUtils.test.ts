@@ -1387,9 +1387,7 @@ test('SEO metadata lengths, robots.txt, sitemap.xml, JSON-LD, and free .com doma
   assert.ok(kitFiles.some((f) => f.name.endsWith('sitemap.xml') && f.content.includes('janitor-arzyparzy-velvet')));
 });
 
-test('parseCharacterUrl supports localized JanitorAI URLs for user imports, while built-in ArzyParzy seeds are English-only', async () => {
-  const { ARZYPARZY_SEED_CHARACTERS } = await import('../db/arzyparzySeeds.ts');
-
+test('parseCharacterUrl supports localized JanitorAI URLs for user imports', async () => {
   const esUrl = parseCharacterUrl('https://janitorai.com/es/characters/005abad5-e65d-4de1-83c0-5f178a85cf62_character-arzy-the-bugdiver');
   assert.equal(esUrl.source, 'janitor');
   assert.equal(esUrl.idOrPath, '005abad5-e65d-4de1-83c0-5f178a85cf62_character-arzy-the-bugdiver');
@@ -1397,14 +1395,6 @@ test('parseCharacterUrl supports localized JanitorAI URLs for user imports, whil
   const ptUrl = parseCharacterUrl('https://janitorai.com/pt/characters/2228b9ef-45ed-47d8-8a83-f1a3e4d2584c_character-soo-zee-democratic-bug');
   assert.equal(ptUrl.source, 'janitor');
   assert.equal(ptUrl.idOrPath, '2228b9ef-45ed-47d8-8a83-f1a3e4d2584c_character-soo-zee-democratic-bug');
-
-  assert.ok(ARZYPARZY_SEED_CHARACTERS.length >= 6);
-  for (const bot of ARZYPARZY_SEED_CHARACTERS) {
-    assert.ok(bot.description.length > 50, `${bot.uuid} missing real description`);
-    assert.ok(bot.greeting.length > 50, `${bot.uuid} missing real greeting`);
-    assert.ok(/^https:\/\//i.test(bot.avatar), `${bot.uuid} missing avatar URL`);
-    assert.ok(!/você|obrigado|muy|estás|gracias/i.test(bot.greeting), `${bot.uuid} must be English-only`);
-  }
 });
 
 

@@ -30,15 +30,24 @@ import {
 } from '../utils/customVoiceUtils.ts';
 import type { CustomVoiceRecord, ModelEnsembleConfig } from '../types/index.ts';
 
-// Initialize server-side GoogleGenAI client with telemetry User-Agent header
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build',
-    },
-  },
-});
+// Lazy server-side GoogleGenAI client initialization so booting without GEMINI_API_KEY
+// emits zero startup warnings and falls back cleanly without doomed ADC requests.
+let cachedGeminiClient: GoogleGenAI | null = null;
+function getGeminiClient(): GoogleGenAI | null {
+  const apiKey = process.env.GEMINI_API_KEY?.trim();
+  if (!apiKey) return null;
+  if (!cachedGeminiClient) {
+    cachedGeminiClient = new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
+      },
+    });
+  }
+  return cachedGeminiClient;
+}
 
 export interface CharacterContext {
   name: string;
@@ -506,6 +515,16 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
     ? `Palace Free API (${calibration!.displayLabel})`
     : 'gemini-3.8-flash';
 
+  const ai = getGeminiClient();
+  if (!ai) {
+    return {
+      reply: generateSmartRoleplayFallback(character, userMessage, history, options.brawlContextPrompt),
+      thinkingProcess: 'Built-in Palace Free Continuity engine active.',
+      groundingSources: [],
+      modelUsed: `${baseModelBadge} (Free Continuity)`,
+    };
+  }
+
   if (isHighThinking) {
     try {
       const response = await callGeminiWithTimeout(
@@ -694,11 +713,12 @@ export async function generateMultiModelCharacterReply(
 
     const slotCalibration = getModelStyleCalibration(slotId);
     const geminiModel = isGeminiArgon ? 'gemini-4-argon' : 'gemini-3.8-flash';
-    if (!geminiNativeAuthBlocked) {
+    const geminiClient = !geminiNativeAuthBlocked ? getGeminiClient() : null;
+    if (geminiClient) {
       try {
         const response = await callGeminiWithTimeout(
           () =>
-            ai.models.generateContent({
+            geminiClient.models.generateContent({
               model: geminiModel,
               contents: [
                 ...options.history.slice(-8).map((m) => ({
@@ -859,21 +879,24 @@ Respond ONLY with valid JSON with keys:
   "suggestedReply": "*action* \\"dialogue\\""
 }`;
 
-  try {
-    const res = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      config: {
-        responseMimeType: 'application/json',
-      },
-    });
+  const ai = getGeminiClient();
+  if (ai) {
+    try {
+      const res = await ai.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        config: {
+          responseMimeType: 'application/json',
+        },
+      });
 
-    const parsed = JSON.parse(res.text || '{}');
-    if (parsed.suggestedReply) {
-      return parsed;
+      const parsed = JSON.parse(res.text || '{}');
+      if (parsed.suggestedReply) {
+        return parsed;
+      }
+    } catch (err: any) {
+      console.warn('generatePersonaReaction failed or quota hit, using heuristic persona generator:', err?.message);
     }
-  } catch (err: any) {
-    console.warn('generatePersonaReaction failed or quota hit, using heuristic persona generator:', err?.message);
   }
 
   // Smart heuristic fallback
@@ -909,16 +932,19 @@ ${transcript}
 
 Updated Long-Term Memory Summary:`;
 
-  try {
-    const res = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-    });
-    return (res.text || '').trim();
-  } catch (err: any) {
-    console.warn('generateChatSummary failed or quota hit, using fallback summary:', err?.message);
-    return `[Summary: ${personaName} and ${characterName} engaged in extensive dialogue across ${messages.length} messages, developing their relationship and scenario.]`;
+  const ai = getGeminiClient();
+  if (ai) {
+    try {
+      const res = await ai.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      });
+      return (res.text || '').trim();
+    } catch (err: any) {
+      console.warn('generateChatSummary failed or quota hit, using fallback summary:', err?.message);
+    }
   }
+  return `[Summary: ${personaName} and ${characterName} engaged in extensive dialogue across ${messages.length} messages, developing their relationship and scenario.]`;
 }
 
 export interface TtsGenerationResult {
@@ -1045,52 +1071,55 @@ export async function generateSpeechTTS(
   }
 
   // 2. Try Gemini 3.8 Flash TTS conditioned with Chub Custom Voice timbre & cadence
-  try {
-    const response = await callGeminiWithTimeout(
-      () =>
-        ai.models.generateContent({
-          model: 'gemini-3.8-flash-tts',
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                {
-                  text: truncatedText,
-                  speechMetadata: {
-                    style:
-                      chubClonePayload?.derivedStyle ||
-                      voiceStyle ||
-                      'Expressive, immersive roleplay character voice',
+  const ai = getGeminiClient();
+  if (ai) {
+    try {
+      const response = await callGeminiWithTimeout(
+        () =>
+          ai.models.generateContent({
+            model: 'gemini-3.8-flash-tts',
+            contents: [
+              {
+                role: 'user',
+                parts: [
+                  {
+                    text: truncatedText,
+                    speechMetadata: {
+                      style:
+                        chubClonePayload?.derivedStyle ||
+                        voiceStyle ||
+                        'Expressive, immersive roleplay character voice',
+                    },
                   },
+                ],
+              },
+            ],
+            config: {
+              responseModalities: ['AUDIO'],
+              speechConfig: {
+                voiceConfig: {
+                  prebuiltVoiceConfig: { voiceName: selectedVoice },
                 },
-              ],
-            },
-          ],
-          config: {
-            responseModalities: ['AUDIO'],
-            speechConfig: {
-              voiceConfig: {
-                prebuiltVoiceConfig: { voiceName: selectedVoice },
               },
             },
-          },
-        }),
-      8000
-    );
+          }),
+        8000
+      );
 
-    const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-    if (base64Audio) {
-      return {
-        mode: 'audio',
-        audioBase64: base64Audio,
-        mimeType: 'audio/wav',
-        engineUsed: customVoice
-          ? `Chub Custom Voice · ${customVoice.name}`
-          : `Gemini 3.8 Flash TTS (${selectedVoice})`,
-      };
+      const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      if (base64Audio) {
+        return {
+          mode: 'audio',
+          audioBase64: base64Audio,
+          mimeType: 'audio/wav',
+          engineUsed: customVoice
+            ? `Chub Custom Voice · ${customVoice.name}`
+            : `Gemini 3.8 Flash TTS (${selectedVoice})`,
+        };
+      }
+    } catch (ttsErr: any) {
+      console.warn('Cloud TTS unavailable, returning calibrated client voice profile:', ttsErr?.message);
     }
-  } catch (ttsErr: any) {
-    console.warn('Cloud TTS unavailable, returning calibrated client voice profile:', ttsErr?.message);
   }
 
   // 3. Clean client voice profile fallback (with pitch/rate calibration + reference audio metadata)

@@ -52,7 +52,7 @@ export const DEFAULT_STAGES: Stage[] = [
     id: 'gothic-cathedral',
     name: 'Obsidian Citadel Archives',
     category: 'Dark Fantasy',
-    imageUrl: 'https://images.unsplash.com/photo-1548625361-195fe57904d6?auto=format&fit=crop&w=1600&q=80',
+    imageUrl: 'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?auto=format&fit=crop&w=1600&q=80',
     description: 'Candlelit stained glass, ancient tomes, and towering vaulted arches.',
     blurLevel: 3,
     overlayOpacity: 0.7,
