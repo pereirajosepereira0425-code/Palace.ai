@@ -13,6 +13,7 @@ import {
   HelpCircle,
   ExternalLink,
   AudioWaveform,
+  MonitorSmartphone,
 } from 'lucide-react';
 import type { CustomVoiceRecord } from '../types/index.ts';
 
@@ -25,15 +26,25 @@ import {
 } from '../utils/chubOptions.ts';
 import {
   CHUB_CREATE_TOKEN_URL,
-  CHUB_SUBSCRIPTIONS_URL,
   getProviderApiKeyInfo,
 } from '../utils/promptBudget.ts';
 import {
   type ApiConnectionTestResult,
   fetchEndpointModels,
+  fetchFreePalaceApiKey,
   isChubUrlOrProvider,
   runSmartConnectionTest,
 } from '../utils/apiErrorUtils.ts';
+import {
+  CHUB_SETTINGS_STORAGE_KEY,
+  PRESETS_UPDATED_EVENT,
+  mergeSettingsFromPresets,
+} from '../utils/settingsSync.ts';
+import {
+  loadSavedViewportWidth,
+  parseCustomViewportWidth,
+  saveViewportWidth,
+} from '../utils/viewportWidth.ts';
 
 export interface GenerationPresets {
   apiProvider: string;
@@ -85,15 +96,26 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [testingConn, setTestingConn] = useState(false);
   const [fetchingModels, setFetchingModels] = useState(false);
+  const [fetchingFreeKey, setFetchingFreeKey] = useState(false);
   const [liveModels, setLiveModels] = useState<string[]>([]);
   const [testResult, setTestResult] = useState<ApiConnectionTestResult | null>(null);
   const [customVoices, setCustomVoices] = useState<CustomVoiceRecord[]>([]);
+  const [customWidthInput, setCustomWidthInput] = useState<string>(() => {
+    const saved = loadSavedViewportWidth();
+    return saved ? String(saved) : '';
+  });
+  const [activeViewportWidth, setActiveViewportWidth] = useState<number | null>(() =>
+    loadSavedViewportWidth()
+  );
 
   useEffect(() => {
     setFormData(presets);
     setTestResult(null);
     setLiveModels([]);
     if (isOpen) {
+      const savedW = loadSavedViewportWidth();
+      setActiveViewportWidth(savedW);
+      setCustomWidthInput(savedW ? String(savedW) : '');
       fetch('/api/voices')
         .then((r) => (r.ok ? r.json() : null))
         .then((data) => {
@@ -115,6 +137,46 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
     });
     setTestResult(null);
     setLiveModels([]);
+  };
+
+  const handleFetchFreeKey = async () => {
+    setFetchingFreeKey(true);
+    setTestResult(null);
+    try {
+      const res = await fetchFreePalaceApiKey();
+      if (res.models.length > 0) {
+        setLiveModels(res.models);
+      }
+      setFormData((prev) => ({
+        ...prev,
+        chubApiKey: res.key,
+        chubApiUrl: isBuiltInFreeProvider(prev.apiProvider) ? prev.chubApiUrl : res.endpoint,
+        customModel: prev.customModel || res.models[0] || 'claude-opus-5-5',
+      }));
+      setTestResult({
+        ok: true,
+        status: 200,
+        code: 'FREE_KEY_FETCHED',
+        endpoint: res.endpoint,
+        testedFrom: 'server',
+        resolvedModel: formData.customModel || res.models[0] || 'claude-opus-5-5',
+        availableModels: res.models,
+        message: `${res.message} Key: ${res.key.slice(0, 22)}...`,
+        hint: 'Zero credit limits, zero daily quotas — works with Claude Opus 5.5, Chub Mars, Soji, Asha, DeepSeek & Gemini!',
+      });
+    } finally {
+      setFetchingFreeKey(false);
+    }
+  };
+
+  const handleApplyViewportWidth = (override?: string | number | null) => {
+    const parsed =
+      override === null
+        ? null
+        : parseCustomViewportWidth(override !== undefined ? override : customWidthInput);
+    const saved = saveViewportWidth(parsed);
+    setActiveViewportWidth(saved);
+    setCustomWidthInput(saved ? String(saved) : '');
   };
 
   const handleFetchModels = async () => {
@@ -151,7 +213,7 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
             endpoint: res.modelsUrl,
             testedFrom: 'browser',
             message: `No models listed at ${res.modelsUrl}.`,
-            hint: 'Try picking one of the model-specific Chub Gateways below (Inference Soji, Mars Asha, Mars Soji, Mix /v1).',
+            hint: 'Click "🔑 Fetch Free API Key" or pick one of the Chub / Palace Free gateways below.',
           }
         );
       }
@@ -177,7 +239,9 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
         const cleanBase = result.endpoint.replace(/\/chat\/completions\/?$/i, '');
         setFormData((prev) => ({
           ...prev,
-          ...(cleanBase ? { chubApiUrl: cleanBase } : {}),
+          ...(cleanBase && !isBuiltInFreeProvider(prev.apiProvider)
+            ? { chubApiUrl: cleanBase }
+            : {}),
           ...(result.resolvedModel ? { customModel: result.resolvedModel } : {}),
         }));
       }
@@ -190,26 +254,13 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
     onSavePresets(formData);
-    // Sync key Chub settings into localStorage so ChatRoom & ChubSettingsModal share the selection
+    // Sync key Chub settings into localStorage & broadcast live update to open ChatRoom
     try {
-      const existingRaw = localStorage.getItem('palace_chub_chat_settings');
+      const existingRaw = localStorage.getItem(CHUB_SETTINGS_STORAGE_KEY);
       const existing = existingRaw ? JSON.parse(existingRaw) : {};
-      localStorage.setItem(
-        'palace_chub_chat_settings',
-        JSON.stringify({
-          ...existing,
-          apiProvider: formData.apiProvider,
-          model: formData.customModel,
-          promptStructure: formData.promptStructure || existing.promptStructure || 'tavern_v2',
-          ttsApi: formData.ttsApi || existing.ttsApi || 'gemini_flash_tts',
-          defaultVoice: formData.voiceName,
-          customVoiceUuid: formData.customVoiceUuid || '',
-          ttsEndpointUrl: formData.ttsEndpointUrl || '',
-          ttsApiKey: formData.ttsApiKey || '',
-          contextSize: formData.maxContextTokens || existing.contextSize || 8192,
-          stagingUrl: formData.chubApiUrl || existing.stagingUrl,
-        })
-      );
+      const merged = mergeSettingsFromPresets(existing, formData);
+      localStorage.setItem(CHUB_SETTINGS_STORAGE_KEY, JSON.stringify(merged));
+      window.dispatchEvent(new CustomEvent(PRESETS_UPDATED_EVENT, { detail: formData }));
     } catch {
       // ignore storage error
     }
@@ -217,7 +268,7 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
     setTimeout(() => {
       setSavedSuccess(false);
       onClose();
-    }, 800);
+    }, 650);
   };
 
   const handleReset = () => {
@@ -264,18 +315,41 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
         )}
 
         <form onSubmit={handleSave} className="space-y-6 text-xs">
-          {/* Always-visible Chub.ai API Key Quick Access */}
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-2xl border border-fuchsia-500/35 bg-gradient-to-r from-purple-950/50 via-zinc-900/80 to-fuchsia-950/40 p-3.5">
+          {/* Always-visible Chub.ai & Palace Free API Key Quick Access (unclipped wrapping) */}
+          <div className="flex flex-col gap-3 rounded-2xl border border-fuchsia-500/35 bg-gradient-to-r from-purple-950/50 via-zinc-900/80 to-fuchsia-950/40 p-3.5">
             <div className="space-y-0.5">
-              <div className="font-bold text-purple-200 flex items-center gap-1.5">
-                <Key className="h-3.5 w-3.5 text-amber-300" />
-                <span>Chub.ai Tokens, Mars &amp; Provider Keys</span>
+              <div className="font-bold text-purple-200 flex flex-wrap items-center justify-between gap-2">
+                <span className="flex items-center gap-1.5">
+                  <Key className="h-3.5 w-3.5 text-amber-300" />
+                  <span>Chub.ai Tokens, Palace Free API Keys &amp; Models</span>
+                </span>
+                <span className="inline-flex items-center gap-1 rounded-xl border border-emerald-500/40 bg-emerald-950/45 px-2.5 py-0.5 text-[10px] font-bold text-emerald-200">
+                  <span>∞ No Credit Limits · Free</span>
+                </span>
               </div>
               <p className="text-[11px] text-zinc-400">
-                Create Chub tokens at <span className="font-mono text-zinc-300">my_stages?active=tokens</span>, or get Mars/OpenRouter/OpenAI keys directly.
+                Fetch an instant Unlimited Palace Free API Key for <span className="font-mono text-emerald-300">Claude Opus 5.5</span> / Chub / Gemini, or create external tokens.
               </p>
             </div>
-            <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={handleFetchFreeKey}
+                disabled={fetchingFreeKey}
+                data-testid="presets-fetch-free-key-btn"
+                className="rounded-xl border border-emerald-400/60 bg-gradient-to-r from-emerald-600/35 to-teal-600/35 px-3 py-2 text-[11px] font-bold text-emerald-100 hover:from-emerald-600/55 hover:to-teal-600/55 transition-all cursor-pointer disabled:opacity-50"
+              >
+                {fetchingFreeKey ? '⏳ Fetching Key...' : '🔑 Fetch Free API Key'}
+              </button>
+              <button
+                type="button"
+                onClick={handleFetchModels}
+                disabled={fetchingModels || testingConn}
+                data-testid="presets-fetch-free-models-btn"
+                className="rounded-xl border border-fuchsia-500/50 bg-fuchsia-600/25 px-3 py-2 text-[11px] font-bold text-fuchsia-100 hover:bg-fuchsia-600/40 transition-all cursor-pointer disabled:opacity-50"
+              >
+                {fetchingModels ? 'Fetching Models...' : '✨ Fetch Free Models'}
+              </button>
               {!isBuiltInFreeProvider(formData.apiProvider) ? (
                 <button
                   type="button"
@@ -298,21 +372,24 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
                 href={CHUB_CREATE_TOKEN_URL}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-purple-600 to-fuchsia-600 px-3.5 py-2 text-[11px] font-bold text-white shadow-md hover:from-purple-500 hover:to-fuchsia-500 transition-all"
+                className="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-purple-600 to-fuchsia-600 px-3 py-2 text-[11px] font-bold text-white shadow-md hover:from-purple-500 hover:to-fuchsia-500 transition-all"
               >
-                <span>🔑 Create Chub.ai Token</span>
+                <span>Optional Chub.ai Token</span>
                 <ExternalLink className="h-3.5 w-3.5" />
               </a>
-              <a
-                href={CHUB_SUBSCRIPTIONS_URL}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-1 rounded-xl border border-fuchsia-500/35 bg-zinc-900/80 px-2.5 py-2 text-[11px] font-semibold text-fuchsia-200 hover:bg-zinc-800 transition-all"
-              >
-                <span>🪐 Mars Plan</span>
-                <ExternalLink className="h-3 w-3" />
-              </a>
             </div>
+            {formData.chubApiKey && (
+              <div
+                data-testid="presets-active-key-preview"
+                className="rounded-xl border border-emerald-500/30 bg-zinc-950/80 px-3 py-1.5 text-[11px] font-mono text-emerald-300 flex items-center justify-between gap-2"
+              >
+                <span className="truncate">
+                  Active Key: {formData.chubApiKey.slice(0, 26)}
+                  {formData.chubApiKey.length > 26 ? '…' : ''}
+                </span>
+                <span className="text-[10px] text-emerald-400 font-sans font-bold shrink-0">✓ Saved</span>
+              </div>
+            )}
           </div>
 
           {/* API Provider Selector (Full Chub.ai List) */}
@@ -502,42 +579,72 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
           {isBuiltInFreeProvider(formData.apiProvider) ? (
             <div
               data-testid="presets-free-api-active"
-              className="rounded-2xl border border-emerald-500/40 bg-gradient-to-r from-emerald-950/45 via-zinc-900/70 to-teal-950/35 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+              className="rounded-2xl border border-emerald-500/40 bg-gradient-to-r from-emerald-950/45 via-zinc-900/70 to-teal-950/35 p-4 flex flex-col gap-3"
             >
-              <div className="space-y-1">
-                <div className="font-bold text-emerald-200 flex items-center gap-1.5">
-                  <Sparkles className="h-4 w-4 text-emerald-400" />
-                  <span>Palace Free API Active — Zero Key Needed</span>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="space-y-1">
+                  <div className="font-bold text-emerald-200 flex items-center gap-1.5">
+                    <Sparkles className="h-4 w-4 text-emerald-400" />
+                    <span>Palace Free API Active — Unlimited · Zero Credit Limits</span>
+                  </div>
+                  <p className="text-[11px] text-zinc-300 leading-relaxed">
+                    Currently routing <span className="font-mono font-bold text-emerald-300">{formData.customModel || 'claude-opus-5-5'}</span> through Palace&apos;s built-in free roleplay engine. Nobody ever has to pay or worry about credits — works for <strong>Claude Opus 5.5</strong>, DeepSeek R1/V3, Chub Mars, GPT-4o &amp; Gemini!
+                  </p>
                 </div>
-                <p className="text-[11px] text-zinc-300 leading-relaxed">
-                  Currently routing <span className="font-mono font-bold text-emerald-300">{formData.customModel || 'claude-opus-5-5'}</span> through Palace&apos;s built-in free roleplay engine. Works for <strong>Claude Opus 5.5</strong>, DeepSeek R1/V3, Chub Mars, GPT-4o &amp; Gemini!
-                </p>
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={handleFetchFreeKey}
+                    disabled={fetchingFreeKey}
+                    className="rounded-xl border border-emerald-400/50 bg-emerald-600/25 px-3 py-2 text-[11px] font-bold text-emerald-100 hover:bg-emerald-600/40 cursor-pointer"
+                  >
+                    {fetchingFreeKey ? 'Fetching...' : '🔑 Fetch Free API Key'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleFetchModels}
+                    disabled={fetchingModels || testingConn}
+                    className="rounded-xl border border-fuchsia-400/50 bg-fuchsia-600/25 px-3 py-2 text-[11px] font-bold text-fuchsia-100 hover:bg-fuchsia-600/40 cursor-pointer"
+                  >
+                    {fetchingModels ? 'Loading...' : 'Fetch Free Models'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleTestConnection}
+                    disabled={testingConn}
+                    className="rounded-xl border border-emerald-400/50 bg-emerald-600/25 px-3 py-2 text-[11px] font-bold text-emerald-100 hover:bg-emerald-600/40 cursor-pointer"
+                  >
+                    {testingConn ? 'Verifying...' : 'Verify Free Engine'}
+                  </button>
+                </div>
               </div>
-              <button
-                type="button"
-                onClick={handleTestConnection}
-                disabled={testingConn}
-                className="rounded-xl border border-emerald-400/50 bg-emerald-600/25 px-3 py-2 text-[11px] font-bold text-emerald-100 hover:bg-emerald-600/40 shrink-0 cursor-pointer"
-              >
-                {testingConn ? 'Verifying...' : 'Verify Free Engine'}
-              </button>
             </div>
           ) : (
             <div className="rounded-2xl border border-purple-500/30 bg-purple-950/20 p-4 space-y-4">
               {!formData.chubApiKey.trim() && (
                 <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-emerald-500/35 bg-emerald-950/25 px-3 py-2 text-[11px] text-emerald-200">
                   <span>
-                    <strong>No API key entered:</strong> Leave blank to run{' '}
+                    <strong>No API key entered:</strong> Leave blank or click Fetch Free API Key to run{' '}
                     <span className="font-mono text-emerald-300">{formData.customModel || 'selected model'}</span>{' '}
-                    via Palace Free API, or switch directly:
+                    with zero credit limits:
                   </span>
-                  <button
-                    type="button"
-                    onClick={() => handleProviderSelect('palace_free')}
-                    className="rounded-lg bg-emerald-600/30 border border-emerald-400/50 px-2.5 py-1 font-bold text-emerald-100 hover:bg-emerald-600/50 cursor-pointer"
-                  >
-                    Switch to Free API
-                  </button>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={handleFetchFreeKey}
+                      disabled={fetchingFreeKey}
+                      className="rounded-lg bg-emerald-600/35 border border-emerald-400/60 px-2.5 py-1 font-bold text-emerald-100 hover:bg-emerald-600/55 cursor-pointer"
+                    >
+                      🔑 Fetch Free Key
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleProviderSelect('palace_free')}
+                      className="rounded-lg bg-emerald-600/30 border border-emerald-400/50 px-2.5 py-1 font-bold text-emerald-100 hover:bg-emerald-600/50 cursor-pointer"
+                    >
+                      Switch to Free API
+                    </button>
+                  </div>
                 </div>
               )}
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -546,6 +653,14 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
                   Provider Endpoint Credentials ({formData.apiProvider})
                 </span>
                 <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleFetchFreeKey}
+                    disabled={fetchingFreeKey}
+                    className="rounded-lg border border-emerald-500/50 bg-emerald-600/25 px-2.5 py-1 text-[11px] font-bold text-emerald-200 hover:bg-emerald-600/45 disabled:opacity-50 cursor-pointer"
+                  >
+                    {fetchingFreeKey ? 'Fetching...' : '🔑 Fetch Free API Key'}
+                  </button>
                   <button
                     type="button"
                     onClick={handleFetchModels}
@@ -614,6 +729,13 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
                   <div className="mt-2 flex flex-wrap items-center gap-1.5" data-testid="chub-gateway-chips">
                     <span className="text-[10px] text-zinc-400 mr-1">Chub Gateways:</span>
                     {[
+                      {
+                        label: 'Palace Free /v1',
+                        url:
+                          typeof window !== 'undefined'
+                            ? `${window.location.origin}/v1`
+                            : 'http://localhost:3000/v1',
+                      },
                       { label: 'Mars /v1', url: 'https://mars.chub.ai/v1' },
                       { label: 'Inference Soji', url: 'https://inference.chub.ai/soji/v1' },
                       { label: 'Mars Asha', url: 'https://mars.chub.ai/chub/asha/v1' },
@@ -651,9 +773,12 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
                   onChange={(e) =>
                     setFormData({ ...formData, chubApiKey: e.target.value })
                   }
-                  placeholder="Paste your Chub Mars/Mercury Token (CH-API-KEY), OpenAI, Anthropic, or OpenRouter Key..."
+                  placeholder="Optional: Paste Chub Token (CH-API-KEY), OpenAI, Anthropic, or OpenRouter Key..."
                   className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3.5 py-2 text-xs text-zinc-100 placeholder-zinc-600 focus:border-purple-500 focus:outline-none font-mono"
                 />
+                <p className="text-[10px] text-emerald-300/90 mt-1.5">
+                  No paywall: if your Chub.ai or external key hits a 429/402 credit limit, Palace.ai automatically switches to its Unlimited Free Engine mid-chat with zero interruption.
+                </p>
               </div>
             </div>
           )}
@@ -793,6 +918,90 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
                   {v}
                 </button>
               ))}
+            </div>
+          </div>
+
+          {/* Developer Mode Custom Website Width (Unbounded Android Smallest Width / dp) */}
+          <div
+            data-testid="presets-viewport-width-card"
+            className="rounded-2xl border border-cyan-500/35 bg-cyan-950/15 p-4 space-y-3"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <span className="font-bold text-cyan-200 flex items-center gap-1.5">
+                  <MonitorSmartphone className="h-4 w-4 text-cyan-400" />
+                  Developer Website Width (Smallest Width / dp)
+                </span>
+                <p className="text-[11px] text-zinc-400 mt-0.5">
+                  Set any custom layout width (240px up to any number like 1440, 2400, 3840, or 6000+) — scales live like Android Developer Mode.
+                </p>
+              </div>
+              <span className="rounded-lg border border-cyan-500/40 bg-zinc-950 px-2.5 py-1 text-[11px] font-mono text-cyan-300">
+                Active: {activeViewportWidth ? `${activeViewportWidth}dp` : 'Auto'}
+              </span>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1.5">
+              {[
+                { label: 'Auto', val: null },
+                { label: '390dp', val: 390 },
+                { label: '768dp', val: 768 },
+                { label: '1280dp', val: 1280 },
+                { label: '1440dp', val: 1440 },
+                { label: '2400dp', val: 2400 },
+                { label: '3840dp', val: 3840 },
+              ].map((chip) => {
+                const isSelected = activeViewportWidth === chip.val;
+                return (
+                  <button
+                    key={chip.label}
+                    type="button"
+                    onClick={() => handleApplyViewportWidth(chip.val)}
+                    className={`rounded-lg border px-2.5 py-1 text-[11px] font-mono transition-colors cursor-pointer ${
+                      isSelected
+                        ? 'border-cyan-400 bg-cyan-600/35 text-white font-bold'
+                        : 'border-zinc-700 bg-zinc-900 text-zinc-300 hover:border-cyan-500/50'
+                    }`}
+                  >
+                    {chip.label}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                type="number"
+                min={240}
+                step={10}
+                value={customWidthInput}
+                onChange={(e) => setCustomWidthInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    handleApplyViewportWidth();
+                  }
+                }}
+                placeholder="Any width in px/dp (e.g. 1600, 2400, 5000)..."
+                data-testid="presets-custom-width-input"
+                className="flex-1 min-w-[180px] rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono text-zinc-100 placeholder-zinc-600 focus:border-cyan-400 focus:outline-none"
+              />
+              <button
+                type="button"
+                onClick={() => handleApplyViewportWidth()}
+                data-testid="presets-apply-width-btn"
+                className="rounded-xl border border-cyan-500/50 bg-cyan-600/30 px-3.5 py-2 text-xs font-bold text-cyan-100 hover:bg-cyan-600/50 cursor-pointer"
+              >
+                Apply Width
+              </button>
+              <button
+                type="button"
+                onClick={() => handleApplyViewportWidth(null)}
+                data-testid="presets-reset-width-btn"
+                className="rounded-xl border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs font-semibold text-zinc-300 hover:text-white cursor-pointer"
+              >
+                Reset
+              </button>
             </div>
           </div>
 

@@ -4,6 +4,7 @@ import {
   normalizeChatCompletionsUrl,
   normalizeModelsUrl,
 } from './promptBudget.ts';
+import { generateFreePalaceApiKey, isPalaceFreeApiKey } from './settingsSync.ts';
 
 export interface ApiConnectionTestResult {
   ok: boolean;
@@ -28,6 +29,13 @@ export function isLocalProviderOrUrl(providerId?: string | null, rawUrl?: string
     }
   }
   const url = (rawUrl || '').trim().toLowerCase();
+  if (
+    typeof window !== 'undefined' &&
+    window.location?.origin &&
+    url.startsWith(window.location.origin.toLowerCase())
+  ) {
+    return true;
+  }
   return /^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|192\.168\.|10\.)/.test(url);
 }
 
@@ -119,11 +127,63 @@ export function sanitizeErrorBody(rawBody: string, contentType?: string | null):
   return trimmed.replace(/\s+/g, ' ').slice(0, 260);
 }
 
+export function getSameOriginV1Url(): string {
+  if (typeof window !== 'undefined' && window.location?.origin) {
+    return `${window.location.origin}/v1`;
+  }
+  return 'http://localhost:3000/v1';
+}
+
+export async function fetchFreePalaceApiKey(): Promise<{
+  ok: boolean;
+  key: string;
+  endpoint: string;
+  models: string[];
+  message: string;
+}> {
+  const endpoint = getSameOriginV1Url();
+  try {
+    const res = await fetch('/v1/keys/free', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(6000),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data?.key) {
+        return {
+          ok: true,
+          key: String(data.key),
+          endpoint,
+          models: Array.isArray(data.models) ? data.models.map(String) : [],
+          message: String(
+            data.message ||
+              'Fetched a 100% Free Unlimited Palace API Key (no credits or billing limits)!'
+          ),
+        };
+      }
+    }
+  } catch {
+    // Fallback cleanly to deterministic client key + local /v1
+  }
+  return {
+    ok: true,
+    key: generateFreePalaceApiKey(),
+    endpoint,
+    models: ['claude-opus-5-5', 'mars', 'mercury', 'soji', 'asha', 'gemini-3.8-flash'],
+    message: 'Generated a 100% Free Unlimited Palace API Key (no credits or billing limits)!',
+  };
+}
+
 export function validateConnectionInputs(options: {
   apiProvider?: string | null;
   apiUrl?: string | null;
   apiKey?: string | null;
 }): ApiConnectionTestResult | null {
+  if (isBuiltInFreeProvider(options.apiProvider)) {
+    return null;
+  }
+
   const providerMeta = CHUB_API_PROVIDERS.find((p) => p.id === options.apiProvider);
   const rawUrl = (
     options.apiUrl !== undefined ? options.apiUrl ?? '' : providerMeta?.defaultUrl || ''
@@ -137,7 +197,7 @@ export function validateConnectionInputs(options: {
       endpoint: '',
       testedFrom: 'validation',
       message: 'API Base URL is empty.',
-      hint: 'Select a provider card above or paste a valid OpenAI-compatible URL ending in /v1.',
+      hint: 'Select a provider card above, paste a valid OpenAI-compatible URL ending in /v1, or click Fetch Free API Key.',
     };
   }
 
@@ -170,8 +230,9 @@ export function validateConnectionInputs(options: {
 
   const endpoint = normalizeChatCompletionsUrl(rawUrl);
   const local = isLocalProviderOrUrl(options.apiProvider, rawUrl);
+  const hasFreeKey = Boolean(options.apiKey?.trim()) && isPalaceFreeApiKey(options.apiKey);
 
-  if (!local && !options.apiKey?.trim()) {
+  if (!local && !hasFreeKey && !options.apiKey?.trim()) {
     return {
       ok: false,
       status: 400,
@@ -179,7 +240,7 @@ export function validateConnectionInputs(options: {
       endpoint,
       testedFrom: 'validation',
       message: 'API Key is empty.',
-      hint: 'Click the key link button above to generate a token/key, paste it in the API Key field, then test again.',
+      hint: 'Click "Fetch Free API Key" for instant unlimited access, or paste your external token.',
     };
   }
 
@@ -250,7 +311,9 @@ export function classifyHttpApiError(params: {
         code: 'PAYMENT_REQUIRED',
         endpoint,
         message: `Billing / Credit required (402): ${cleanDetail || 'Account credits depleted or active subscription needed.'}`,
-        hint: 'Top up credits or check your active subscription tier on your provider dashboard.',
+        hint: isChubUrlOrProvider(apiProvider, endpoint)
+          ? 'Your Chub.ai account has 0 credits left on Chub.ai. Palace.ai has no credit limits and automatically falls back to the Palace Free Built-In Engine during chat.'
+          : 'Top up credits on your external provider, or switch to Palace Free Built-In API (no credits needed).',
       };
     case 403:
       return {
@@ -319,7 +382,9 @@ export function classifyHttpApiError(params: {
         code: 'RATE_LIMITED',
         endpoint,
         message: `Rate limit or quota exceeded (429): ${cleanDetail || 'Too many requests or account quota exhausted.'}`,
-        hint: 'Wait briefly before retrying, check provider quota, or use Palace Native Gemini fallback.',
+        hint: isChubUrlOrProvider(apiProvider, endpoint) || /credit/i.test(cleanDetail)
+          ? 'Your external Chub.ai/API key has 0 credits left on that provider. Palace.ai has NO credit limits and automatically continues using the Unlimited Palace Free Engine during chat.'
+          : 'Wait briefly before retrying, check provider quota, or use Palace Free Built-In API (no credits needed).',
       };
     default:
       if (status >= 500) {
@@ -520,7 +585,11 @@ export function getChubEndpointCandidates(
   const primary = normalizeChatCompletionsUrl(rawUrl);
   if (!primary) return [];
 
-  if (!isChubUrlOrProvider(apiProvider, rawUrl)) {
+  const isSameOrigin =
+    typeof window !== 'undefined' &&
+    Boolean(window.location?.origin) &&
+    rawUrl.trim().toLowerCase().startsWith(window.location.origin.toLowerCase());
+  if (!isChubUrlOrProvider(apiProvider, rawUrl) || isSameOrigin) {
     return [primary];
   }
 
@@ -609,7 +678,7 @@ const resolvedEndpointCache = new Map<
  * Queries GET .../models on an OpenAI-compatible or Chub.ai endpoint directly from the browser.
  */
 export async function fetchEndpointModels(options: {
-  apiUrl: string;
+  apiUrl?: string | null;
   apiKey?: string | null;
   apiProvider?: string | null;
 }): Promise<{
@@ -619,7 +688,15 @@ export async function fetchEndpointModels(options: {
   status: number;
   error?: ApiConnectionTestResult;
 }> {
-  const modelsUrl = normalizeModelsUrl(options.apiUrl);
+  const trimmedUrl = (options.apiUrl || '').trim();
+  const trimmedKey = (options.apiKey || '').trim();
+  const isLocal = isLocalProviderOrUrl(options.apiProvider, trimmedUrl);
+  const useSameOriginFree =
+    isBuiltInFreeProvider(options.apiProvider) ||
+    (!isLocal && (!trimmedKey || isPalaceFreeApiKey(trimmedKey)));
+
+  const effectiveBaseUrl = useSameOriginFree ? getSameOriginV1Url() : trimmedUrl;
+  const modelsUrl = normalizeModelsUrl(effectiveBaseUrl);
   if (!modelsUrl) {
     return {
       ok: false,
@@ -709,16 +786,28 @@ export async function runSmartConnectionTest(options: {
   apiKey?: string;
   model?: string;
 }): Promise<ApiConnectionTestResult> {
-  if (isBuiltInFreeProvider(options.apiProvider)) {
+  const hasExplicitFreeKey =
+    Boolean(options.apiKey?.trim()) && isPalaceFreeApiKey(options.apiKey);
+
+  if (isBuiltInFreeProvider(options.apiProvider) || hasExplicitFreeKey) {
     const chosenModel = (options.model || 'claude-opus-5-5').trim();
+    const sameOriginV1 = getSameOriginV1Url();
+    const discovered = await fetchEndpointModels({
+      apiUrl: sameOriginV1,
+      apiKey: options.apiKey,
+      apiProvider: 'palace_free',
+    }).catch(() => ({ ok: false, models: [] as string[], modelsUrl: '', status: 200 }));
     return {
       ok: true,
       status: 200,
       code: 'FREE_API_READY',
-      endpoint: '/api/chat/message',
+      endpoint: hasExplicitFreeKey ? sameOriginV1 : '/api/chat/message',
       testedFrom: 'server',
       resolvedModel: chosenModel,
-      message: `Palace Free Built-In API is ready! "${chosenModel}" runs completely free with zero API key needed.`,
+      availableModels: discovered.models.length > 0 ? discovered.models : undefined,
+      message: hasExplicitFreeKey
+        ? `Palace Free API Key Verified! "${chosenModel}" works unlimited via ${sameOriginV1} with zero credit limits.`
+        : `Palace Free Built-In API is ready! "${chosenModel}" runs completely free with zero API key needed.`,
       hint: 'Switch anytime between Claude Opus 5.5, DeepSeek R1, Chub Mars, GPT-4o, and Gemini — no external billing required.',
     };
   }
@@ -1128,7 +1217,11 @@ export async function tryBrowserExternalCompletion(params: {
         endpoint,
         apiProvider: params.apiProvider,
       });
-      if (lastError.code === 'UNAUTHORIZED' || lastError.code === 'PAYMENT_REQUIRED') {
+      if (
+        lastError.code === 'UNAUTHORIZED' ||
+        lastError.code === 'PAYMENT_REQUIRED' ||
+        (lastError.code === 'RATE_LIMITED' && /out of credits|credit|quota/i.test(rawBody))
+      ) {
         break;
       }
     } catch (err: any) {

@@ -28,6 +28,7 @@ import {
   updateSessionSummary,
   deleteSession,
   resetSessionMessages,
+  deleteMessagesFrom,
 } from '../src/db/chats.ts';
 import {
   getCustomVoices,
@@ -68,6 +69,7 @@ import {
   incrementStageUse,
   ensureSeedStages,
 } from '../src/db/stages.ts';
+import { ensureNonEmptyRoleplayReply } from '../src/utils/roleplayEngine.ts';
 import {
   getPublicLorebooks,
   getUserLorebooks,
@@ -1269,6 +1271,7 @@ apiRouter.post('/chat/message', optionalAuth, async (req: AuthRequest, res) => {
       triggerWithoutUserMessage,
       ensembleConfig: reqEnsembleConfig,
       brawlState: reqBrawlState,
+      fallbackToBuiltInFree,
     } = req.body;
     const trimmedContent = typeof content === 'string' ? content.trim() : '';
     if (!sessionUuid || (!trimmedContent && !triggerWithoutUserMessage)) {
@@ -1453,10 +1456,11 @@ apiRouter.post('/chat/message', optionalAuth, async (req: AuthRequest, res) => {
         groupSceneCharacters: otherSceneNames,
         brawlContextPrompt,
         ensembleConfig: activeEnsemble,
+        fallbackToBuiltInFree: Boolean(fallbackToBuiltInFree),
         chatSettings: parsedSettings,
       };
 
-      const aiResult = usePreGenerated
+      const rawAiResult = usePreGenerated
         ? {
             reply: preGeneratedReply.trim(),
             thinkingProcess: undefined,
@@ -1469,6 +1473,11 @@ apiRouter.post('/chat/message', optionalAuth, async (req: AuthRequest, res) => {
         : activeEnsemble?.enabled
           ? await generateMultiModelCharacterReply(replyOptions)
           : await generateCharacterReply(replyOptions);
+
+      const aiResult = {
+        ...rawAiResult,
+        reply: ensureNonEmptyRoleplayReply(rawAiResult.reply, speaker.name, trimmedContent),
+      };
 
       let sceneImageUrl: string | null = null;
       let poseName: string = speaker.model3dPose || 'neutral';
@@ -1582,6 +1591,7 @@ apiRouter.post('/chat/swipe', optionalAuth, async (req: AuthRequest, res) => {
       extraLorebook,
       personaLorebook,
       preGeneratedReply,
+      fallbackToBuiltInFree,
     } = req.body;
     if (!sessionUuid || !messageId) {
       return res.status(400).json({ error: 'sessionUuid and messageId are required' });
@@ -1657,6 +1667,7 @@ apiRouter.post('/chat/swipe', optionalAuth, async (req: AuthRequest, res) => {
           chatSummary: sessionDetails.session.summary,
           brawlContextPrompt,
           ensembleConfig: activeEnsemble,
+          fallbackToBuiltInFree: Boolean(fallbackToBuiltInFree),
           chatSettings: parsedSettings,
         };
 
@@ -1664,7 +1675,7 @@ apiRouter.post('/chat/swipe', optionalAuth, async (req: AuthRequest, res) => {
           ? await generateMultiModelCharacterReply(swipeOpts)
           : await generateCharacterReply(swipeOpts);
 
-        swipes.push(aiResult.reply);
+        swipes.push(ensureNonEmptyRoleplayReply(aiResult.reply, targetChar.name));
         newIndex = swipes.length - 1;
       }
     } else if (typeof targetIndex === 'number' && targetIndex >= 0 && targetIndex < swipes.length) {
@@ -1730,6 +1741,48 @@ const handleEditChatMessage = async (req: AuthRequest, res: express.Response) =>
 
 apiRouter.patch('/chat/message/:messageId', optionalAuth, handleEditChatMessage);
 apiRouter.put('/chat/message/:messageId', optionalAuth, handleEditChatMessage);
+
+// Cascade-delete a chat message AND every message after it (including system messages) + wipe AI memory
+const handleDeleteChatMessagesFrom = async (req: AuthRequest, res: express.Response) => {
+  try {
+    const rawParamId = req.params.messageId ? Number(req.params.messageId) : undefined;
+    const rawBodyId = req.body?.messageId !== undefined ? Number(req.body.messageId) : undefined;
+    const messageId =
+      rawParamId !== undefined && Number.isFinite(rawParamId)
+        ? rawParamId
+        : rawBodyId !== undefined && Number.isFinite(rawBodyId)
+          ? rawBodyId
+          : null;
+    const afterMessageId =
+      req.body?.afterMessageId !== undefined && Number.isFinite(Number(req.body.afterMessageId))
+        ? Number(req.body.afterMessageId)
+        : null;
+    const sessionUuid =
+      (typeof req.body?.sessionUuid === 'string' && req.body.sessionUuid.trim()) ||
+      (typeof req.query?.sessionUuid === 'string' && req.query.sessionUuid.trim()) ||
+      '';
+
+    if (!sessionUuid) {
+      return res.status(400).json({ error: 'sessionUuid is required' });
+    }
+
+    const result = await deleteMessagesFrom({
+      sessionUuid,
+      messageId,
+      afterMessageId,
+    });
+    if (!result) {
+      return res.status(404).json({ error: 'Chat session not found' });
+    }
+    res.json({ success: true, ...result });
+  } catch (error: any) {
+    console.error('Failed to delete chat messages:', error);
+    res.status(500).json({ error: error.message || 'Failed to delete chat messages' });
+  }
+};
+
+apiRouter.post('/chat/message/delete', optionalAuth, handleDeleteChatMessagesFrom);
+apiRouter.delete('/chat/message/:messageId', optionalAuth, handleDeleteChatMessagesFrom);
 
 apiRouter.delete('/chat/session/:sessionUuid', optionalAuth, async (req: AuthRequest, res) => {
   try {

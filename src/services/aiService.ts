@@ -28,6 +28,13 @@ import {
   buildChubCustomVoicePayload,
   computeSpeechCalibration,
 } from '../utils/customVoiceUtils.ts';
+import {
+  buildContextualRoleplayReply,
+  ensureNonEmptyRoleplayReply,
+  generateRoleplayCouncilSlot,
+  synthesizeCouncilReplies,
+} from '../utils/roleplayEngine.ts';
+import { isPalaceFreeApiKey } from '../utils/settingsSync.ts';
 import type { CustomVoiceRecord, ModelEnsembleConfig } from '../types/index.ts';
 
 // Lazy server-side GoogleGenAI client initialization so booting without GEMINI_API_KEY
@@ -80,6 +87,7 @@ export interface GenerateReplyOptions {
   groupSceneCharacters?: string[];
   brawlContextPrompt?: string | null;
   ensembleConfig?: ModelEnsembleConfig | null;
+  fallbackToBuiltInFree?: boolean;
   chatSettings?: {
     promptStructure?: string;
     apiProvider?: string;
@@ -101,6 +109,7 @@ export interface GenerateReplyOptions {
     lorebookTokenBudget?: number;
     matchWholeWords?: boolean;
     stoppingStrings?: string;
+    trimIncompleteSentences?: boolean;
     restrictNarration?: boolean;
     stagingUrl?: string;
   };
@@ -165,34 +174,55 @@ async function callGeminiWithTimeout<T>(promiseFactory: () => Promise<T>, timeou
   }
 }
 
-function generateSmartRoleplayFallback(
-  character: CharacterContext,
-  userMessage?: string,
-  history?: ChatMessageItem[],
-  brawlContextPrompt?: string | null
-): string {
-  const name = character.name || 'Character';
-  const lastUserText = userMessage || history?.slice(-1)[0]?.content || '';
-  void lastUserText;
+let pollinationsCooldownUntil = 0;
 
-  if (brawlContextPrompt && brawlContextPrompt.trim()) {
-    return `*Pivots sharply on one heel as sparks scatter across the floor, sweeping into a tight defensive combat stance and launching a calibrated counter-strike toward your flank!* "Not bad—let's see how you handle the counter-pressure!"`;
-  }
+/**
+ * Cooldown-guarded free remote text inference via Pollinations OpenAI gateway.
+ * Skips immediately during the 46s cooldown after any 402/429/error so multi-turn & council runs stay instant.
+ */
+async function tryPollinationsFreeCompletion(params: {
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
+  temperature?: number;
+  maxTokens?: number;
+}): Promise<string | null> {
+  if (Date.now() < pollinationsCooldownUntil) return null;
 
-  if (name.toLowerCase().includes('peppa')) {
-    return `*Stomps firmly in a glimmering muddy puddle, splashing golden droplets high into the air.* "Oink! You have my full, undivided attention! Tell me where our multiverse expedition ventures next!"`;
-  }
-  if (name.toLowerCase().includes('nextor')) {
-    return `*The elevator bulbs crackle violently as black ichor drips from the ceiling seams.* "Y-y-you... keep speaking into the dark... thinking you can change the tape? Nextor,wƴx remembers every floor you stepped on."`;
-  }
-  if (name.toLowerCase().includes('malakor')) {
-    return `*Swirls a crystal chalice of crimson reserve lazily while dark velvet shadows coil around the vaulted hearth.* "Bold of you to demand my audience, mortal. Speak plainly—your boldness amuses me."`;
-  }
-  if (character.personality && character.personality.toLowerCase().includes('tsundere')) {
-    return `*Crosses my arms and averts my eyes with a soft scoff.* "Hmph! Don't look at me like that... It's not like I was waiting for you to say something interesting or anything! Go on, what's on your mind?"`;
-  }
+  try {
+    const res = await fetch('https://text.pollinations.ai/openai', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({
+        model: 'openai-fast',
+        messages: params.messages,
+        temperature: typeof params.temperature === 'number' ? Math.min(1.3, Math.max(0.2, params.temperature)) : 0.85,
+        max_tokens: Math.min(800, Math.max(120, params.maxTokens || 420)),
+      }),
+      signal: AbortSignal.timeout(2500),
+    });
 
-  return `*Steps forward into the light, observing you with steady curiosity.* "I hear you clearly... In a world like ours, every word carries weight. Tell me what comes next."`;
+    if (!res.ok) {
+      pollinationsCooldownUntil = Date.now() + 46_000;
+      return null;
+    }
+
+    const rawText = await res.text().catch(() => '');
+    if (!rawText.trim() || looksLikeHtmlResponse(rawText, res.headers.get('content-type'))) {
+      pollinationsCooldownUntil = Date.now() + 46_000;
+      return null;
+    }
+
+    const parsed = JSON.parse(rawText);
+    const reply = String(parsed?.choices?.[0]?.message?.content || parsed?.choices?.[0]?.text || '').trim();
+    const readableLen = reply.replace(/\*/g, '').replace(/\s+/g, ' ').trim().length;
+    if (readableLen < 6 || /FREE_LIMIT|pollinations\.ai\/sponsor|Support Pollinations/i.test(reply)) {
+      pollinationsCooldownUntil = Date.now() + 46_000;
+      return null;
+    }
+    return reply;
+  } catch {
+    pollinationsCooldownUntil = Date.now() + 46_000;
+    return null;
+  }
 }
 
 export async function testExternalApiConnection(options: {
@@ -364,8 +394,9 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
   }
 
   const requestedModelId = (chatSettings.model || modelPreference || 'gemini-3.8-flash').trim();
-  const activeProvider = chatSettings.apiProvider;
-  const useBuiltInFree = isBuiltInFreeProvider(activeProvider) || !options.chubApiKey;
+  const activeProvider = options.fallbackToBuiltInFree ? 'palace_free' : chatSettings.apiProvider;
+  const useBuiltInFree =
+    Boolean(options.fallbackToBuiltInFree) || isBuiltInFreeProvider(activeProvider) || !options.chubApiKey;
   const calibration = useBuiltInFree ? getModelStyleCalibration(requestedModelId) : null;
   if (calibration?.styleDirective) {
     systemInstructionParts.push(calibration.styleDirective);
@@ -383,12 +414,12 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
   // Check if external/Chub.ai OpenAI-compatible API endpoint was configured by user with a real key
   const providerMeta = CHUB_API_PROVIDERS.find((p) => p.id === activeProvider);
   const rawExternalUrl =
-    !isBuiltInFreeProvider(activeProvider)
+    !options.fallbackToBuiltInFree && !isBuiltInFreeProvider(activeProvider)
       ? options.chubApiUrl ||
         (activeProvider ? chatSettings.stagingUrl || providerMeta?.defaultUrl : null)
       : null;
 
-  if (!isBuiltInFreeProvider(activeProvider) && options.chubApiKey && rawExternalUrl) {
+  if (!options.fallbackToBuiltInFree && !isBuiltInFreeProvider(activeProvider) && options.chubApiKey && rawExternalUrl) {
     const completionsUrl = normalizeChatCompletionsUrl(rawExternalUrl);
     if (completionsUrl) {
       try {
@@ -440,14 +471,16 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
             if (chubRes.ok && !looksLikeHtmlResponse(chubRaw, chubCt)) {
               try {
                 const chubData = JSON.parse(chubRaw);
-                const reply = chubData.choices?.[0]?.message?.content || chubData.choices?.[0]?.text || '';
-                if (reply.trim()) {
-                  return {
-                    reply,
-                    groundingSources: [],
-                    modelUsed: `${providerMeta?.label || activeProvider || 'Chub.ai'} (${targetExternalModel})`,
-                  };
-                }
+                const reply = ensureNonEmptyRoleplayReply(
+                  chubData.choices?.[0]?.message?.content || chubData.choices?.[0]?.text || '',
+                  character.name,
+                  userMessage
+                );
+                return {
+                  reply,
+                  groundingSources: [],
+                  modelUsed: `${providerMeta?.label || activeProvider || 'Chub.ai'} (${targetExternalModel})`,
+                };
               } catch {
                 console.warn(`External API (${candidateUrl}) returned invalid JSON, trying next or falling back.`);
               }
@@ -515,13 +548,59 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
     ? `Palace Free API (${calibration!.displayLabel})`
     : 'gemini-3.8-flash';
 
+  const roleplayFlags = {
+    modelId: requestedModelId,
+    banEmojis: Boolean(chatSettings.banEmojis),
+    includeNames: Boolean(chatSettings.includeNames),
+    restrictNarration: Boolean(chatSettings.restrictNarration),
+    trimIncompleteSentences: chatSettings.trimIncompleteSentences ?? true,
+    promptNote: chatSettings.promptNote,
+    relevantLore: budgeted.relevantLore,
+    chatSummary,
+    brawlContextPrompt: options.brawlContextPrompt,
+    groupSceneCharacters: options.groupSceneCharacters,
+  };
+
+  const buildLocalContextualReply = () =>
+    buildContextualRoleplayReply({
+      character,
+      userMessage,
+      history,
+      flags: roleplayFlags,
+    });
+
   const ai = getGeminiClient();
   if (!ai) {
+    // Try free Pollinations remote inference when available (respecting 46s rate cooldown)
+    const remoteMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+      { role: 'system', content: systemInstruction },
+      ...budgeted.history.slice(-8).map((m) => ({
+        role: (m.sender === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
+        content: m.content,
+      })),
+    ];
+    if (userMessage) {
+      remoteMessages.push({ role: 'user', content: userMessage });
+    }
+    const remoteFree = await tryPollinationsFreeCompletion({
+      messages: remoteMessages,
+      temperature: chatSettings.temperature ?? 0.85,
+      maxTokens: chatSettings.maxNewTokens ?? 450,
+    });
+
+    const finalReply = ensureNonEmptyRoleplayReply(
+      remoteFree || buildLocalContextualReply(),
+      character.name,
+      userMessage
+    );
+
     return {
-      reply: generateSmartRoleplayFallback(character, userMessage, history, options.brawlContextPrompt),
-      thinkingProcess: 'Built-in Palace Free Continuity engine active.',
+      reply: finalReply,
+      thinkingProcess: remoteFree
+        ? `${baseModelBadge} · Live free inference active.`
+        : `Built-in Palace Free Engine (${requestedModelId}) active with full card & lorebook grounding.`,
       groundingSources: [],
-      modelUsed: `${baseModelBadge} (Free Continuity)`,
+      modelUsed: `${baseModelBadge} (Free Engine)`,
     };
   }
 
@@ -542,7 +621,7 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
         11000
       );
 
-      const reply = response.text || '...';
+      const reply = ensureNonEmptyRoleplayReply(response.text, character.name, userMessage);
       return {
         reply,
         thinkingProcess: 'Deep reasoning analysis processed via gemini-4-argon High Thinking mode.',
@@ -553,7 +632,7 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
       console.warn('gemini-4-argon attempt failed, falling back to gemini-3.8-flash:', argonError?.message);
       if (isPermanentGeminiAuthError(argonError)) {
         return {
-          reply: generateSmartRoleplayFallback(character, userMessage, history, options.brawlContextPrompt),
+          reply: buildLocalContextualReply(),
           thinkingProcess: 'Gemini credentials unavailable in local runtime. Resonant in-character continuity active.',
           groundingSources: [],
           modelUsed: `${baseModelBadge} (Safe Continuity)`,
@@ -587,7 +666,7 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
       9000
     );
 
-    const reply = response.text || '...';
+    const reply = ensureNonEmptyRoleplayReply(response.text, character.name, userMessage);
     const groundingSources: GroundingSource[] = [];
 
     const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
@@ -624,7 +703,7 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
         );
 
         return {
-          reply: ungroundedResponse.text || '...',
+          reply: ensureNonEmptyRoleplayReply(ungroundedResponse.text, character.name, userMessage),
           groundingSources: [],
           modelUsed: `${baseModelBadge} (Offline Mode)`,
         };
@@ -636,7 +715,7 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
     // If any quota or rate limit error occurred, provide smart in-character fallback
     if (isQuotaOrRateLimitError(err)) {
       return {
-        reply: generateSmartRoleplayFallback(character, userMessage, history, options.brawlContextPrompt),
+        reply: buildLocalContextualReply(),
         thinkingProcess: 'Quota limitation reached on API key. Intelligent contextual roleplay fallback generated.',
         groundingSources: [],
         modelUsed: `${baseModelBadge} (Resonant Roleplay Mode)`,
@@ -644,7 +723,7 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
     }
 
     return {
-      reply: generateSmartRoleplayFallback(character, userMessage, history, options.brawlContextPrompt),
+      reply: buildLocalContextualReply(),
       thinkingProcess: 'Temporary connection anomaly. Roleplay continuity preserved.',
       groundingSources: [],
       modelUsed: `${baseModelBadge} (Safe Continuity)`,
@@ -671,16 +750,30 @@ export async function generateMultiModelCharacterReply(
   ];
   let geminiNativeAuthBlocked = false;
 
+  const councilFlags = {
+    banEmojis: Boolean(options.chatSettings?.banEmojis),
+    includeNames: Boolean(options.chatSettings?.includeNames),
+    restrictNarration: Boolean(options.chatSettings?.restrictNarration),
+    trimIncompleteSentences: options.chatSettings?.trimIncompleteSentences ?? true,
+    promptNote: options.chatSettings?.promptNote,
+    chatSummary: options.chatSummary,
+    brawlContextPrompt: options.brawlContextPrompt,
+    groupSceneCharacters: options.groupSceneCharacters,
+  };
+
   const runSlot = async (
     slot: (typeof slots)[number],
     stageInstruction: string,
-    tempOffset: number = 0
+    tempOffset: number = 0,
+    draftSoFar?: string
   ): Promise<string> => {
     const slotId = slot.id;
     const isGeminiArgon = slotId === 'gemini-4-argon';
     const isGeminiNative = slotId.startsWith('gemini-');
-    const slotProvider = slot.apiProvider || options.chatSettings?.apiProvider;
-    const slotKey = (slot.apiKey || options.chubApiKey || '').trim();
+    const slotProvider = options.fallbackToBuiltInFree
+      ? 'palace_free'
+      : slot.apiProvider || options.chatSettings?.apiProvider;
+    const slotKey = options.fallbackToBuiltInFree ? '' : (slot.apiKey || options.chubApiKey || '').trim();
     const slotUrl = (
       slot.apiUrl ||
       (slot.apiProvider && !isBuiltInFreeProvider(slot.apiProvider)
@@ -691,10 +784,21 @@ export async function generateMultiModelCharacterReply(
         : undefined)
     )?.trim();
 
-    if (!isGeminiNative && !isBuiltInFreeProvider(slotProvider) && slotKey && slotUrl) {
+    const isLocalOrFreeKey =
+      isPalaceFreeApiKey(slotKey) ||
+      (slotUrl ? /localhost:3000|127\.0\.0\.1:3000/i.test(slotUrl) : false);
+
+    if (
+      !options.fallbackToBuiltInFree &&
+      !isGeminiNative &&
+      !isBuiltInFreeProvider(slotProvider) &&
+      slotKey &&
+      slotUrl &&
+      !isLocalOrFreeKey
+    ) {
       const extRes = await generateCharacterReply({
         ...options,
-        userMessage: stageInstruction,
+        userMessage: options.userMessage,
         modelPreference: slotId,
         thinkingLevel: 'OFF',
         searchGrounding: false,
@@ -704,11 +808,14 @@ export async function generateMultiModelCharacterReply(
           ...options.chatSettings,
           apiProvider: slotProvider || 'custom_openai',
           model: slotId,
+          promptNote: `[Council Role: ${stageInstruction}]${
+            options.chatSettings?.promptNote ? ` | ${options.chatSettings.promptNote}` : ''
+          }`,
           temperature: Math.min(1.4, Math.max(0.2, (options.chatSettings?.temperature ?? 0.85) + tempOffset)),
           maxNewTokens: Math.min(500, options.chatSettings?.maxNewTokens ?? 400),
         },
       });
-      return extRes.reply;
+      return ensureNonEmptyRoleplayReply(extRes.reply, options.character.name, options.userMessage);
     }
 
     const slotCalibration = getModelStyleCalibration(slotId);
@@ -747,12 +854,16 @@ export async function generateMultiModelCharacterReply(
       }
     }
 
-    return generateSmartRoleplayFallback(
-      options.character,
-      options.userMessage,
-      options.history,
-      options.brawlContextPrompt
-    );
+    return generateRoleplayCouncilSlot({
+      slotId,
+      role: slot.role,
+      mode: normalized.mode,
+      character: options.character,
+      userMessage: options.userMessage,
+      history: options.history,
+      draftSoFar,
+      flags: { ...councilFlags, modelId: slotId },
+    });
   };
 
   try {
@@ -777,11 +888,11 @@ export async function generateMultiModelCharacterReply(
         userMessage: options.userMessage,
         draftSoFar: draftText,
       });
-      const polishedText = await runSlot(polisher, polishPrompt, -0.05);
+      const polishedText = await runSlot(polisher, polishPrompt, -0.05, draftText);
       traceLines.push(`2. [${polisher.id} · Critique & Polish]: Applied depth, sensory texture & continuity check.`);
 
       return {
-        reply: polishedText || draftText,
+        reply: ensureNonEmptyRoleplayReply(polishedText || draftText, options.character.name, options.userMessage),
         thinkingProcess: traceLines.join('\n\n'),
         groundingSources: [],
         modelUsed: `Ensemble (${drafter.id} -> ${polisher.id})`,
@@ -816,11 +927,22 @@ export async function generateMultiModelCharacterReply(
       userMessage: options.userMessage,
     });
 
-    const finalReply = await runSlot(synthSlot, synthPrompt, -0.08);
-    traceLines.push(`Synthesizer [${synthSlot.id}]: Merged all ${candidates.length} perspectives into final reply.`);
+    let finalReply = '';
+    const geminiClient = !geminiNativeAuthBlocked ? getGeminiClient() : null;
+    if (geminiClient) {
+      finalReply = await runSlot(synthSlot, synthPrompt, -0.08);
+    } else {
+      finalReply = synthesizeCouncilReplies({
+        character: options.character,
+        candidates,
+        userMessage: options.userMessage,
+        flags: { ...councilFlags, modelId: synthSlot.id },
+      });
+    }
+    traceLines.push(`Synthesizer [${synthSlot.id}]: Merged all ${candidates.length} distinct perspectives into final reply.`);
 
     return {
-      reply: finalReply || candidates[0].text,
+      reply: ensureNonEmptyRoleplayReply(finalReply || candidates[0].text, options.character.name, options.userMessage),
       thinkingProcess: traceLines.join('\n\n'),
       groundingSources: [],
       modelUsed: `Ensemble (${slots.map((s) => s.id).join(' + ')})`,
@@ -1141,5 +1263,136 @@ export async function generateSpeechTTS(
       referenceAudioMime: customVoice?.referenceAudioMime,
       transcript: customVoice?.transcript,
     },
+  };
+}
+
+/**
+ * Chub.ai-compatible /v1/chat/completions execution engine (free, zero credit limits).
+ * Accepts standard OpenAI / Chub Mars/Mercury/Soji message arrays and model IDs.
+ */
+export async function generateChubCompatibleCompletion(params: {
+  model?: string;
+  messages: Array<{ role: string; content: string }>;
+  temperature?: number;
+  topP?: number;
+  topK?: number;
+  maxTokens?: number;
+  stop?: string[];
+}): Promise<{ content: string; modelUsed: string; promptTokens: number; completionTokens: number }> {
+  const requestedModel = (params.model || 'chub-mars').trim();
+  const calibration = getModelStyleCalibration(requestedModel);
+
+  const systemChunks: string[] = [];
+  const chatTurns: Array<{ role: 'user' | 'model'; parts: { text: string }[] }> = [];
+
+  for (const m of params.messages || []) {
+    const role = String(m?.role || 'user').toLowerCase();
+    const text = typeof m?.content === 'string' ? m.content : String(m?.content ?? '');
+    if (!text.trim()) continue;
+    if (role === 'system') {
+      systemChunks.push(text.trim());
+    } else {
+      chatTurns.push({
+        role: role === 'assistant' || role === 'model' ? 'model' : 'user',
+        parts: [{ text }],
+      });
+    }
+  }
+
+  if (calibration.styleDirective) {
+    systemChunks.push(calibration.styleDirective);
+  }
+  const systemInstruction = systemChunks.join('\n\n') || 'You are an immersive roleplay character. Stay in character.';
+  const contents =
+    chatTurns.length > 0
+      ? chatTurns
+      : [{ role: 'user' as const, parts: [{ text: 'Continue the scene naturally.' }] }];
+
+  const approxPromptTokens = Math.max(
+    1,
+    Math.ceil((systemInstruction.length + contents.reduce((sum, c) => sum + c.parts[0].text.length, 0)) / 4)
+  );
+
+  const ai = getGeminiClient();
+  if (ai) {
+    try {
+      const targetGeminiModel = requestedModel === 'gemini-4-argon' ? 'gemini-4-argon' : 'gemini-3.8-flash';
+      const config: any = {
+        systemInstruction,
+      };
+      if (typeof params.temperature === 'number') config.temperature = params.temperature;
+      if (typeof params.topP === 'number') config.topP = params.topP;
+      if (typeof params.topK === 'number') config.topK = params.topK;
+      if (typeof params.maxTokens === 'number') config.maxOutputTokens = params.maxTokens;
+      if (Array.isArray(params.stop) && params.stop.length > 0) config.stopSequences = params.stop.slice(0, 4);
+
+      const response = await callGeminiWithTimeout(
+        () =>
+          ai.models.generateContent({
+            model: targetGeminiModel,
+            contents,
+            config,
+          }),
+        10000
+      );
+      const replyText = (response.text || '').trim();
+      if (replyText) {
+        return {
+          content: replyText,
+          modelUsed: requestedModel,
+          promptTokens: approxPromptTokens,
+          completionTokens: Math.max(1, Math.ceil(replyText.length / 4)),
+        };
+      }
+    } catch (err: any) {
+      console.warn('Chub-compat Gemini call fell back cleanly:', err?.message);
+    }
+  }
+
+  const lastUserContent = [...(params.messages || [])].reverse().find((m) => m.role === 'user')?.content || '';
+  const nameMatch =
+    systemInstruction.match(/roleplaying as\s+"([^"]+)"/i) ||
+    systemInstruction.match(/named\s+([A-Z][a-zA-Z0-9 _-]{1,32})/) ||
+    systemInstruction.match(/You are\s+(?:playing as\s+)?([A-Z][a-zA-Z0-9 _-]{1,32})/);
+  const charName = nameMatch?.[1]?.trim() || 'Character';
+
+  const remoteFree = await tryPollinationsFreeCompletion({
+    messages: (params.messages || []).map((m) => ({
+      role: (m.role === 'system' ? 'system' : m.role === 'assistant' || m.role === 'model' ? 'assistant' : 'user') as
+        | 'system'
+        | 'user'
+        | 'assistant',
+      content: String(m.content || ''),
+    })),
+    temperature: params.temperature,
+    maxTokens: params.maxTokens,
+  });
+
+  const fallbackReply = ensureNonEmptyRoleplayReply(
+    remoteFree ||
+      buildContextualRoleplayReply({
+        character: {
+          name: charName,
+          tagline: '',
+          description: systemInstruction.slice(0, 260),
+          systemPrompt: systemInstruction,
+          scenario: '',
+        },
+        userMessage: lastUserContent,
+        history: (params.messages || []).map((m) => ({
+          sender: m.role === 'user' ? 'user' : m.role === 'system' ? 'system' : 'character',
+          content: m.content,
+        })),
+        flags: { modelId: requestedModel },
+      }),
+    charName,
+    lastUserContent
+  );
+
+  return {
+    content: fallbackReply,
+    modelUsed: requestedModel,
+    promptTokens: approxPromptTokens,
+    completionTokens: Math.max(1, Math.ceil(fallbackReply.length / 4)),
   };
 }

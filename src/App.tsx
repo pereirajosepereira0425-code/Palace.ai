@@ -44,6 +44,12 @@ import { Character, ContentRating, SharedLorebookRecord, SharedPersona, TagRecor
 import { isOwnedByRequester } from './utils/ownership.ts';
 import { chunkItems } from './utils/viewportUnload.ts';
 import { SITE_DESCRIPTION, SITE_TITLE } from './utils/seoUtils.ts';
+import { PRESETS_UPDATED_EVENT } from './utils/settingsSync.ts';
+import {
+  buildViewportMetaContent,
+  computeViewportScaleMetrics,
+  loadSavedViewportWidth,
+} from './utils/viewportWidth.ts';
 
 const CHARACTER_PAGE_SIZE = 24;
 const EXPLORE_TAG_PAGE_SIZE = 48;
@@ -213,6 +219,58 @@ function PalaceApp() {
     return DEFAULT_PRESETS;
   });
 
+  const [customViewportWidth, setCustomViewportWidth] = useState<number | null>(() =>
+    loadSavedViewportWidth()
+  );
+  const [windowSize, setWindowSize] = useState<{ width: number; height: number }>(() => ({
+    width: typeof window !== 'undefined' ? window.innerWidth : 1280,
+    height: typeof window !== 'undefined' ? window.innerHeight : 800,
+  }));
+
+  useEffect(() => {
+    const onResize = () => {
+      setWindowSize({ width: window.innerWidth, height: window.innerHeight });
+    };
+    const onWidthUpdate = (e: any) => {
+      const w = e?.detail?.width ?? loadSavedViewportWidth();
+      setCustomViewportWidth(w);
+    };
+    const onPresetsUpdate = (e: any) => {
+      if (e?.detail && typeof e.detail === 'object') {
+        setPresets((prev) => ({ ...prev, ...e.detail }));
+      }
+    };
+    window.addEventListener('resize', onResize);
+    window.addEventListener('palace-viewport-width-updated', onWidthUpdate);
+    window.addEventListener(PRESETS_UPDATED_EVENT, onPresetsUpdate);
+    return () => {
+      window.removeEventListener('resize', onResize);
+      window.removeEventListener('palace-viewport-width-updated', onWidthUpdate);
+      window.removeEventListener(PRESETS_UPDATED_EVENT, onPresetsUpdate);
+    };
+  }, []);
+
+  const viewportMetrics = useMemo(
+    () =>
+      computeViewportScaleMetrics({
+        customWidth: customViewportWidth,
+        nativeWidth: windowSize.width,
+        nativeHeight: windowSize.height,
+      }),
+    [customViewportWidth, windowSize.width, windowSize.height]
+  );
+
+  useEffect(() => {
+    const vpMeta = document.querySelector('meta[name="viewport"]');
+    if (vpMeta) {
+      vpMeta.setAttribute('content', buildViewportMetaContent(customViewportWidth));
+    }
+    const vhPx = viewportMetrics.isActive
+      ? `${viewportMetrics.effectiveHeight}px`
+      : '100vh';
+    document.documentElement.style.setProperty('--palace-vh', vhPx);
+  }, [customViewportWidth, viewportMetrics]);
+
   const [activeStage, setActiveStage] = useState<Stage | null>(() => {
     try {
       const saved = localStorage.getItem('palace_active_stage');
@@ -227,6 +285,7 @@ function PalaceApp() {
     setPresets(newPresets);
     try {
       localStorage.setItem('palace_generation_presets', JSON.stringify(newPresets));
+      window.dispatchEvent(new CustomEvent(PRESETS_UPDATED_EVENT, { detail: newPresets }));
     } catch (err) {
       console.error(err);
     }
@@ -521,7 +580,19 @@ function PalaceApp() {
   );
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col font-sans selection:bg-purple-500 selection:text-white">
+    <div
+      data-custom-width={viewportMetrics.isActive ? viewportMetrics.customWidth : undefined}
+      style={
+        viewportMetrics.isActive && viewportMetrics.customWidth
+          ? {
+              width: `${viewportMetrics.customWidth}px`,
+              minHeight: `${viewportMetrics.effectiveHeight}px`,
+              zoom: viewportMetrics.scale,
+            }
+          : undefined
+      }
+      className="min-h-[var(--palace-vh,100vh)] w-full max-w-full overflow-x-hidden bg-zinc-950 text-zinc-100 flex flex-col font-sans selection:bg-purple-500 selection:text-white"
+    >
       {/* Top Header Navbar */}
       <Navbar
         activeTab={activeTab}

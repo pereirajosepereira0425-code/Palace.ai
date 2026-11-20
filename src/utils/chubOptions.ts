@@ -123,8 +123,8 @@ export const CHUB_API_PROVIDERS: ChubOptionItem[] = [
   {
     id: 'chub_mars',
     label: 'Chub AI (Mars / Mercury / Sojourn)',
-    badge: 'Chub.ai Native',
-    description: 'Chub.ai subscription inference engine (Mars 70B, Mercury, Asha, Sojourn).',
+    badge: 'Free Fallback Ready',
+    description: 'Chub.ai Mars/Mercury/Asha/Sojourn — auto-continues 100% free with zero credit limits on Palace.ai if Chub hits quota.',
     defaultUrl: 'https://mars.chub.ai/v1',
     defaultModel: 'chub-mars',
   },

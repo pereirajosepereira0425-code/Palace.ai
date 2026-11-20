@@ -1,5 +1,6 @@
 import express from 'express';
 import { apiRouter } from './routes.ts';
+import { chubCompatRouter } from './chubCompatApi.ts';
 import { getCharacters } from '../src/db/characters.ts';
 import { buildRobotsTxt, buildSitemapXml } from '../src/utils/seoUtils.ts';
 
@@ -45,6 +46,9 @@ app.get('/sitemap.xml', async (req, res) => {
     res.send(buildSitemapXml(origin, []));
   }
 });
+
+// Mount Chub.ai-compatible /v1/* and /inference/* endpoints (free, zero credit limits)
+app.use(chubCompatRouter);
 
 // Mount API router
 app.use('/api', apiRouter);

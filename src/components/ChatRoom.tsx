@@ -85,6 +85,19 @@ import {
 } from '../utils/chatOrchestration.ts';
 import { playTTSResponseData, stopActiveTTSPlayback } from '../utils/ttsPlayer.ts';
 import { applyEditedSwipe, normalizeEditedMessageText } from '../utils/customVoiceUtils.ts';
+import {
+  computeCascadeMessageDeletion,
+  shouldFallbackToBuiltInFreeOnExternalError,
+} from '../utils/chatMemoryUtils.ts';
+import {
+  CHUB_SETTINGS_STORAGE_KEY,
+  PRESETS_STORAGE_KEY,
+  PRESETS_UPDATED_EVENT,
+  hydrateChatSettingsOnSessionLoad,
+  mergeSettingsFromPresets,
+  resolveEffectiveChatApiConfig,
+} from '../utils/settingsSync.ts';
+import { ensureNonEmptyRoleplayReply } from '../utils/roleplayEngine.ts';
 
 interface ChatRoomProps {
   character: Character;
@@ -130,11 +143,16 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   const [isGroupModalOpen, setIsGroupModalOpen] = useState(false);
   const [isMultiModelModalOpen, setIsMultiModelModalOpen] = useState(false);
 
-  // Chub Chat Settings
+  // Chub Chat Settings (hydrated cleanly from defaults + saved presets + saved settings)
   const [chubSettings, setChubSettings] = useState<ChubChatSettings>(() => {
     try {
-      const saved = localStorage.getItem('palace_chub_chat_settings');
-      if (saved) return JSON.parse(saved);
+      const savedSettingsRaw = localStorage.getItem(CHUB_SETTINGS_STORAGE_KEY);
+      const savedPresetsRaw = localStorage.getItem(PRESETS_STORAGE_KEY);
+      return hydrateChatSettingsOnSessionLoad({
+        defaults: DEFAULT_CHUB_SETTINGS,
+        localSettings: savedSettingsRaw ? JSON.parse(savedSettingsRaw) : null,
+        localPresets: savedPresetsRaw ? JSON.parse(savedPresetsRaw) : null,
+      });
     } catch {}
     return DEFAULT_CHUB_SETTINGS;
   });
@@ -159,38 +177,25 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   );
 
   const getEffectiveApiPayload = () => {
-    let presetsData: any = {};
+    let presetsData: any = null;
     try {
-      const raw = localStorage.getItem('palace_generation_presets');
+      const raw = localStorage.getItem(PRESETS_STORAGE_KEY);
       if (raw) presetsData = JSON.parse(raw);
     } catch {}
 
-    let latestSettings = chubSettings;
+    let localSettings: any = null;
     try {
-      const rawSettings = localStorage.getItem('palace_chub_chat_settings');
-      if (rawSettings) latestSettings = { ...DEFAULT_CHUB_SETTINGS, ...JSON.parse(rawSettings) };
+      const rawSettings = localStorage.getItem(CHUB_SETTINGS_STORAGE_KEY);
+      if (rawSettings) localSettings = JSON.parse(rawSettings);
     } catch {}
 
-    const chubApiKey = (presetsData.chubApiKey || '').trim() || undefined;
-    const chubApiUrl =
-      (latestSettings.apiProvider && !isBuiltInFreeProvider(latestSettings.apiProvider)
-        ? latestSettings.stagingUrl || presetsData.chubApiUrl
-        : presetsData.apiProvider && !isBuiltInFreeProvider(presetsData.apiProvider)
-          ? presetsData.chubApiUrl
-          : undefined) || undefined;
-
-    const mergedSettings: ChubChatSettings = {
-      ...latestSettings,
-      contextSize: latestSettings.contextSize || presetsData.maxContextTokens || 8192,
-      ...(presetsData.apiProvider && !latestSettings.apiProvider
-        ? { apiProvider: presetsData.apiProvider }
-        : {}),
-      ...(presetsData.customModel && !latestSettings.model
-        ? { model: presetsData.customModel }
-        : {}),
-    };
-
-    return { chubApiKey, chubApiUrl, mergedSettings };
+    return resolveEffectiveChatApiConfig({
+      defaults: DEFAULT_CHUB_SETTINGS,
+      liveSettings: chubSettings,
+      localSettings,
+      localPresets: presetsData,
+      isBuiltInFreeFn: isBuiltInFreeProvider,
+    });
   };
 
   // Scenario AI Images Toggle
@@ -238,6 +243,11 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   const [editingContent, setEditingContent] = useState<string>('');
   const [savingEdit, setSavingEdit] = useState<boolean>(false);
   const [editError, setEditError] = useState<string | null>(null);
+
+  // Cascade Message Deletion & Credit-Limit Free Fallback Notice
+  const [confirmDeleteMsgId, setConfirmDeleteMsgId] = useState<number | null>(null);
+  const [deletingMsgId, setDeletingMsgId] = useState<number | null>(null);
+  const [externalFallbackNotice, setExternalFallbackNotice] = useState<string | null>(null);
 
   // Alternate Greetings calculation
   const parsedAlternateGreetings: string[] = useMemo(() => {
@@ -319,26 +329,47 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             if (sessData.session.showAiImages !== undefined) {
               setShowAiImages(Boolean(sessData.session.showAiImages));
             }
-            // Hydrate group roster, multi-model collaboration, and BrawlChat state
+            // Hydrate ALL Chub chatSettings (model, provider, toggles, promptNote, sliders, roster, multi-model, BrawlChat)
             try {
               const savedChatCfg =
                 typeof sessData.session.chatSettings === 'string'
                   ? JSON.parse(sessData.session.chatSettings || '{}')
                   : sessData.session.chatSettings || {};
-              if (Array.isArray(savedChatCfg.groupParticipants) && savedChatCfg.groupParticipants.length > 0) {
-                setRoster(savedChatCfg.groupParticipants);
+
+              let localSettings: any = null;
+              let localPresets: any = null;
+              try {
+                const rawSet = localStorage.getItem(CHUB_SETTINGS_STORAGE_KEY);
+                if (rawSet) localSettings = JSON.parse(rawSet);
+                const rawPre = localStorage.getItem(PRESETS_STORAGE_KEY);
+                if (rawPre) localPresets = JSON.parse(rawPre);
+              } catch {}
+
+              const hydratedSettings = hydrateChatSettingsOnSessionLoad({
+                defaults: DEFAULT_CHUB_SETTINGS,
+                localSettings,
+                localPresets,
+                sessionChatSettings: savedChatCfg,
+              });
+              setChubSettings(hydratedSettings);
+              try {
+                localStorage.setItem(CHUB_SETTINGS_STORAGE_KEY, JSON.stringify(hydratedSettings));
+              } catch {}
+
+              if (Array.isArray(hydratedSettings.groupParticipants) && hydratedSettings.groupParticipants.length > 0) {
+                setRoster(hydratedSettings.groupParticipants);
               } else {
                 setRoster([toGroupParticipant(character, true)]);
               }
-              if (savedChatCfg.responderMode) setResponderMode(savedChatCfg.responderMode);
-              if (savedChatCfg.selectedResponderUuid) {
-                setSelectedResponderUuid(savedChatCfg.selectedResponderUuid);
+              if (hydratedSettings.responderMode) setResponderMode(hydratedSettings.responderMode as any);
+              if (hydratedSettings.selectedResponderUuid !== undefined) {
+                setSelectedResponderUuid(hydratedSettings.selectedResponderUuid || character.uuid);
               }
-              if (savedChatCfg.ensembleConfig) {
-                setEnsembleConfig(normalizeEnsembleConfig(savedChatCfg.ensembleConfig));
+              if (hydratedSettings.ensembleConfig) {
+                setEnsembleConfig(normalizeEnsembleConfig(hydratedSettings.ensembleConfig));
               }
-              if (savedChatCfg.brawlState) {
-                setBrawlState(savedChatCfg.brawlState);
+              if (hydratedSettings.brawlState) {
+                setBrawlState(hydratedSettings.brawlState);
               } else {
                 setBrawlState(createInitialBrawlState(persona.name, character.name, 'auto', null));
               }
@@ -356,6 +387,46 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
     initSession();
   }, [character.uuid, guestId, initialSessionUuid, startNewChat, greetingOverride]);
+
+  // Live sync whenever PresetsModal or ChubSettingsModal broadcasts updated presets/settings
+  useEffect(() => {
+    const onPresetsUpdated = (e: any) => {
+      const updatedPresets = e?.detail;
+      if (!updatedPresets || typeof updatedPresets !== 'object') return;
+      setChubSettings((prev) => {
+        const merged = mergeSettingsFromPresets(prev, updatedPresets);
+        try {
+          localStorage.setItem(CHUB_SETTINGS_STORAGE_KEY, JSON.stringify(merged));
+        } catch {}
+        if (session?.uuid) {
+          fetch(`/api/chat/settings/${session.uuid}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chatSettings: merged,
+              thinkingLevel: updatedPresets.highThinking ? 'HIGH' : thinkingLevel,
+              searchGrounding:
+                typeof updatedPresets.searchGrounding === 'boolean'
+                  ? updatedPresets.searchGrounding
+                  : searchGrounding,
+            }),
+          }).catch(() => {});
+        }
+        return merged;
+      });
+      if (typeof updatedPresets.highThinking === 'boolean') {
+        setThinkingLevel(updatedPresets.highThinking ? 'HIGH' : 'OFF');
+      }
+      if (typeof updatedPresets.searchGrounding === 'boolean') {
+        setSearchGrounding(updatedPresets.searchGrounding);
+      }
+      if (updatedPresets.voiceName) {
+        setSelectedVoice(updatedPresets.voiceName);
+      }
+    };
+    window.addEventListener(PRESETS_UPDATED_EVENT, onPresetsUpdated);
+    return () => window.removeEventListener(PRESETS_UPDATED_EVENT, onPresetsUpdated);
+  }, [session?.uuid, thinkingLevel, searchGrounding]);
 
   useEffect(() => {
     scrollToBottom('auto');
@@ -418,6 +489,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             },
           ]);
         }
+        persistSessionCollaboration({ baseSettings: chubSettings });
         setIsAllChatsOpen(false);
       }
     } catch (err) {
@@ -439,6 +511,32 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       if (sessRes.ok) {
         const sessData = await sessRes.json();
         setMessages(sessData.messages || []);
+        if (sessData.session?.chatSettings) {
+          let localSettings: any = null;
+          let localPresets: any = null;
+          try {
+            const rawSet = localStorage.getItem(CHUB_SETTINGS_STORAGE_KEY);
+            if (rawSet) localSettings = JSON.parse(rawSet);
+            const rawPre = localStorage.getItem(PRESETS_STORAGE_KEY);
+            if (rawPre) localPresets = JSON.parse(rawPre);
+          } catch {}
+          const hydrated = hydrateChatSettingsOnSessionLoad({
+            defaults: DEFAULT_CHUB_SETTINGS,
+            localSettings,
+            localPresets,
+            sessionChatSettings: sessData.session.chatSettings,
+          });
+          setChubSettings(hydrated);
+          if (Array.isArray(hydrated.groupParticipants) && hydrated.groupParticipants.length > 0) {
+            setRoster(hydrated.groupParticipants);
+          }
+          if (hydrated.ensembleConfig) {
+            setEnsembleConfig(normalizeEnsembleConfig(hydrated.ensembleConfig));
+          }
+          if (hydrated.brawlState) {
+            setBrawlState(hydrated.brawlState);
+          }
+        }
       }
       setIsAllChatsOpen(false);
     } catch (err) {
@@ -597,28 +695,32 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     }
   };
 
-  // Persist Group Roster, Multi-Model Config, & BrawlState onto chatSettings
+  // Persist Group Roster, Multi-Model Config, BrawlState, & ChubSettings onto chatSettings DB
   const persistSessionCollaboration = async (overrides: {
+    baseSettings?: ChubChatSettings;
     groupParticipants?: GroupParticipant[];
     responderMode?: ResponderSelectionMode;
     selectedResponderUuid?: string | null;
     ensembleConfig?: ModelEnsembleConfig;
     brawlState?: BrawlCombatState;
   }) => {
+    const base = overrides.baseSettings ?? chubSettings;
     const nextSettings: ChubChatSettings = {
-      ...chubSettings,
-      groupParticipants: overrides.groupParticipants ?? roster,
-      responderMode: overrides.responderMode ?? responderMode,
+      ...base,
+      groupParticipants: overrides.groupParticipants ?? base.groupParticipants ?? roster,
+      responderMode: overrides.responderMode ?? base.responderMode ?? responderMode,
       selectedResponderUuid:
         overrides.selectedResponderUuid !== undefined
           ? overrides.selectedResponderUuid
-          : selectedResponderUuid,
-      ensembleConfig: overrides.ensembleConfig ?? ensembleConfig,
-      brawlState: overrides.brawlState ?? brawlState,
+          : base.selectedResponderUuid !== undefined
+            ? base.selectedResponderUuid
+            : selectedResponderUuid,
+      ensembleConfig: overrides.ensembleConfig ?? base.ensembleConfig ?? ensembleConfig,
+      brawlState: overrides.brawlState ?? base.brawlState ?? brawlState,
     };
     setChubSettings(nextSettings);
     try {
-      localStorage.setItem('palace_chub_chat_settings', JSON.stringify(nextSettings));
+      localStorage.setItem(CHUB_SETTINGS_STORAGE_KEY, JSON.stringify(nextSettings));
     } catch {}
     if (session?.uuid) {
       fetch(`/api/chat/settings/${session.uuid}`, {
@@ -807,6 +909,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
       let preGeneratedReply: string | undefined;
       let preGeneratedModelUsed: string | undefined;
+      let fallbackToBuiltInFree = false;
 
       const isSingleStandardSpeaker =
         roster.length <= 1 && !ensembleConfig.enabled && !nextBrawlState.active && !triggerOnly;
@@ -856,11 +959,25 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         if (directRes.ok) {
           preGeneratedReply = directRes.reply;
           preGeneratedModelUsed = directRes.modelUsed;
+          setExternalFallbackNotice(null);
+        } else if (
+          shouldFallbackToBuiltInFreeOnExternalError(directRes.error.code, directRes.error.status)
+        ) {
+          // Never block roleplay on external credit/quota limits (e.g. Chub 429 "You are out of credits")
+          fallbackToBuiltInFree = true;
+          const isCreditOrQuota =
+            directRes.error.code === 'RATE_LIMITED' ||
+            directRes.error.code === 'PAYMENT_REQUIRED' ||
+            directRes.error.status === 429 ||
+            directRes.error.status === 402;
+          setExternalFallbackNotice(
+            isCreditOrQuota
+              ? `Your external API key hit a credit/rate limit (${directRes.error.message}) — seamlessly continuing via Palace Unlimited Free Engine with zero credit limits!`
+              : `External endpoint unavailable (${directRes.error.code}) — seamlessly continuing via Palace Unlimited Free Engine!`
+          );
         } else if (
           directRes.error.code === 'UNAUTHORIZED' ||
-          directRes.error.code === 'PAYMENT_REQUIRED' ||
           directRes.error.code === 'BAD_REQUEST' ||
-          directRes.error.code === 'RATE_LIMITED' ||
           directRes.error.code === 'CONNECTION_REFUSED'
         ) {
           throw new Error(directRes.error.message);
@@ -891,6 +1008,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           triggerWithoutUserMessage: triggerOnly,
           ensembleConfig,
           brawlState: nextBrawlState,
+          fallbackToBuiltInFree,
         }),
       });
 
@@ -983,6 +1101,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           setSwipingId(messageId);
           const { chubApiKey, chubApiUrl, mergedSettings } = getEffectiveApiPayload();
           let preGeneratedReply: string | undefined;
+          let fallbackToBuiltInFree = false;
 
           const shouldTryBrowserDirect =
             mergedSettings.apiProvider &&
@@ -1028,6 +1147,14 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             });
             if (directRes.ok) {
               preGeneratedReply = directRes.reply;
+              setExternalFallbackNotice(null);
+            } else if (
+              shouldFallbackToBuiltInFreeOnExternalError(directRes.error.code, directRes.error.status)
+            ) {
+              fallbackToBuiltInFree = true;
+              setExternalFallbackNotice(
+                `External API hit ${directRes.error.status || directRes.error.code} — auto-switched swipe to Palace Unlimited Free Engine!`
+              );
             }
           }
 
@@ -1044,6 +1171,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
               extraLorebook: activeGlobalLoreRaw,
               personaLorebook: personaLoreRaw,
               preGeneratedReply,
+              fallbackToBuiltInFree,
             }),
           });
           const parsedSwipe = await safeParseJsonResponse(res);
@@ -1276,6 +1404,86 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     }
   };
 
+  // Delete a message AND all messages after it (including system messages) + wipe from AI memory
+  const handleDeleteMessage = async (message: ChatMessage, msgIdx: number) => {
+    if (!session || deletingMsgId) return;
+
+    if (confirmDeleteMsgId !== message.id) {
+      setConfirmDeleteMsgId(message.id);
+      setTimeout(() => {
+        setConfirmDeleteMsgId((curr) => (curr === message.id ? null : curr));
+      }, 4000);
+      return;
+    }
+    setConfirmDeleteMsgId(null);
+
+    const cascade = computeCascadeMessageDeletion({
+      messages,
+      targetMessageId: message.id,
+      summary: chatSummary,
+      unsavedCount,
+    });
+    if (!cascade.found) return;
+
+    const deletedSet = new Set(cascade.deletedIds);
+    const prevPersisted = [...messages.slice(0, msgIdx)]
+      .reverse()
+      .find((m) => m.id > 0 && m.id < 1_000_000_000_000);
+
+    // Immediately wipe from UI state, active editor, audio playback, and AI memory state
+    setMessages(cascade.remainingMessages);
+    setChatSummary(cascade.summary);
+    setUnsavedCount(cascade.unsavedCount);
+    setPersonaReaction(null);
+    if (editingMessageId && deletedSet.has(editingMessageId)) {
+      handleCancelEditMessage();
+    }
+    if (activeAudioMessageId && deletedSet.has(activeAudioMessageId)) {
+      stopActiveTTSPlayback(currentAudioRef);
+      setActiveAudioMessageId(null);
+    }
+    setExpandedThinking((prev) => {
+      const next: Record<number, boolean> = {};
+      for (const [k, v] of Object.entries(prev)) {
+        if (!deletedSet.has(Number(k))) next[Number(k)] = v;
+      }
+      return next;
+    });
+
+    try {
+      setDeletingMsgId(message.id);
+      const token = await getIdToken();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
+      const res = await fetch('/api/chat/message/delete', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          sessionUuid: session.uuid,
+          messageId: message.id > 0 && message.id < 1_000_000_000_000 ? message.id : null,
+          afterMessageId: prevPersisted ? prevPersisted.id : null,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.remainingMessages)) {
+          setMessages(data.remainingMessages);
+        }
+        if (typeof data.summary === 'string') {
+          setChatSummary(data.summary);
+        }
+        if (typeof data.unsavedMessageCount === 'number') {
+          setUnsavedCount(data.unsavedMessageCount);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to cascade-delete message from database:', err);
+    } finally {
+      setDeletingMsgId(null);
+    }
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -1304,12 +1512,11 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       useAvatarAsBackground: nextValue,
       avatarBackgroundFit: chubSettings.avatarBackgroundFit || 'contain',
     };
-    setChubSettings(updated);
-    localStorage.setItem('palace_chub_chat_settings', JSON.stringify(updated));
+    persistSessionCollaboration({ baseSettings: updated });
   };
 
   return (
-    <div className="relative flex h-[calc(100vh-4rem)] w-full flex-col bg-zinc-950 text-zinc-100 overflow-hidden">
+    <div className="relative flex h-[calc(var(--palace-vh,100vh)-6.25rem)] md:h-[calc(var(--palace-vh,100vh)-4rem)] w-full flex-col bg-zinc-950 text-zinc-100 overflow-hidden">
       {/* Background Stage Canvas */}
       {backdropImage && (
         <div
@@ -1345,12 +1552,12 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       )}
 
       {/* Top Header */}
-      <div className="relative z-10 flex h-16 shrink-0 items-center justify-between border-b border-zinc-800/80 bg-zinc-950/80 px-4 sm:px-6 backdrop-blur-xl">
+      <div className="relative z-10 flex h-16 shrink-0 items-center justify-between gap-2 border-b border-zinc-800/80 bg-zinc-950/80 px-3 sm:px-6 backdrop-blur-xl max-w-full overflow-hidden">
         {/* Left: Back & Character info */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0 shrink-0 max-w-[46%] sm:max-w-none">
           <button
             onClick={onBack}
-            className="flex h-9 w-9 items-center justify-center rounded-xl bg-zinc-800/80 text-zinc-300 hover:bg-zinc-700 hover:text-white transition-all"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-zinc-800/80 text-zinc-300 hover:bg-zinc-700 hover:text-white transition-all"
             aria-label="Back to Explore"
           >
             <ArrowLeft className="h-4 w-4" />
@@ -1358,25 +1565,25 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
           <button
             onClick={() => onViewCharacterDetails(character)}
-            className="flex items-center gap-2.5 text-left group"
+            className="flex items-center gap-2 sm:gap-2.5 text-left group min-w-0"
           >
-            <div className="relative h-10 w-10 shrink-0 overflow-hidden rounded-xl border border-purple-500/50 shadow-md">
+            <div className="relative h-9 w-9 sm:h-10 sm:w-10 shrink-0 overflow-hidden rounded-xl border border-purple-500/50 shadow-md">
               <img
                 src={character.avatar}
                 alt={character.name}
                 className="h-full w-full object-cover object-top"
               />
             </div>
-            <div>
-              <div className="flex items-center gap-1.5">
-                <span className="font-bold text-sm text-zinc-100 group-hover:text-purple-300 transition-colors">
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <span className="font-bold text-xs sm:text-sm text-zinc-100 group-hover:text-purple-300 transition-colors truncate">
                   {character.name}
                 </span>
-                <span className="rounded bg-zinc-800 px-1.5 py-0.2 text-[10px] font-bold text-zinc-400">
+                <span className="rounded bg-zinc-800 px-1.5 py-0.2 text-[10px] font-bold text-zinc-400 shrink-0">
                   {character.rating}
                 </span>
               </div>
-              <p className="text-[11px] text-zinc-400 line-clamp-1 max-w-[180px] sm:max-w-xs">
+              <p className="text-[11px] text-zinc-400 line-clamp-1 max-w-[140px] sm:max-w-xs">
                 {character.tagline}
               </p>
             </div>
@@ -1384,7 +1591,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         </div>
 
         {/* Right: AI Mode Controls, Presets, Tree, & New Chat */}
-        <div className="flex items-center gap-1.5 sm:gap-2">
+        <div className="flex items-center gap-1 sm:gap-1.5 min-w-0 flex-1 justify-start sm:justify-end overflow-x-auto no-scrollbar">
           {/* New Chat Button */}
           <button
             onClick={() => handleCreateNewSession()}
@@ -1588,8 +1795,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       </div>
 
       {/* Chat Long-Term Memory Summary Bar (Chub.ai Specification) */}
-      <div className="relative z-10 border-b border-purple-900/40 bg-zinc-950/95 px-4 sm:px-6 py-2.5 backdrop-blur-md shadow-sm">
-        <div className="flex items-center justify-between text-xs">
+      <div className="relative z-10 border-b border-purple-900/40 bg-zinc-950/95 px-3 sm:px-6 py-2.5 backdrop-blur-md shadow-sm max-w-full overflow-hidden">
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
           <button
             onClick={() => setIsSummaryExpanded(!isSummaryExpanded)}
             className="flex items-center gap-2 text-left group font-semibold text-zinc-300 hover:text-purple-300 transition-colors"
@@ -1869,19 +2076,28 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                       </div>
                     ) : (
                       <div className="space-y-2">
-                        {segments.map((seg, idx) =>
-                          seg.type === 'action' ? (
-                            <p
-                              key={idx}
-                              className="font-serif italic text-purple-300/95 leading-relaxed"
-                            >
-                              *{seg.text}*
-                            </p>
-                          ) : (
-                            <p key={idx} className="font-sans leading-relaxed text-zinc-100">
-                              {seg.text}
-                            </p>
+                        {segments.some((s) => s.text.trim()) ? (
+                          segments.map((seg, idx) =>
+                            seg.type === 'action' ? (
+                              <p
+                                key={idx}
+                                className="font-serif italic text-purple-300/95 leading-relaxed"
+                              >
+                                *{seg.text}*
+                              </p>
+                            ) : (
+                              <p key={idx} className="font-sans leading-relaxed text-zinc-100">
+                                {seg.text}
+                              </p>
+                            )
                           )
+                        ) : (
+                          <p className="font-sans leading-relaxed text-zinc-100">
+                            {ensureNonEmptyRoleplayReply(
+                              message.content,
+                              message.speakerName || character.name
+                            )}
+                          </p>
                         )}
                       </div>
                     )}
@@ -1937,8 +2153,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                     )}
                   </div>
 
-                  {/* Message Action Footer (Swipes, TTS, Copy) */}
-                  <div className="flex items-center gap-2 mt-1.5 px-1 text-zinc-400 text-xs">
+                  {/* Message Action Footer (Swipes, TTS, Edit, Delete, Copy — wraps cleanly on mobile) */}
+                  <div className="flex flex-wrap items-center gap-2 mt-1.5 px-1 text-zinc-400 text-xs">
                     {/* Swipes Controller (Chub / Janitor / SpicyChat signature) */}
                     {isCharacter && (
                       <div className="flex items-center gap-1 rounded-xl bg-zinc-900/90 border border-zinc-800 px-2 py-0.5">
@@ -2019,6 +2235,44 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                       </button>
                     )}
 
+                    {/* Delete Message & Wipe Subsequent Messages + AI Memory */}
+                    {(isUser || isSystem || msgIdx > 0) && (
+                      <button
+                        type="button"
+                        data-testid={`delete-message-btn-${message.id}`}
+                        disabled={deletingMsgId === message.id}
+                        onClick={() => handleDeleteMessage(message, msgIdx)}
+                        aria-label={
+                          confirmDeleteMsgId === message.id
+                            ? `Confirm delete message and ${messages.length - msgIdx - 1} following messages`
+                            : isUser
+                              ? 'Delete this message and all messages after it'
+                              : 'Delete this message and any following messages'
+                        }
+                        title={
+                          confirmDeleteMsgId === message.id
+                            ? 'Click again to remove this message, all messages after it (including system messages), and wipe them from AI memory'
+                            : 'Remove message & all messages after it (wipes from AI memory)'
+                        }
+                        className={`flex items-center gap-1 rounded-xl border px-2 py-0.5 transition-colors cursor-pointer ${
+                          confirmDeleteMsgId === message.id
+                            ? 'border-rose-500 bg-rose-600 text-white font-bold shadow-sm'
+                            : 'border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-rose-500/40 hover:text-rose-300'
+                        }`}
+                      >
+                        <Trash2 className="h-3 w-3" />
+                        <span className="text-[10px] font-semibold">
+                          {deletingMsgId === message.id
+                            ? 'Wiping...'
+                            : confirmDeleteMsgId === message.id
+                              ? messages.length - msgIdx > 1
+                                ? `Confirm Wipe (${messages.length - msgIdx})`
+                                : 'Confirm Delete'
+                              : 'Delete'}
+                        </span>
+                      </button>
+                    )}
+
                     {/* Copy text */}
                     <button
                       onClick={() => handleCopyMessage(message.id, message.content)}
@@ -2066,6 +2320,51 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       {/* Input Bar & Controls */}
       <div className="relative z-10 shrink-0 border-t border-zinc-800/80 bg-zinc-950/90 p-4 backdrop-blur-xl">
         <div className="mx-auto max-w-4xl space-y-3">
+          {externalFallbackNotice && (
+            <div
+              data-testid="external-fallback-notice"
+              className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-emerald-500/40 bg-emerald-950/35 px-3 py-2 text-[11px] text-emerald-200"
+            >
+              <span>{externalFallbackNotice}</span>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const nextSettings: ChubChatSettings = {
+                      ...chubSettings,
+                      apiProvider: 'palace_free',
+                      stagingUrl: '',
+                    };
+                    setChubSettings(nextSettings);
+                    try {
+                      localStorage.setItem('palace_chub_chat_settings', JSON.stringify(nextSettings));
+                      const rawPresets = localStorage.getItem('palace_generation_presets');
+                      if (rawPresets) {
+                        const parsed = JSON.parse(rawPresets);
+                        localStorage.setItem(
+                          'palace_generation_presets',
+                          JSON.stringify({ ...parsed, apiProvider: 'palace_free', chubApiUrl: '' })
+                        );
+                      }
+                    } catch {}
+                    setExternalFallbackNotice(null);
+                  }}
+                  className="rounded-lg border border-emerald-400/50 bg-emerald-600/30 px-2 py-0.5 font-bold text-emerald-100 hover:bg-emerald-600/50 cursor-pointer"
+                >
+                  Use Palace Free Default
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setExternalFallbackNotice(null)}
+                  className="text-zinc-400 hover:text-white cursor-pointer"
+                  aria-label="Dismiss notice"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Quick Scenario Starters Drawer & Persona Reaction Trigger */}
           <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-xs no-scrollbar">
             {/* Persona Action/Thought Trigger */}
@@ -2331,9 +2630,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         onClose={() => setIsChubSettingsOpen(false)}
         settings={chubSettings}
         onSave={(newSettings) => {
-          setChubSettings(newSettings);
-          localStorage.setItem('palace_chub_chat_settings', JSON.stringify(newSettings));
-          persistSessionCollaboration({});
+          persistSessionCollaboration({ baseSettings: newSettings });
         }}
       />
 

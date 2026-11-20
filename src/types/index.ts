@@ -200,6 +200,7 @@ export interface ChubChatSettings {
   promptNote: string;
   promptNoteDepth: number;
   preset: 'default' | 'storyteller' | 'strict_rp' | 'chaotic' | 'speed';
+  temperature?: number;
   repetitionPenalty: number;
   frequencyPenalty: number;
   presencePenalty: number;

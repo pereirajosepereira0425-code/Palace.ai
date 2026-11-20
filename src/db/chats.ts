@@ -1,8 +1,9 @@
 import { db } from './index.ts';
 import { chatSessions, chatMessages, characters } from './schema.ts';
-import { desc, eq, and, asc, sql } from 'drizzle-orm';
+import { desc, eq, and, asc, sql, inArray } from 'drizzle-orm';
 import { incrementChatCount } from './characters.ts';
 import { applyEditedSwipe } from '../utils/customVoiceUtils.ts';
+import { computeCascadeMessageDeletion } from '../utils/chatMemoryUtils.ts';
 
 export async function getOrCreateSession(characterUuid: string, userId: string = 'guest') {
   try {
@@ -369,9 +370,148 @@ export async function resetSessionMessages(sessionUuid: string, characterGreetin
         activeSwipeIndex: 0,
       })
       .returning();
+    await db
+      .update(chatSessions)
+      .set({
+        summary: '',
+        unsavedMessageCount: 0,
+        updatedAt: new Date(),
+      })
+      .where(eq(chatSessions.uuid, sessionUuid));
     return { success: true, message: inserted[0] || null };
   } catch (error) {
     console.error('resetSessionMessages failed:', error);
     throw new Error('Failed to reset messages', { cause: error });
+  }
+}
+
+function formatMessageRow(m: typeof chatMessages.$inferSelect) {
+  let swipesList: string[] = [];
+  try {
+    swipesList = JSON.parse(m.swipes || '[]');
+  } catch {
+    swipesList = [m.content];
+  }
+  if (!swipesList.length) swipesList = [m.content];
+
+  let sources = [];
+  try {
+    sources = JSON.parse(m.groundingSources || '[]');
+  } catch {
+    sources = [];
+  }
+
+  return {
+    id: m.id,
+    sessionId: m.sessionId,
+    sender: m.sender,
+    content: m.content,
+    thinkingProcess: m.thinkingProcess,
+    groundingSources: sources,
+    swipes: swipesList,
+    activeSwipeIndex: m.activeSwipeIndex || 0,
+    imageUrl: m.imageUrl,
+    poseName: m.poseName,
+    speakerCharacterUuid: m.speakerCharacterUuid,
+    speakerName: m.speakerName,
+    speakerAvatar: m.speakerAvatar,
+    modelUsed: m.modelUsed,
+    createdAt: m.createdAt,
+  };
+}
+
+/**
+ * Deletes a message and EVERY message after it (including user, character, and system messages)
+ * from PostgreSQL and wipes affected long-term summary memory from the session so the AI
+ * has zero memory of the deleted turns.
+ */
+export async function deleteMessagesFrom(params: {
+  sessionUuid: string;
+  messageId?: number | null;
+  afterMessageId?: number | null;
+}) {
+  try {
+    const sessRows = await db
+      .select()
+      .from(chatSessions)
+      .where(eq(chatSessions.uuid, params.sessionUuid))
+      .limit(1);
+    const session = sessRows[0];
+    if (!session) return null;
+
+    const allMessages = await db
+      .select()
+      .from(chatMessages)
+      .where(eq(chatMessages.sessionId, params.sessionUuid))
+      .orderBy(asc(chatMessages.createdAt), asc(chatMessages.id));
+
+    let effectiveTargetId: number | null = null;
+    if (typeof params.messageId === 'number' && Number.isFinite(params.messageId)) {
+      const exact = allMessages.find((m) => m.id === params.messageId);
+      if (exact) effectiveTargetId = exact.id;
+    }
+
+    if (
+      effectiveTargetId === null &&
+      typeof params.afterMessageId === 'number' &&
+      Number.isFinite(params.afterMessageId)
+    ) {
+      const afterIdx = allMessages.findIndex((m) => m.id === params.afterMessageId);
+      if (afterIdx >= 0 && afterIdx + 1 < allMessages.length) {
+        effectiveTargetId = allMessages[afterIdx + 1].id;
+      }
+    }
+
+    const cascade =
+      effectiveTargetId !== null
+        ? computeCascadeMessageDeletion({
+            messages: allMessages,
+            targetMessageId: effectiveTargetId,
+            summary: session.summary,
+            unsavedCount: session.unsavedMessageCount,
+          })
+        : {
+            found: false,
+            targetIndex: -1,
+            remainingMessages: allMessages,
+            deletedMessages: [],
+            deletedIds: [] as number[],
+            deletedCount: 0,
+            removedSystemCount: 0,
+            summary: session.summary || '',
+            unsavedCount: Math.max(0, Number(session.unsavedMessageCount || 0)),
+          };
+
+    if (cascade.deletedIds.length > 0) {
+      await db
+        .delete(chatMessages)
+        .where(
+          and(
+            eq(chatMessages.sessionId, params.sessionUuid),
+            inArray(chatMessages.id, cascade.deletedIds)
+          )
+        );
+
+      await db
+        .update(chatSessions)
+        .set({
+          summary: cascade.summary,
+          unsavedMessageCount: cascade.unsavedCount,
+          updatedAt: new Date(),
+        })
+        .where(eq(chatSessions.uuid, params.sessionUuid));
+    }
+
+    return {
+      remainingMessages: cascade.remainingMessages.map(formatMessageRow),
+      deletedIds: cascade.deletedIds,
+      deletedCount: cascade.deletedCount,
+      removedSystemCount: cascade.removedSystemCount,
+      summary: cascade.summary,
+      unsavedMessageCount: cascade.unsavedCount,
+    };
+  } catch (error) {
+    console.error('deleteMessagesFrom failed:', error);
+    throw new Error('Failed to delete messages', { cause: error });
   }
 }

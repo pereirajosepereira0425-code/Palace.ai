@@ -30,15 +30,21 @@ import {
 } from '../utils/chubOptions.ts';
 import {
   CHUB_CREATE_TOKEN_URL,
-  CHUB_SUBSCRIPTIONS_URL,
   getProviderApiKeyInfo,
 } from '../utils/promptBudget.ts';
 import {
   type ApiConnectionTestResult,
   fetchEndpointModels,
+  fetchFreePalaceApiKey,
   isChubUrlOrProvider,
   runSmartConnectionTest,
 } from '../utils/apiErrorUtils.ts';
+import {
+  CHUB_SETTINGS_STORAGE_KEY,
+  PRESETS_STORAGE_KEY,
+  PRESETS_UPDATED_EVENT,
+  extractPresetsFromSettings,
+} from '../utils/settingsSync.ts';
 
 export const DEFAULT_CHUB_SETTINGS: ChubChatSettings = {
   promptStructure: 'tavern_v2',
@@ -54,6 +60,7 @@ export const DEFAULT_CHUB_SETTINGS: ChubChatSettings = {
   promptNote: '',
   promptNoteDepth: 4,
   preset: 'default',
+  temperature: 0.85,
   repetitionPenalty: 1.15,
   frequencyPenalty: 0.2,
   presencePenalty: 0.2,
@@ -109,6 +116,7 @@ export const ChubSettingsModal: React.FC<ChubSettingsModalProps> = ({
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [testingConn, setTestingConn] = useState(false);
   const [fetchingModels, setFetchingModels] = useState(false);
+  const [fetchingFreeKey, setFetchingFreeKey] = useState(false);
   const [liveModels, setLiveModels] = useState<string[]>([]);
   const [testResult, setTestResult] = useState<ApiConnectionTestResult | null>(null);
   const [customVoices, setCustomVoices] = useState<CustomVoiceRecord[]>([]);
@@ -123,7 +131,7 @@ export const ChubSettingsModal: React.FC<ChubSettingsModalProps> = ({
       setTestResult(null);
       setLiveModels([]);
       try {
-        const rawPresets = localStorage.getItem('palace_generation_presets');
+        const rawPresets = localStorage.getItem(PRESETS_STORAGE_KEY);
         if (rawPresets) {
           const parsed = JSON.parse(rawPresets);
           setApiKeyInput(parsed.chubApiKey || '');
@@ -141,6 +149,36 @@ export const ChubSettingsModal: React.FC<ChubSettingsModalProps> = ({
   }, [isOpen, settings]);
 
   if (!isOpen) return null;
+
+  const handleFetchFreeKey = async () => {
+    setFetchingFreeKey(true);
+    setTestResult(null);
+    try {
+      const res = await fetchFreePalaceApiKey();
+      setApiKeyInput(res.key);
+      if (res.models.length > 0) {
+        setLiveModels(res.models);
+      }
+      setCurrent((prev) => ({
+        ...prev,
+        stagingUrl: isBuiltInFreeProvider(prev.apiProvider) ? prev.stagingUrl : res.endpoint,
+        model: prev.model || res.models[0] || 'claude-opus-5-5',
+      }));
+      setTestResult({
+        ok: true,
+        status: 200,
+        code: 'FREE_KEY_FETCHED',
+        endpoint: res.endpoint,
+        testedFrom: 'server',
+        resolvedModel: current.model || res.models[0] || 'claude-opus-5-5',
+        availableModels: res.models,
+        message: `${res.message} Key: ${res.key.slice(0, 22)}...`,
+        hint: 'Zero credit limits! Works with Claude Opus 5.5, Chub Mars, Soji, Asha, DeepSeek & Gemini.',
+      });
+    } finally {
+      setFetchingFreeKey(false);
+    }
+  };
 
   const handleFetchModels = async () => {
     setFetchingModels(true);
@@ -176,7 +214,7 @@ export const ChubSettingsModal: React.FC<ChubSettingsModalProps> = ({
             endpoint: res.modelsUrl,
             testedFrom: 'browser',
             message: `No models listed at ${res.modelsUrl}.`,
-            hint: 'Try picking one of the model-specific Chub Gateways above (Inference Soji, Mars Asha, Mars Soji, Mix /v1).',
+            hint: 'Click "🔑 Fetch Free API Key" or pick a gateway above.',
           }
         );
       }
@@ -253,26 +291,14 @@ export const ChubSettingsModal: React.FC<ChubSettingsModalProps> = ({
   };
 
   const handleSaveAndClose = () => {
-    // Sync API Key & provider back to palace_generation_presets
+    // Sync API Key & provider back to palace_generation_presets + storage + global listeners
     try {
-      const rawPresets = localStorage.getItem('palace_generation_presets');
+      const rawPresets = localStorage.getItem(PRESETS_STORAGE_KEY);
       const existingPresets = rawPresets ? JSON.parse(rawPresets) : {};
-      localStorage.setItem(
-        'palace_generation_presets',
-        JSON.stringify({
-          ...existingPresets,
-          apiProvider: current.apiProvider,
-          chubApiUrl: current.stagingUrl || existingPresets.chubApiUrl || 'https://mars.chub.ai/v1',
-          chubApiKey: apiKeyInput,
-          customModel: current.model,
-          promptStructure: current.promptStructure,
-          ttsApi: current.ttsApi,
-          customVoiceUuid: current.customVoiceUuid || '',
-          ttsEndpointUrl: current.ttsEndpointUrl || '',
-          ttsApiKey: current.ttsApiKey || '',
-          maxContextTokens: current.contextSize,
-        })
-      );
+      const nextPresets = extractPresetsFromSettings(existingPresets, current, apiKeyInput);
+      localStorage.setItem(PRESETS_STORAGE_KEY, JSON.stringify(nextPresets));
+      localStorage.setItem(CHUB_SETTINGS_STORAGE_KEY, JSON.stringify(current));
+      window.dispatchEvent(new CustomEvent(PRESETS_UPDATED_EVENT, { detail: nextPresets }));
     } catch {
       // ignore storage error
     }
@@ -401,6 +427,15 @@ export const ChubSettingsModal: React.FC<ChubSettingsModalProps> = ({
                       'Select the backend inference provider.'}
                   </p>
                   <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleFetchFreeKey}
+                      disabled={fetchingFreeKey}
+                      data-testid="chub-chat-fetch-free-key-btn"
+                      className="rounded-xl border border-emerald-400/60 bg-emerald-600/30 px-2.5 py-1 text-[11px] font-bold text-emerald-100 hover:bg-emerald-600/50 transition-all cursor-pointer disabled:opacity-50"
+                    >
+                      {fetchingFreeKey ? '⏳ Fetching...' : '🔑 Fetch Free API Key'}
+                    </button>
                     {!isBuiltInFreeProvider(current.apiProvider) && (
                       <button
                         type="button"
@@ -694,6 +729,25 @@ export const ChubSettingsModal: React.FC<ChubSettingsModalProps> = ({
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div>
                   <div className="flex justify-between text-xs font-bold text-zinc-300 mb-1">
+                    <span>Creativity (Temperature)</span>
+                    <span className="font-mono text-purple-400">
+                      {typeof current.temperature === 'number' ? current.temperature : 0.85}
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0.1"
+                    max="1.5"
+                    step="0.05"
+                    data-testid="chub-temperature-slider"
+                    value={typeof current.temperature === 'number' ? current.temperature : 0.85}
+                    onChange={(e) => setCurrent({ ...current, temperature: parseFloat(e.target.value) })}
+                    className="w-full accent-purple-500"
+                  />
+                </div>
+
+                <div>
+                  <div className="flex justify-between text-xs font-bold text-zinc-300 mb-1">
                     <span>Repetition Penalty</span>
                     <span className="font-mono text-purple-400">{current.repetitionPenalty}</span>
                   </div>
@@ -931,26 +985,24 @@ export const ChubSettingsModal: React.FC<ChubSettingsModalProps> = ({
                     rel="noopener noreferrer"
                     className="inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-purple-600 to-fuchsia-600 px-3.5 py-2 text-xs font-bold text-white shadow-md hover:from-purple-500 hover:to-fuchsia-500 transition-all"
                   >
-                    <span>🔑 Create Chub.ai Token</span>
+                    <span>🔑 Optional Chub.ai Token</span>
                     <ExternalLink className="h-3.5 w-3.5" />
                   </a>
-                  <a
-                    href={CHUB_SUBSCRIPTIONS_URL}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1.5 rounded-xl border border-fuchsia-500/40 bg-zinc-900/80 px-3 py-2 text-xs font-bold text-fuchsia-200 hover:bg-zinc-800 transition-all"
-                  >
-                    <span>🪐 Mars Subscription</span>
-                    <ExternalLink className="h-3.5 w-3.5" />
-                  </a>
+                  <span className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-500/40 bg-emerald-950/35 px-3 py-2 text-xs font-bold text-emerald-200">
+                    <span>∞ No Credit Limits · Free</span>
+                  </span>
                 </div>
               </div>
 
-              {isBuiltInFreeProvider(current.apiProvider) && (
+              {isBuiltInFreeProvider(current.apiProvider) ? (
                 <div className="rounded-2xl border border-emerald-500/40 bg-emerald-950/25 px-4 py-3 text-xs text-emerald-200 flex items-center justify-between gap-2">
                   <span>
-                    ✨ <strong>Palace Free API</strong> runs <strong>{current.model || 'Claude Opus 5.5'}</strong> &amp; all catalog models without requiring any paid API key.
+                    ✨ <strong>Palace Free API</strong> runs <strong>{current.model || 'Claude Opus 5.5'}</strong> &amp; all catalog models with zero credit limits and no subscription required.
                   </span>
+                </div>
+              ) : (
+                <div className="rounded-2xl border border-emerald-500/30 bg-emerald-950/20 px-4 py-2.5 text-[11px] text-emerald-200">
+                  ∞ <strong>Zero Credit Wall Guarantee:</strong> Even if your Chub.ai or external key hits a 429/402 credit limit, Palace.ai automatically continues chatting via the Unlimited Free Engine so nobody ever has to pay to talk with an AI.
                 </div>
               )}
 
@@ -970,6 +1022,13 @@ export const ChubSettingsModal: React.FC<ChubSettingsModalProps> = ({
                   {isChubUrlOrProvider(current.apiProvider, current.stagingUrl) && (
                     <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                       {[
+                        {
+                          label: 'Palace Free /v1',
+                          url:
+                            typeof window !== 'undefined'
+                              ? `${window.location.origin}/v1`
+                              : 'http://localhost:3000/v1',
+                        },
                         { label: 'Mars /v1', url: 'https://mars.chub.ai/v1' },
                         { label: 'Inference Soji', url: 'https://inference.chub.ai/soji/v1' },
                         { label: 'Mars Asha', url: 'https://mars.chub.ai/chub/asha/v1' },
@@ -1035,8 +1094,18 @@ export const ChubSettingsModal: React.FC<ChubSettingsModalProps> = ({
                 <div className="flex flex-wrap items-center gap-3">
                   <button
                     type="button"
+                    onClick={handleFetchFreeKey}
+                    disabled={fetchingFreeKey}
+                    data-testid="chub-staging-fetch-free-key-btn"
+                    className="rounded-xl border border-emerald-400/60 bg-emerald-600/30 px-4 py-2 text-xs font-bold text-emerald-100 hover:bg-emerald-600/50 disabled:opacity-50 cursor-pointer"
+                  >
+                    {fetchingFreeKey ? '⏳ Fetching Key...' : '🔑 Fetch Free API Key'}
+                  </button>
+                  <button
+                    type="button"
                     onClick={handleFetchModels}
                     disabled={fetchingModels || testingConn}
+                    data-testid="chub-fetch-live-models-btn"
                     className="rounded-xl border border-fuchsia-500/40 bg-fuchsia-600/20 px-4 py-2 text-xs font-bold text-fuchsia-200 hover:bg-fuchsia-600/40 disabled:opacity-50 cursor-pointer"
                   >
                     {fetchingModels ? 'Fetching Live Models...' : 'Fetch Live Models'}
