@@ -47,6 +47,32 @@ function decodeHtmlEntities(input: string): string {
 export function cleanRichHtmlToText(input: string): string {
   if (!input) return '';
   let text = input
+    .replace(/<img\b([^>]*)>/gi, (_m, attrs) => {
+      const srcMatch = attrs.match(/\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+      const altMatch = attrs.match(/\balt\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+      const src = (srcMatch?.[1] || srcMatch?.[2] || srcMatch?.[3] || '').trim();
+      const alt = (altMatch?.[1] || altMatch?.[2] || '').trim();
+      return src ? `\n![${alt}](${src})\n` : '';
+    });
+
+  for (let pass = 0; pass < 3; pass++) {
+    const before = text;
+    text = text.replace(/<font\b([^>]*)>([\s\S]*?)<\/font>/gi, (_m, attrs, inner) => {
+      const cMatch = attrs.match(/\bcolor\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+      const color = (cMatch?.[1] || cMatch?.[2] || cMatch?.[3] || '').trim();
+      return color && !/[;<>{}]/.test(color) ? `[color=${color}]${inner}[/color]` : inner;
+    });
+    text = text.replace(/<span\b([^>]*)>([\s\S]*?)<\/span>/gi, (_m, attrs, inner) => {
+      const sMatch = attrs.match(/\bstyle\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+      const styleStr = sMatch?.[1] || sMatch?.[2] || '';
+      const colorDecl = styleStr.match(/(?:^|;)\s*color\s*:\s*([^;]+)/i);
+      const color = colorDecl?.[1]?.trim();
+      return color && !/[;<>{}]/.test(color) ? `[color=${color}]${inner}[/color]` : inner;
+    });
+    if (text === before) break;
+  }
+
+  text = text
     .replace(/<\s*br\s*\/?>/gi, '\n')
     .replace(/<\/\s*(?:p|div|li|h[1-6]|blockquote)\s*>/gi, '\n\n')
     .replace(/<\s*li[^>]*>/gi, '• ')

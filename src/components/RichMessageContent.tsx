@@ -1,5 +1,9 @@
 import React, { useMemo } from 'react';
-import { formatRoleplaySegments, type RoleplaySegment } from '../utils/characterUtils.ts';
+import {
+  formatRoleplaySegments,
+  type InlineTextRun,
+  type RoleplaySegment,
+} from '../utils/characterUtils.ts';
 
 interface RichMessageContentProps {
   content: string;
@@ -8,6 +12,52 @@ interface RichMessageContentProps {
   textClassName?: string;
   actionClassName?: string;
   imageClassName?: string;
+}
+
+function renderInlineRuns(runs?: InlineTextRun[], plainFallback?: string): React.ReactNode {
+  if (!runs || runs.length === 0) {
+    return plainFallback ?? null;
+  }
+
+  return runs.map((run, i) => {
+    const s = run.style;
+    if (!s) {
+      return <React.Fragment key={i}>{run.text}</React.Fragment>;
+    }
+
+    const cssStyle: React.CSSProperties = {};
+    if (s.color) cssStyle.color = s.color;
+    if (s.backgroundColor) cssStyle.backgroundColor = s.backgroundColor;
+    if (s.background) cssStyle.background = s.background;
+    if (s.WebkitBackgroundClip) {
+      cssStyle.WebkitBackgroundClip = s.WebkitBackgroundClip;
+      cssStyle.backgroundClip = s.WebkitBackgroundClip;
+    }
+    if (s.WebkitTextFillColor) cssStyle.WebkitTextFillColor = s.WebkitTextFillColor;
+    if (s.textShadow) cssStyle.textShadow = s.textShadow;
+    if (s.bold) cssStyle.fontWeight = 700;
+    if (s.italic) cssStyle.fontStyle = 'italic';
+
+    const decorations: string[] = [];
+    if (s.underline) decorations.push('underline');
+    if (s.strike) decorations.push('line-through');
+    if (decorations.length > 0) cssStyle.textDecoration = decorations.join(' ');
+
+    if (s.mark) {
+      if (!cssStyle.backgroundColor && !cssStyle.background) {
+        cssStyle.backgroundColor = 'rgba(234, 179, 8, 0.25)';
+        if (!cssStyle.color) cssStyle.color = '#fde047';
+      }
+      cssStyle.padding = '1px 5px';
+      cssStyle.borderRadius = '4px';
+    }
+
+    return (
+      <span key={i} style={cssStyle}>
+        {run.text}
+      </span>
+    );
+  });
 }
 
 export const RichMessageContent: React.FC<RichMessageContentProps> = ({
@@ -75,7 +125,7 @@ export const RichMessageContent: React.FC<RichMessageContentProps> = ({
         if (seg.type === 'action') {
           return (
             <p key={idx} className={actionClassName}>
-              *{seg.text}*
+              *{renderInlineRuns(seg.runs, seg.text)}*
             </p>
           );
         }
@@ -86,7 +136,7 @@ export const RichMessageContent: React.FC<RichMessageContentProps> = ({
 
         return (
           <p key={idx} className={textClassName}>
-            {seg.text}
+            {renderInlineRuns(seg.runs, seg.text)}
           </p>
         );
       })}

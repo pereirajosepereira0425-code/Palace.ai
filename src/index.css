@@ -1,1 +1,17 @@
 @import "tailwindcss";
+
+.wiki-rendered-content em {
+  color: #d8b4fe;
+}
+
+.wiki-rendered-content [style*="color:"] em,
+.wiki-rendered-content [style*="color :"] em {
+  color: inherit;
+}
+
+.wiki-rendered-content mark {
+  background: rgba(234, 179, 8, 0.25);
+  color: #fde047;
+  padding: 2px 6px;
+  border-radius: 4px;
+}

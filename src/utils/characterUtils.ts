@@ -367,9 +367,29 @@ export function exportTavernCard(char: {
   };
 }
 
+export interface InlineTextStyle {
+  color?: string;
+  backgroundColor?: string;
+  background?: string;
+  WebkitBackgroundClip?: string;
+  WebkitTextFillColor?: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strike?: boolean;
+  mark?: boolean;
+  textShadow?: string;
+}
+
+export interface InlineTextRun {
+  text: string;
+  style?: InlineTextStyle;
+}
+
 export interface RoleplaySegment {
   type: 'action' | 'dialogue' | 'thought' | 'image';
   text: string;
+  runs?: InlineTextRun[];
   src?: string;
   alt?: string;
   href?: string;
@@ -386,58 +406,528 @@ export function isSafeMediaUrl(url: string): boolean {
   return false;
 }
 
+const DISALLOWED_CSS_RE = /(?:url\s*\(|expression\s*\(|javascript\s*:|vbscript\s*:|@import|-moz-binding|behavior\s*:|[;<>{}])/i;
+
+export function isSafeCssColor(rawValue: string): boolean {
+  const val = (rawValue || '').trim().replace(/\s*!important\s*$/i, '').trim();
+  if (!val || val.length > 260) return false;
+  if (DISALLOWED_CSS_RE.test(val)) return false;
+
+  if (/^#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(val)) return true;
+  if (/^[a-z]{3,24}$/i.test(val)) return true;
+  if (/^(?:rgb|rgba|hsl|hsla|hwb|lab|lch|oklab|oklch)\(\s*[-+0-9.%\s,/degturnrad]+\s*\)$/i.test(val)) {
+    return true;
+  }
+  if (/^(?:repeating-)?(?:linear|radial|conic)-gradient\(\s*[^;{}<>]+\)$/i.test(val)) {
+    return true;
+  }
+  return false;
+}
+
+function splitCssDeclarations(rawStyle: string): Array<[string, string]> {
+  const result: Array<[string, string]> = [];
+  if (!rawStyle) return result;
+  let current = '';
+  let parenDepth = 0;
+  for (let i = 0; i < rawStyle.length; i++) {
+    const ch = rawStyle[i];
+    if (ch === '(') parenDepth++;
+    else if (ch === ')' && parenDepth > 0) parenDepth--;
+    if (ch === ';' && parenDepth === 0) {
+      const colonIdx = current.indexOf(':');
+      if (colonIdx > 0) {
+        result.push([current.slice(0, colonIdx).trim().toLowerCase(), current.slice(colonIdx + 1).trim()]);
+      }
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  if (current.trim()) {
+    const colonIdx = current.indexOf(':');
+    if (colonIdx > 0) {
+      result.push([current.slice(0, colonIdx).trim().toLowerCase(), current.slice(colonIdx + 1).trim()]);
+    }
+  }
+  return result;
+}
+
+const SAFE_WIKI_STYLE_PROPS = new Set([
+  'color',
+  'background',
+  'background-color',
+  'background-clip',
+  '-webkit-background-clip',
+  '-webkit-text-fill-color',
+  'font-family',
+  'font-size',
+  'font-weight',
+  'font-style',
+  'text-decoration',
+  'text-align',
+  'text-shadow',
+  'text-transform',
+  'letter-spacing',
+  'line-height',
+  'padding',
+  'padding-left',
+  'padding-right',
+  'padding-top',
+  'padding-bottom',
+  'margin',
+  'margin-left',
+  'margin-right',
+  'margin-top',
+  'margin-bottom',
+  'border',
+  'border-left',
+  'border-right',
+  'border-top',
+  'border-bottom',
+  'border-radius',
+  'box-shadow',
+  'float',
+  'width',
+  'max-width',
+  'min-width',
+  'display',
+  'overflow',
+  'opacity',
+  'vertical-align',
+]);
+
+export function sanitizeCssStyleString(rawStyle: string): string {
+  const decls = splitCssDeclarations(rawStyle);
+  const safeParts: string[] = [];
+  for (const [prop, rawVal] of decls) {
+    if (!SAFE_WIKI_STYLE_PROPS.has(prop)) continue;
+    const val = rawVal.replace(/\s*!important\s*$/i, '').trim();
+    if (!val || /url\s*\(|expression\s*\(|javascript\s*:|-moz-binding|behavior\s*:|[<>{}]/i.test(val)) {
+      continue;
+    }
+    if (prop === 'color' || prop === 'background-color' || prop === '-webkit-text-fill-color') {
+      if (!isSafeCssColor(val)) continue;
+    } else if (prop === 'background') {
+      if (!isSafeCssColor(val)) continue;
+    } else if (prop === 'background-clip' || prop === '-webkit-background-clip') {
+      if (!/^(?:text|border-box|padding-box|content-box)$/i.test(val)) continue;
+    }
+    safeParts.push(`${prop}: ${val}`);
+  }
+  return safeParts.join('; ');
+}
+
+function sanitizeInlineStyleToTextStyle(rawStyle: string, base?: InlineTextStyle): InlineTextStyle {
+  const next: InlineTextStyle = { ...(base || {}) };
+  for (const [prop, rawVal] of splitCssDeclarations(rawStyle)) {
+    const val = rawVal.replace(/\s*!important\s*$/i, '').trim();
+    if (!val || /url\s*\(|expression\s*\(|javascript\s*:|[<>{}]/i.test(val)) continue;
+    if (prop === 'color' && isSafeCssColor(val)) {
+      next.color = val;
+    } else if (prop === 'background-color' && isSafeCssColor(val)) {
+      next.backgroundColor = val;
+    } else if (prop === 'background' && isSafeCssColor(val)) {
+      next.background = val;
+    } else if (prop === '-webkit-background-clip' || prop === 'background-clip') {
+      if (/^(?:text|border-box|padding-box|content-box)$/i.test(val)) {
+        next.WebkitBackgroundClip = val;
+      }
+    } else if (prop === '-webkit-text-fill-color' && isSafeCssColor(val)) {
+      next.WebkitTextFillColor = val;
+    } else if (prop === 'font-weight' && /^(?:bold|bolder|[6-9]00)$/i.test(val)) {
+      next.bold = true;
+    } else if (prop === 'font-style' && /^(?:italic|oblique)$/i.test(val)) {
+      next.italic = true;
+    } else if (prop === 'text-decoration') {
+      if (/underline/i.test(val)) next.underline = true;
+      if (/line-through/i.test(val)) next.strike = true;
+    } else if (prop === 'text-shadow' && val.length <= 120) {
+      next.textShadow = val;
+    }
+  }
+  return next;
+}
+
+const DECODABLE_SAFE_TAGS_RE =
+  /&lt;(\/?(?:img|span|font|mark|strong|b|em|i|u|del|s|sup|sub|br|div|p|blockquote)\b[\s\S]*?)&gt;/gi;
+
+function decodeEscapedRichTags(input: string): string {
+  if (!input || !input.includes('&lt;')) return input;
+  return input.replace(DECODABLE_SAFE_TAGS_RE, (_m, inner) => {
+    const decodedAttrs = inner
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;|&#x27;/gi, "'")
+      .replace(/&amp;/gi, '&');
+    if (/\bon[a-z]+\s*=/i.test(decodedAttrs) || /javascript\s*:/i.test(decodedAttrs)) {
+      const cleaned = decodedAttrs
+        .replace(/\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+        .replace(/javascript\s*:/gi, '');
+      return `<${cleaned}>`;
+    }
+    return `<${decodedAttrs}>`;
+  });
+}
+
+function findMatchingClosingTag(str: string, openTagEnd: number, tagName: string): number {
+  const openRe = new RegExp(`<${tagName}\\b[^>]*>`, 'gi');
+  const closeRe = new RegExp(`</${tagName}\\s*>`, 'gi');
+  let depth = 1;
+  let pos = openTagEnd;
+  while (pos < str.length) {
+    openRe.lastIndex = pos;
+    closeRe.lastIndex = pos;
+    const nextOpen = openRe.exec(str);
+    const nextClose = closeRe.exec(str);
+    if (!nextClose) return -1;
+    if (nextOpen && nextOpen.index < nextClose.index) {
+      depth++;
+      pos = nextOpen.index + nextOpen[0].length;
+    } else {
+      depth--;
+      if (depth === 0) return nextClose.index;
+      pos = nextClose.index + nextClose[0].length;
+    }
+  }
+  return -1;
+}
+
+function findMatchingBbClose(str: string, openTagEnd: number, tagName: string): number {
+  const openRe = new RegExp(`\\[${tagName}(?:=[^\\]]*)?\\]`, 'gi');
+  const closeRe = new RegExp(`\\[\\/${tagName}\\]`, 'gi');
+  let depth = 1;
+  let pos = openTagEnd;
+  while (pos < str.length) {
+    openRe.lastIndex = pos;
+    closeRe.lastIndex = pos;
+    const nextOpen = openRe.exec(str);
+    const nextClose = closeRe.exec(str);
+    if (!nextClose) return -1;
+    if (nextOpen && nextOpen.index < nextClose.index) {
+      depth++;
+      pos = nextOpen.index + nextOpen[0].length;
+    } else {
+      depth--;
+      if (depth === 0) return nextClose.index;
+      pos = nextClose.index + nextClose[0].length;
+    }
+  }
+  return -1;
+}
+
+function hasTextStyle(s?: InlineTextStyle): boolean {
+  if (!s) return false;
+  return Boolean(
+    s.color ||
+      s.backgroundColor ||
+      s.background ||
+      s.WebkitBackgroundClip ||
+      s.WebkitTextFillColor ||
+      s.bold ||
+      s.italic ||
+      s.underline ||
+      s.strike ||
+      s.mark ||
+      s.textShadow
+  );
+}
+
+function stylesEqual(a?: InlineTextStyle, b?: InlineTextStyle): boolean {
+  if (!hasTextStyle(a) && !hasTextStyle(b)) return true;
+  if (!a || !b) return false;
+  return (
+    a.color === b.color &&
+    a.backgroundColor === b.backgroundColor &&
+    a.background === b.background &&
+    a.WebkitBackgroundClip === b.WebkitBackgroundClip &&
+    a.WebkitTextFillColor === b.WebkitTextFillColor &&
+    Boolean(a.bold) === Boolean(b.bold) &&
+    Boolean(a.italic) === Boolean(b.italic) &&
+    Boolean(a.underline) === Boolean(b.underline) &&
+    Boolean(a.strike) === Boolean(b.strike) &&
+    Boolean(a.mark) === Boolean(b.mark) &&
+    a.textShadow === b.textShadow
+  );
+}
+
+function pushInlineRun(runs: InlineTextRun[], text: string, style?: InlineTextStyle): void {
+  if (!text) return;
+  const normalizedStyle = hasTextStyle(style) ? { ...style } : undefined;
+  const prev = runs[runs.length - 1];
+  if (prev && stylesEqual(prev.style, normalizedStyle)) {
+    prev.text += text;
+  } else {
+    runs.push(normalizedStyle ? { text, style: normalizedStyle } : { text });
+  }
+}
+
+export function parseInlineRuns(text: string, inheritedStyle?: InlineTextStyle): InlineTextRun[] {
+  if (!text) return [];
+  const runs: InlineTextRun[] = [];
+  const tokenRe =
+    /<(span|font|mark|strong|b|em|i|u|del|s)\b([^>]*)>|\[(color|bgcolor|highlight)\s*=\s*("[^"]+"|'[^']+'|[^\]\s]+)\s*\]|\{\{(?:color|colour|fg|highlight)\s*\|\s*([^|}]+)\s*\|\s*([\s\S]*?)\}\}|\*\*\*([^*]+)\*\*\*|\*\*([^*]+)\*\*|\*([^*\n]+)\*|~~([^~\n]+)~~|==([^=\n]+)==/gi;
+
+  let pos = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = tokenRe.exec(text)) !== null) {
+    const start = match.index;
+    if (start < pos) continue;
+
+    if (match[1]) {
+      // HTML inline tag: <span|font|mark|strong|b|em|i|u|del|s ...>
+      const tagName = match[1].toLowerCase();
+      const attrs = match[2] || '';
+      const openEnd = tokenRe.lastIndex;
+      const closeIdx = findMatchingClosingTag(text, openEnd, tagName);
+      if (start > pos) {
+        pushInlineRun(runs, text.slice(pos, start), inheritedStyle);
+      }
+
+      const nextStyle: InlineTextStyle = { ...(inheritedStyle || {}) };
+      const styleMatch = attrs.match(/\bstyle\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+      const rawInlineStyle = styleMatch?.[1] || styleMatch?.[2] || '';
+      if (rawInlineStyle) {
+        Object.assign(nextStyle, sanitizeInlineStyleToTextStyle(rawInlineStyle, nextStyle));
+      }
+
+      if (tagName === 'font') {
+        const colorMatch = attrs.match(/\bcolor\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+        const fontColor = (colorMatch?.[1] || colorMatch?.[2] || colorMatch?.[3] || '').trim();
+        if (isSafeCssColor(fontColor)) {
+          nextStyle.color = fontColor;
+        }
+      } else if (tagName === 'mark') {
+        nextStyle.mark = true;
+      } else if (tagName === 'strong' || tagName === 'b') {
+        nextStyle.bold = true;
+      } else if (tagName === 'em' || tagName === 'i') {
+        nextStyle.italic = true;
+      } else if (tagName === 'u') {
+        nextStyle.underline = true;
+      } else if (tagName === 'del' || tagName === 's') {
+        nextStyle.strike = true;
+      }
+
+      if (closeIdx === -1) {
+        const inner = text.slice(openEnd);
+        const innerRuns = parseInlineRuns(inner, nextStyle);
+        for (const r of innerRuns) pushInlineRun(runs, r.text, r.style);
+        pos = text.length;
+        break;
+      }
+
+      const inner = text.slice(openEnd, closeIdx);
+      const innerRuns = parseInlineRuns(inner, nextStyle);
+      for (const r of innerRuns) pushInlineRun(runs, r.text, r.style);
+
+      const closeTagLen = `</${tagName}>`.length;
+      const afterClose = text.indexOf('>', closeIdx) + 1;
+      pos = afterClose > closeIdx ? afterClose : closeIdx + closeTagLen;
+      tokenRe.lastIndex = pos;
+      continue;
+    }
+
+    if (match[3]) {
+      // BBCode [color=...], [bgcolor=...], [highlight=...]
+      const bbTag = match[3].toLowerCase();
+      const rawVal = (match[4] || '').replace(/^["']|["']$/g, '').trim();
+      const openEnd = tokenRe.lastIndex;
+      const closeIdx = findMatchingBbClose(text, openEnd, bbTag);
+      if (!isSafeCssColor(rawVal)) {
+        continue;
+      }
+      if (start > pos) {
+        pushInlineRun(runs, text.slice(pos, start), inheritedStyle);
+      }
+
+      const nextStyle: InlineTextStyle = { ...(inheritedStyle || {}) };
+      if (bbTag === 'color') {
+        nextStyle.color = rawVal;
+      } else {
+        nextStyle.backgroundColor = rawVal;
+        nextStyle.mark = true;
+      }
+
+      if (closeIdx === -1) {
+        const inner = text.slice(openEnd);
+        const innerRuns = parseInlineRuns(inner, nextStyle);
+        for (const r of innerRuns) pushInlineRun(runs, r.text, r.style);
+        pos = text.length;
+        break;
+      }
+
+      const inner = text.slice(openEnd, closeIdx);
+      const innerRuns = parseInlineRuns(inner, nextStyle);
+      for (const r of innerRuns) pushInlineRun(runs, r.text, r.style);
+
+      pos = closeIdx + `[/${bbTag}]`.length;
+      tokenRe.lastIndex = pos;
+      continue;
+    }
+
+    if (match[5] !== undefined) {
+      // Wiki template {{Color|color|text}} or {{Highlight|color|text}}
+      const fullRaw = match[0];
+      const rawColor = match[5].trim();
+      const inner = match[6] ?? '';
+      if (!isSafeCssColor(rawColor)) {
+        continue;
+      }
+      if (start > pos) {
+        pushInlineRun(runs, text.slice(pos, start), inheritedStyle);
+      }
+      const nextStyle: InlineTextStyle = { ...(inheritedStyle || {}) };
+      if (/^\{\{\s*highlight\b/i.test(fullRaw)) {
+        nextStyle.backgroundColor = rawColor;
+        nextStyle.mark = true;
+      } else {
+        nextStyle.color = rawColor;
+      }
+      const innerRuns = parseInlineRuns(inner, nextStyle);
+      for (const r of innerRuns) pushInlineRun(runs, r.text, r.style);
+      pos = tokenRe.lastIndex;
+      continue;
+    }
+
+    // Markdown inline styles: ***, **, *, ~~, ==
+    if (start > pos) {
+      pushInlineRun(runs, text.slice(pos, start), inheritedStyle);
+    }
+    const nextStyle: InlineTextStyle = { ...(inheritedStyle || {}) };
+    let inner = '';
+    if (match[7] !== undefined) {
+      nextStyle.bold = true;
+      nextStyle.italic = true;
+      inner = match[7];
+    } else if (match[8] !== undefined) {
+      nextStyle.bold = true;
+      inner = match[8];
+    } else if (match[9] !== undefined) {
+      nextStyle.italic = true;
+      inner = match[9];
+    } else if (match[10] !== undefined) {
+      nextStyle.strike = true;
+      inner = match[10];
+    } else if (match[11] !== undefined) {
+      nextStyle.mark = true;
+      inner = match[11];
+    }
+    const innerRuns = parseInlineRuns(inner, nextStyle);
+    for (const r of innerRuns) pushInlineRun(runs, r.text, r.style);
+    pos = tokenRe.lastIndex;
+  }
+
+  if (pos < text.length) {
+    pushInlineRun(runs, text.slice(pos), inheritedStyle);
+  }
+
+  return runs;
+}
+
+function runsToPlainText(runs: InlineTextRun[], fallback: string): string {
+  const joined = runs.map((r) => r.text).join('');
+  return joined || fallback;
+}
+
 function splitRoleplayTextChunk(
   text: string,
   state: { inDoubleQuotes: boolean },
   segments: RoleplaySegment[]
 ): void {
   if (!text) return;
-  const regex = /(\*[^*]+\*)/g;
-  const parts = text.split(regex);
 
-  for (const part of parts) {
-    if (!part) continue;
-    if (part.startsWith('*') && part.endsWith('*') && !state.inDoubleQuotes) {
+  // Temporarily protect inline color/formatting blocks so *action* splitting never cuts a tag in half
+  const protectedBlocks: string[] = [];
+  let masked = text;
+  const protectBlock = (pattern: RegExp) => {
+    masked = masked.replace(pattern, (m) => {
+      protectedBlocks.push(m);
+      return `%%INLINE_BLOCK_${protectedBlocks.length - 1}%%`;
+    });
+  };
+
+  protectBlock(/<(span|font|mark|strong|b|em|i|u|del|s)\b[^>]*>[\s\S]*?<\/\1>/gi);
+  protectBlock(/\[(color|bgcolor|highlight)\s*=[^\]]+\][\s\S]*?\[\/\1\]/gi);
+  protectBlock(/\{\{(?:color|colour|fg|highlight)\s*\|[^|}]+\|[\s\S]*?\}\}/gi);
+
+  const unmask = (s: string): string => {
+    let out = s;
+    for (let pass = 0; pass < 3 && out.includes('%%INLINE_BLOCK_'); pass++) {
+      out = out.replace(/%%INLINE_BLOCK_(\d+)%%/g, (_m, idx) => protectedBlocks[Number(idx)] || '');
+    }
+    return out;
+  };
+
+  const regex = /(\*[^*]+\*)/g;
+  const parts = masked.split(regex);
+
+  for (const rawPart of parts) {
+    if (!rawPart) continue;
+    const isOuterAction = rawPart.startsWith('*') && rawPart.endsWith('*') && !state.inDoubleQuotes;
+    const part = unmask(rawPart);
+
+    if (isOuterAction) {
+      const innerRaw = part.slice(1, -1);
+      const runs = parseInlineRuns(innerRaw, { italic: true });
       segments.push({
         type: 'action',
-        text: part.slice(1, -1),
+        text: runsToPlainText(runs, innerRaw),
+        runs,
       });
     } else {
-      const cleanPart = part.startsWith('*') && part.endsWith('*') ? part.slice(1, -1) : part;
+      const cleanPart = rawPart.startsWith('*') && rawPart.endsWith('*') ? part.slice(1, -1) : part;
       const quoteCount = (cleanPart.match(/"/g) || []).length;
       if (quoteCount % 2 === 1) {
         state.inDoubleQuotes = !state.inDoubleQuotes;
       }
 
+      const runs = parseInlineRuns(cleanPart);
+      const plain = runsToPlainText(runs, cleanPart);
       const prev = segments[segments.length - 1];
       if (prev && prev.type === 'dialogue') {
-        prev.text += cleanPart;
+        prev.text += plain;
+        const mergedRuns = [...(prev.runs || [])];
+        for (const r of runs) pushInlineRun(mergedRuns, r.text, r.style);
+        prev.runs = mergedRuns;
       } else {
         segments.push({
           type: 'dialogue',
-          text: cleanPart,
+          text: plain,
+          runs,
         });
       }
     }
   }
 }
 
+const BALANCED_MD_IMG_URL =
+  '(?:data:image\\/(?:[^\\s()]+|\\([^)\\s]*\\))+|(?:https?:\\/\\/|\\/)(?:[^\\s()]+|\\([^)\\s]*\\))+)';
+const BALANCED_MD_HREF_URL =
+  '(?:https?:\\/\\/|\\/)(?:[^\\s()]+|\\([^)\\s]*\\))+';
+const STANDALONE_IMG_URL =
+  '(?:https?:\\/\\/[^\\s<>()"\']+\\.(?:png|jpe?g|gif|webp|avif|svg)(?:\\/revision\\/[^\\s<>()"\']*)?(?:\\?[^\\s<>()"\']*)?(?:#[^\\s<>()"\']*)?|https?:\\/\\/pbs\\.twimg\\.com\\/media\\/[^\\s<>()"\']+\\?[^\\s<>()"\']*\\bformat=(?:png|jpe?g|webp)[^\\s<>()"\']*|https?:\\/\\/images\\.unsplash\\.com\\/photo-[^\\s<>()"\']+|https?:\\/\\/(?:media\\.discordapp\\.net|cdn\\.discordapp\\.com)\\/attachments\\/[^\\s<>()"\']+\\.(?:png|jpe?g|gif|webp|avif)(?:\\?[^\\s<>()"\']*)?)';
+
 /**
- * Splits text into roleplay action blocks (*action*), spoken dialogue, and embedded images
+ * Splits text into roleplay action blocks (*action*), styled/colored dialogue, and embedded images
  */
 export function formatRoleplaySegments(content: string): RoleplaySegment[] {
   if (!content) return [];
+  const normalizedContent = decodeEscapedRichTags(content)
+    .replace(/<script\b[\s\S]*?<\/script>/gi, '')
+    .replace(/\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
   const segments: RoleplaySegment[] = [];
   const state = { inDoubleQuotes: false };
 
   // Match clickable markdown image, markdown image, HTML <img>, BBCode [img], data:image URI, or standalone image URL
-  const imageTokenRegex =
-    /\[!\[([^\]]*)\]\(((?:data:image\/[^\s)]+|https?:\/\/[^\s)]+|\/[^\s)]+))(?:\s+"[^"]*")?\)\]\(((?:https?:\/\/|\/)[^\s)]+)\)|!\[([^\]]*)\]\(((?:data:image\/[^\s)]+|https?:\/\/[^\s)]+|\/[^\s)]+))(?:\s+"[^"]*")?\)|<img\b([^>]*)>|\[img\]((?:data:image\/|https?:\/\/|\/)[^\[]+?)\[\/img\]|(data:image\/(?:png|jpeg|jpg|gif|webp|avif|svg\+xml|bmp);base64,[A-Za-z0-9+/=]+)|((?:^|(?<=[\s\n]))https?:\/\/[^\s<>()"']+\.(?:png|jpe?g|gif|webp|avif|svg)(?:\?[^\s<>()"']*)?(?:#[^\s<>()"']*)?)/gi;
+  const imageTokenRegex = new RegExp(
+    `\\[!\\[([^\\]]*)\\]\\((${BALANCED_MD_IMG_URL})(?:\\s+"[^"]*")?\\)\\]\\((${BALANCED_MD_HREF_URL})\\)|!\\[([^\\]]*)\\]\\((${BALANCED_MD_IMG_URL})(?:\\s+"[^"]*")?\\)|<img\\b([^>]*)>|\\[img\\]((?:data:image\\/|https?:\\/\\/|\\/)[^\\[]+?)\\[\\/img\\]|(data:image\\/(?:png|jpeg|jpg|gif|webp|avif|svg\\+xml|bmp);base64,[A-Za-z0-9+/=]+)|((?:^|(?<=[\\s\\n<]))${STANDALONE_IMG_URL})`,
+    'gi'
+  );
 
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
-  while ((match = imageTokenRegex.exec(content)) !== null) {
+  while ((match = imageTokenRegex.exec(normalizedContent)) !== null) {
     const matchStart = match.index;
     const matchEnd = imageTokenRegex.lastIndex;
 
@@ -446,29 +936,23 @@ export function formatRoleplaySegments(content: string): RoleplaySegment[] {
     let href: string | undefined;
 
     if (match[2]) {
-      // [![alt](imgUrl)](href)
       alt = (match[1] || '').trim();
       src = match[2].trim();
       href = match[3]?.trim();
     } else if (match[5]) {
-      // ![alt](url)
       alt = (match[4] || '').trim();
       src = match[5].trim();
     } else if (match[6] !== undefined) {
-      // <img ...>
       const attrs = match[6];
       const srcMatch = attrs.match(/\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
       const altMatch = attrs.match(/\balt\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
       src = (srcMatch?.[1] || srcMatch?.[2] || srcMatch?.[3] || '').trim();
       alt = (altMatch?.[1] || altMatch?.[2] || '').trim();
     } else if (match[7]) {
-      // [img]url[/img]
       src = match[7].trim();
     } else if (match[8]) {
-      // Bare data:image/... URI
       src = match[8].trim();
     } else if (match[9]) {
-      // Standalone image URL
       src = match[9].trim();
     }
 
@@ -477,7 +961,7 @@ export function formatRoleplaySegments(content: string): RoleplaySegment[] {
     }
 
     if (matchStart > lastIndex) {
-      splitRoleplayTextChunk(content.slice(lastIndex, matchStart), state, segments);
+      splitRoleplayTextChunk(normalizedContent.slice(lastIndex, matchStart), state, segments);
     }
 
     segments.push({
@@ -491,8 +975,8 @@ export function formatRoleplaySegments(content: string): RoleplaySegment[] {
     lastIndex = matchEnd;
   }
 
-  if (lastIndex < content.length) {
-    splitRoleplayTextChunk(content.slice(lastIndex), state, segments);
+  if (lastIndex < normalizedContent.length) {
+    splitRoleplayTextChunk(normalizedContent.slice(lastIndex), state, segments);
   }
 
   return segments;
@@ -623,17 +1107,86 @@ function buildResponsiveWikiImg(src: string, alt: string = '', width?: string): 
   return `<img src="${safeSrc}" alt="${safeAlt}" referrerpolicy="no-referrer" loading="lazy" style="${widthCss}max-width: 100%; max-height: 440px; height: auto; object-fit: contain; border-radius: 12px; margin: 8px 0; display: block; box-shadow: 0 4px 14px rgba(0,0,0,0.4);" />`;
 }
 
+function splitWikiCellAttrsAndText(rawCell: string): { attrs: string; content: string } {
+  let inQuotes: '"' | "'" | null = null;
+  let tagDepth = 0;
+  let bracketDepth = 0;
+  for (let i = 0; i < rawCell.length; i++) {
+    const ch = rawCell[i];
+    if (inQuotes) {
+      if (ch === inQuotes) inQuotes = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      inQuotes = ch;
+    } else if (ch === '<') {
+      tagDepth++;
+    } else if (ch === '>' && tagDepth > 0) {
+      tagDepth--;
+    } else if (ch === '[' && rawCell[i + 1] === '[') {
+      bracketDepth++;
+      i++;
+    } else if (ch === ']' && rawCell[i + 1] === ']' && bracketDepth > 0) {
+      bracketDepth--;
+      i++;
+    } else if (ch === '|' && rawCell[i + 1] !== '|' && tagDepth === 0 && bracketDepth === 0) {
+      const left = rawCell.slice(0, i).trim();
+      const right = rawCell.slice(i + 1).trim();
+      if (/\b(?:style|colspan|rowspan|align|valign|class|width|bgcolor|color)\s*=/i.test(left)) {
+        return { attrs: left, content: right };
+      }
+      break;
+    }
+  }
+  return { attrs: '', content: rawCell.trim() };
+}
+
+function extractSafeCellAttrs(attrString: string): {
+  colspan: string;
+  rowspan: string;
+  style: string;
+} {
+  if (!attrString) return { colspan: '', rowspan: '', style: '' };
+  const colspanMatch = attrString.match(/\bcolspan\s*=\s*(?:"(\d+)"|'(\d+)'|(\d+))/i);
+  const rowspanMatch = attrString.match(/\browspan\s*=\s*(?:"(\d+)"|'(\d+)'|(\d+))/i);
+  const styleMatch = attrString.match(/\bstyle\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+  const alignMatch = attrString.match(/\balign\s*=\s*(?:"(left|center|right)"|'(left|center|right)'|(left|center|right))/i);
+  const bgcolorMatch = attrString.match(/\bbgcolor\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s]+))/i);
+
+  let style = sanitizeCssStyleString(styleMatch?.[1] || styleMatch?.[2] || '');
+  const align = alignMatch?.[1] || alignMatch?.[2] || alignMatch?.[3] || '';
+  if (align && !/\btext-align\s*:/i.test(style)) {
+    style = style ? `${style}; text-align: ${align}` : `text-align: ${align}`;
+  }
+  const bgcolor = (bgcolorMatch?.[1] || bgcolorMatch?.[2] || bgcolorMatch?.[3] || '').trim();
+  if (bgcolor && isSafeCssColor(bgcolor) && !/\bbackground(?:-color)?\s*:/i.test(style)) {
+    style = style ? `${style}; background-color: ${bgcolor}` : `background-color: ${bgcolor}`;
+  }
+
+  return {
+    colspan: colspanMatch?.[1] || colspanMatch?.[2] || colspanMatch?.[3] || '',
+    rowspan: rowspanMatch?.[1] || rowspanMatch?.[2] || rowspanMatch?.[3] || '',
+    style,
+  };
+}
+
 /**
- * Converts Fandom Wikia / Miraheze / MediaWiki / Markdown markup & embedded images into clean safe styled HTML
+ * Converts Fandom Wikia / Miraheze / MediaWiki / Markdown markup, inline colors, & embedded images into clean safe styled HTML
  */
 export function renderWikiMarkup(text: string, characterName: string = 'Character'): string {
   if (!text) return '';
-  let html = text;
+  let html = decodeEscapedRichTags(text);
 
   // Strip dangerous script tags / inline JS event handlers / javascript: URLs
   html = html.replace(/<script\b[\s\S]*?<\/script>/gi, '');
   html = html.replace(/\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
   html = html.replace(/javascript\s*:/gi, '');
+
+  // Sanitize inline style="..." attributes on existing HTML tags to prevent CSS injection
+  html = html.replace(/\bstyle\s*=\s*("([^"]*)"|'([^']*)')/gi, (_m, _q, dq, sq) => {
+    const safe = sanitizeCssStyleString(dq ?? sq ?? '');
+    return safe ? `style="${escapeHtmlAttr(safe)}"` : '';
+  });
 
   // Protect <nowiki> content temporarily
   const nowikis: string[] = [];
@@ -641,6 +1194,55 @@ export function renderWikiMarkup(text: string, characterName: string = 'Characte
     nowikis.push(content);
     return `%%NOWIKI_${nowikis.length - 1}%%`;
   });
+
+  // Normalize legacy <font color="..."> tags into safe <span style="color: ..."> (multiple passes for nested)
+  for (let pass = 0; pass < 4 && /<font\b/i.test(html); pass++) {
+    html = html.replace(/<font\b([^>]*)>([\s\S]*?)<\/font>/gi, (_m, attrs, inner) => {
+      const colorMatch = attrs.match(/\bcolor\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+      const styleMatch = attrs.match(/\bstyle\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+      const rawColor = (colorMatch?.[1] || colorMatch?.[2] || colorMatch?.[3] || '').trim();
+      let safeStyle = sanitizeCssStyleString(styleMatch?.[1] || styleMatch?.[2] || '');
+      if (isSafeCssColor(rawColor)) {
+        safeStyle = `color: ${rawColor}${safeStyle ? `; ${safeStyle}` : ''}`;
+      }
+      return safeStyle ? `<span style="${escapeHtmlAttr(safeStyle)}">${inner}</span>` : inner;
+    });
+  }
+
+  // Convert BBCode [color=...], [bgcolor=...], [highlight=...] & Wiki {{Color|...}} templates into styled spans
+  for (let pass = 0; pass < 4; pass++) {
+    const before = html;
+    html = html.replace(
+      /\[color\s*=\s*("[^"]+"|'[^']+'|[^\]\s]+)\s*\]([\s\S]*?)\[\/color\]/gi,
+      (_m, rawColor, inner) => {
+        const cleanColor = String(rawColor).replace(/^["']|["']$/g, '').trim();
+        return isSafeCssColor(cleanColor)
+          ? `<span style="color: ${escapeHtmlAttr(cleanColor)};">${inner}</span>`
+          : inner;
+      }
+    );
+    html = html.replace(
+      /\[(?:bgcolor|highlight)\s*=\s*("[^"]+"|'[^']+'|[^\]\s]+)\s*\]([\s\S]*?)\[\/(?:bgcolor|highlight)\]/gi,
+      (_m, rawColor, inner) => {
+        const cleanColor = String(rawColor).replace(/^["']|["']$/g, '').trim();
+        return isSafeCssColor(cleanColor)
+          ? `<span style="background-color: ${escapeHtmlAttr(cleanColor)}; padding: 1px 5px; border-radius: 4px;">${inner}</span>`
+          : inner;
+      }
+    );
+    html = html.replace(
+      /\{\{(color|colour|fg|highlight)\s*\|\s*([^|}]+)\s*\|\s*([\s\S]*?)\}\}/gi,
+      (_m, tmpl, rawColor, inner) => {
+        const cleanColor = String(rawColor).trim();
+        if (!isSafeCssColor(cleanColor)) return inner;
+        if (/highlight/i.test(tmpl)) {
+          return `<span style="background-color: ${escapeHtmlAttr(cleanColor)}; padding: 1px 5px; border-radius: 4px;">${inner}</span>`;
+        }
+        return `<span style="color: ${escapeHtmlAttr(cleanColor)};">${inner}</span>`;
+      }
+    );
+    if (html === before) break;
+  }
 
   // Protect media blocks (images, galleries, audio, video) BEFORE italic/link/linebreak transforms
   const mediaBlocks: string[] = [];
@@ -692,7 +1294,10 @@ export function renderWikiMarkup(text: string, characterName: string = 'Characte
 
   // Clickable Markdown Images: [![alt](imgUrl)](linkUrl)
   html = html.replace(
-    /\[!\[([^\]]*)\]\(((?:data:image\/[^\s)]+|https?:\/\/[^\s)]+|\/[^\s)]+))(?:\s+"[^"]*")?\)\]\(((?:https?:\/\/|\/)[^\s)]+)\)/gi,
+    new RegExp(
+      `\\[!\\[([^\\]]*)\\]\\((${BALANCED_MD_IMG_URL})(?:\\s+"[^"]*")?\\)\\]\\((${BALANCED_MD_HREF_URL})\\)`,
+      'gi'
+    ),
     (_m, alt, imgSrc, href) => {
       if (!isSafeMediaUrl(imgSrc)) return _m;
       return stashMedia(
@@ -703,7 +1308,7 @@ export function renderWikiMarkup(text: string, characterName: string = 'Characte
 
   // Markdown Images: ![alt](imgUrl)
   html = html.replace(
-    /!\[([^\]]*)\]\(((?:data:image\/[^\s)]+|https?:\/\/[^\s)]+|\/[^\s)]+))(?:\s+"[^"]*")?\)/gi,
+    new RegExp(`!\\[([^\\]]*)\\]\\((${BALANCED_MD_IMG_URL})(?:\\s+"[^"]*")?\\)`, 'gi'),
     (_m, alt, imgSrc) => {
       if (!isSafeMediaUrl(imgSrc)) return _m;
       return stashMedia(buildResponsiveWikiImg(imgSrc, alt));
@@ -738,7 +1343,10 @@ export function renderWikiMarkup(text: string, characterName: string = 'Characte
 
   // Standalone image URLs or bare data:image/... URIs on their own line
   html = html.replace(
-    /(^|\n)[ \t]*((?:data:image\/(?:png|jpeg|jpg|gif|webp|avif|svg\+xml|bmp);base64,[A-Za-z0-9+/=]+)|(?:https?:\/\/[^\s<>()"']+\.(?:png|jpe?g|gif|webp|avif|svg)(?:\?[^\s<>()"']*)?(?:#[^\s<>()"']*)?))[ \t]*(?=\n|$)/gi,
+    new RegExp(
+      `(^|\\n)[ \\t]*((?:data:image\\/(?:png|jpeg|jpg|gif|webp|avif|svg\\+xml|bmp);base64,[A-Za-z0-9+/=]+)|${STANDALONE_IMG_URL})[ \\t]*(?=\\n|$)`,
+      'gi'
+    ),
     (_m, lead, imgSrc) => {
       if (!isSafeMediaUrl(imgSrc)) return _m;
       return `${lead}${stashMedia(buildResponsiveWikiImg(imgSrc, 'Image'))}`;
@@ -791,17 +1399,27 @@ export function renderWikiMarkup(text: string, characterName: string = 'Characte
   // References: <ref>...</ref>
   html = html.replace(/<ref>([\s\S]*?)<\/ref>/gi, '<sup><span style="color: #c084fc; font-weight: bold; font-size: 10px; background: rgba(168,85,247,0.15); padding: 0 4px; border-radius: 3px; cursor: help;" title="$1">[ref]</span></sup>');
 
-  // Bold & Italic
+  // Protect HTML opening/closing tags so bold/italic/highlight transforms never corrupt attributes like style="..."
+  const htmlTagStash: string[] = [];
+  html = html.replace(/<\/?[a-z][a-z0-9]*(?:\s+[^<>]*)?\/?>/gi, (tag) => {
+    htmlTagStash.push(tag);
+    return `%%HTAG_${htmlTagStash.length - 1}%%`;
+  });
+
+  // Bold & Italic (using <em> without hardcoded color so parent colors inherit cleanly; CSS colors default em)
   html = html.replace(/\*\*\*([^*]+)\*\*\*/g, '<strong><em>$1</em></strong>');
   html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   html = html.replace(/'''''([^']+)'''''/g, '<strong><em>$1</em></strong>');
   html = html.replace(/'''([^']+)'''/g, '<strong>$1</strong>');
-  html = html.replace(/\*([^*]+)\*/g, '<em style="color: #d8b4fe;">$1</em>');
-  html = html.replace(/''([^']+)''/g, '<em style="color: #d8b4fe;">$1</em>');
+  html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  html = html.replace(/''([^']+)''/g, '<em>$1</em>');
 
   // Strikethrough & Highlight
   html = html.replace(/~~([^~]+)~~/g, '<del style="opacity: 0.6;">$1</del>');
   html = html.replace(/==([^=]+)==/g, '<mark style="background: rgba(234, 179, 8, 0.25); color: #fde047; padding: 2px 6px; border-radius: 4px;">$1</mark>');
+
+  // Restore stashed HTML tags
+  html = html.replace(/%%HTAG_(\d+)%%/g, (_m, idx) => htmlTagStash[Number(idx)] || '');
 
   // Blockquotes
   html = html.replace(/^> (.*$)/gim, '<blockquote style="border-left: 3px solid #c084fc; padding-left: 12px; margin: 10px 0; color: #e9d5ff; font-style: italic; background: rgba(168,85,247,0.06); padding: 8px 12px; border-radius: 0 8px 8px 0;">$1</blockquote>');
@@ -811,39 +1429,70 @@ export function renderWikiMarkup(text: string, characterName: string = 'Characte
   html = html.replace(/\{\{char\}\}/gi, `<span style="color: #a855f7; font-weight: bold; background: rgba(168,85,247,0.15); padding: 1px 5px; border-radius: 4px;">${characterName}</span>`);
   html = html.replace(/<START>/gi, '<div style="margin: 12px 0; padding: 4px 10px; background: rgba(168, 85, 247, 0.2); border-left: 3px solid #a855f7; font-family: monospace; font-size: 11px; color: #d8b4fe; border-radius: 0 6px 6px 0;">&lt;START OF DIALOGUE&gt;</div>');
 
-  // Wikitables & Fandom Infoboxes
+  // Wikitables & Fandom Infoboxes (preserving table, row |- style="...", and cell | style="..." | colors)
   if (html.includes('{|')) {
-    html = html.replace(/\{\|([\s\S]*?)\|\}/g, (_match, tableContent) => {
-      const parts = tableContent.split('|-');
-      const rowParts = parts.length > 1 ? parts.slice(1) : parts;
+    html = html.replace(/\{\|([^\n]*)\n([\s\S]*?)\|\}/g, (_match, tableAttrLine, tableContent) => {
+      const tableAttrInfo = extractSafeCellAttrs(tableAttrLine || '');
+      const defaultTableStyle =
+        'width: 100%; border-collapse: collapse; margin: 12px 0; background: rgba(24, 24, 27, 0.95); border: 1px solid rgba(168, 85, 247, 0.4); border-radius: 12px; overflow: hidden; font-size: 12px;';
+      const tableStyle = tableAttrInfo.style
+        ? `border-collapse: collapse; overflow: hidden; ${tableAttrInfo.style}`
+        : defaultTableStyle;
 
-      let tableHtml = '<table style="width: 100%; border-collapse: collapse; margin: 12px 0; background: rgba(24, 24, 27, 0.95); border: 1px solid rgba(168, 85, 247, 0.4); border-radius: 12px; overflow: hidden; font-size: 12px;">';
-      for (const row of rowParts) {
-        const trimmed = row.trim();
+      const rowBlocks = tableContent.split(/^\s*\|-/m);
+      let tableHtml = `<table style="${escapeHtmlAttr(tableStyle)}">`;
+
+      for (const rawRow of rowBlocks) {
+        const trimmed = rawRow.trim();
         if (!trimmed) continue;
-        tableHtml += '<tr>';
-        const lines = trimmed.split('\n');
-        for (const line of lines) {
-          const lTrim = line.trim();
-          if (!lTrim) continue;
+
+        const firstNewline = rawRow.indexOf('\n');
+        let rowStyle = '';
+        let rowBody = rawRow;
+        if (firstNewline !== -1) {
+          const firstLine = rawRow.slice(0, firstNewline).trim();
+          if (firstLine && !firstLine.startsWith('!') && !firstLine.startsWith('|')) {
+            rowStyle = extractSafeCellAttrs(firstLine).style;
+            rowBody = rawRow.slice(firstNewline + 1);
+          }
+        } else if (!trimmed.startsWith('!') && !trimmed.startsWith('|')) {
+          continue;
+        }
+
+        const lines = rowBody.split('\n').map((l: string) => l.trim()).filter(Boolean);
+        if (lines.length === 0) continue;
+
+        tableHtml += rowStyle ? `<tr style="${escapeHtmlAttr(rowStyle)}">` : '<tr>';
+        for (const lTrim of lines) {
           if (lTrim.startsWith('!')) {
             const cellContent = lTrim.replace(/^!+/, '').trim();
-            if (cellContent.includes('colspan')) {
-              const [colInfo, ...titleParts] = cellContent.split('|');
-              const colspan = colInfo.replace(/\D/g, '') || '2';
-              const text = titleParts.join('|').trim();
-              tableHtml += `<th colspan="${colspan}" style="background: linear-gradient(135deg, rgba(168,85,247,0.4), rgba(219,39,119,0.3)); color: #ffffff; text-align: center; font-weight: bold; padding: 8px 10px; font-size: 13px;">${text}</th>`;
-            } else {
-              const cells = cellContent.split('!!');
-              for (const c of cells) {
-                tableHtml += `<th style="background: rgba(168,85,247,0.2); color: #e9d5ff; font-weight: bold; padding: 6px 10px; text-align: left;">${c.trim()}</th>`;
-              }
+            const cells = cellContent.split('!!');
+            for (const c of cells) {
+              const { attrs, content } = splitWikiCellAttrsAndText(c);
+              const parsed = extractSafeCellAttrs(attrs);
+              const colspanAttr = parsed.colspan ? ` colspan="${parsed.colspan}"` : '';
+              const rowspanAttr = parsed.rowspan ? ` rowspan="${parsed.rowspan}"` : '';
+              const baseHeaderStyle = parsed.colspan
+                ? 'background: linear-gradient(135deg, rgba(168,85,247,0.4), rgba(219,39,119,0.3)); color: #ffffff; text-align: center; font-weight: bold; padding: 8px 10px; font-size: 13px;'
+                : 'background: rgba(168,85,247,0.2); color: #e9d5ff; font-weight: bold; padding: 6px 10px; text-align: left;';
+              const thStyle = parsed.style
+                ? `padding: 6px 10px; font-weight: bold; ${parsed.style}`
+                : rowStyle
+                ? 'padding: 8px 10px; font-weight: bold;'
+                : baseHeaderStyle;
+              tableHtml += `<th${colspanAttr}${rowspanAttr} style="${escapeHtmlAttr(thStyle)}">${content}</th>`;
             }
           } else if (lTrim.startsWith('|')) {
             const rowContent = lTrim.replace(/^\|+/, '').trim();
             const cells = rowContent.split('||');
             for (const c of cells) {
-              tableHtml += `<td style="padding: 6px 10px; border-bottom: 1px solid rgba(63,63,70,0.5);">${c.trim()}</td>`;
+              const { attrs, content } = splitWikiCellAttrsAndText(c);
+              const parsed = extractSafeCellAttrs(attrs);
+              const colspanAttr = parsed.colspan ? ` colspan="${parsed.colspan}"` : '';
+              const rowspanAttr = parsed.rowspan ? ` rowspan="${parsed.rowspan}"` : '';
+              const baseTdStyle = 'padding: 6px 10px; border-bottom: 1px solid rgba(63,63,70,0.5);';
+              const tdStyle = parsed.style ? `${baseTdStyle} ${parsed.style}` : baseTdStyle;
+              tableHtml += `<td${colspanAttr}${rowspanAttr} style="${escapeHtmlAttr(tdStyle)}">${content}</td>`;
             }
           }
         }
@@ -865,6 +1514,9 @@ export function renderWikiMarkup(text: string, characterName: string = 'Characte
     .map((p) => {
       const trimmed = p.trim();
       if (/^%%MEDIA_\d+%%$/.test(trimmed)) {
+        return trimmed;
+      }
+      if (/^<(?:table|div|h[1-6]|blockquote|hr)\b/i.test(trimmed)) {
         return trimmed;
       }
       return `<p style="margin-bottom: 8px; line-height: 1.6;">${p.replace(/\n/g, '<br/>')}</p>`;

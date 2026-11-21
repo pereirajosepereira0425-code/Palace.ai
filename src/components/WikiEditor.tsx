@@ -537,14 +537,14 @@ File:Audio_Waveform.png|Distorted vocal frequencies
             type="button"
             onClick={() => setShowColorMenu(!showColorMenu)}
             className="flex items-center gap-1 rounded-lg p-1.5 text-zinc-300 hover:bg-zinc-800 hover:text-white transition-colors"
-            title="Text Color"
+            title="Text & Highlight Color"
           >
             <Palette className="h-3.5 w-3.5 text-purple-400" />
             <span className="text-[10px] hidden sm:inline">Color</span>
           </button>
 
           {showColorMenu && (
-            <div className="absolute left-0 top-full mt-1 z-30 flex flex-col gap-1 rounded-xl border border-zinc-800 bg-zinc-950 p-2 shadow-2xl min-w-[140px]">
+            <div className="absolute left-0 top-full mt-1 z-30 flex flex-col gap-1 rounded-xl border border-zinc-800 bg-zinc-950 p-2 shadow-2xl min-w-[175px]">
               {COLOR_OPTIONS.map((c) => (
                 <button
                   key={c.name}
@@ -559,6 +559,28 @@ File:Audio_Waveform.png|Distorted vocal frequencies
                   <span className={c.class || 'text-zinc-200'}>{c.name}</span>
                 </button>
               ))}
+              <div className="border-t border-zinc-800 my-1 pt-1.5 px-1 space-y-1.5">
+                <label className="flex items-center justify-between gap-2 text-[11px] text-zinc-300 cursor-pointer">
+                  <span>Custom Color</span>
+                  <input
+                    type="color"
+                    defaultValue="#ff4d6d"
+                    onChange={(e) => handleApplyColor(e.target.value)}
+                    className="h-5 w-8 cursor-pointer rounded border border-zinc-700 bg-transparent p-0"
+                    aria-label="Pick custom text color"
+                  />
+                </label>
+                <button
+                  type="button"
+                  onClick={() => {
+                    insertSyntax('<span style="background-color: rgba(236, 72, 153, 0.25); color: #fbcfe8; padding: 1px 6px; border-radius: 4px;">', '</span>', 'Highlighted text');
+                    setShowColorMenu(false);
+                  }}
+                  className="w-full rounded-lg bg-pink-950/50 border border-pink-500/30 px-2 py-1 text-left text-[11px] text-pink-200 hover:bg-pink-900/50 transition-colors"
+                >
+                  ✨ Pink Highlight Badge
+                </button>
+              </div>
             </div>
           )}
         </div>

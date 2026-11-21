@@ -29,6 +29,7 @@ import {
 } from '../types/index.ts';
 import { useAuth } from '../context/AuthContext.tsx';
 import { CharacterCard } from './CharacterCard.tsx';
+import { RichMessageContent } from './RichMessageContent.tsx';
 import { renderWikiMarkup } from '../utils/characterUtils.ts';
 import { isOwnedByRequester } from '../utils/ownership.ts';
 import {
@@ -1096,7 +1097,11 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({
                       <span className={`font-bold ${theme.statAccent}`}>{comment.name}</span>
                       <span className="text-[10px] text-zinc-500">{comment.date}</span>
                     </div>
-                    <p className="text-xs text-zinc-200 leading-relaxed">{comment.message}</p>
+                    <RichMessageContent
+                      content={comment.message}
+                      textClassName="text-xs text-zinc-200 leading-relaxed whitespace-pre-wrap break-words"
+                      actionClassName="text-xs font-serif italic text-purple-300 leading-relaxed whitespace-pre-wrap break-words"
+                    />
                   </div>
                 </ViewportSlot>
               ))}

@@ -459,7 +459,12 @@ export function buildContextualRoleplayReply(params: {
 
   const fallbackHistoryUser =
     [...history].reverse().find((m) => m.sender === 'user' && m.content?.trim())?.content || '';
-  const cleanUserRaw = (userMessage || fallbackHistoryUser).trim();
+  const cleanUserRaw = (userMessage || fallbackHistoryUser)
+    .trim()
+    .replace(/!\[[^\]]*\]\([^)]+\)/g, ' ')
+    .replace(/\{\{(?:color|colour|fg|highlight)\s*\|[^|}]+\|([\s\S]*?)\}\}/gi, '$1')
+    .replace(/\[\/?(?:color|bgcolor|highlight|img)(?:=[^\]]+)?\]/gi, '')
+    .replace(/<\/?(?:span|font|mark|strong|b|em|i|u|del|s|img)\b[^>]*>/gi, '');
   const userSpoken = cleanUserRaw.replace(/\*[^*]*\*/g, '').replace(/\s+/g, ' ').trim();
   const userAction = (cleanUserRaw.match(/\*([^*]+)\*/)?.[1] || '').trim();
   const subjectWords = extractUserSubjectKeywords(userSpoken || cleanUserRaw);

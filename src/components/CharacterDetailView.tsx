@@ -1289,7 +1289,11 @@ export const CharacterDetailView: React.FC<CharacterDetailViewProps> = ({
                             <BookOpen className="h-3.5 w-3.5 text-amber-400" />
                             <span>Trigger Keywords: {entry.key}</span>
                           </div>
-                          <p className="text-xs text-zinc-300 leading-relaxed">{entry.content}</p>
+                          <RichMessageContent
+                            content={entry.content}
+                            textClassName="text-xs text-zinc-300 leading-relaxed whitespace-pre-wrap break-words"
+                            actionClassName="text-xs font-serif italic text-purple-300 leading-relaxed whitespace-pre-wrap break-words"
+                          />
                         </div>
                       ))
                     )}

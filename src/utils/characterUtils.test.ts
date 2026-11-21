@@ -1446,9 +1446,101 @@ test('formatRoleplaySegments and renderWikiMarkup render markdown, HTML, BBCode,
   assert.ok(html.includes('src="https://example.com/direct_photo.jpg"'));
   assert.ok(html.includes('src="https://example.com/raw_tag.png"'));
   assert.ok(html.includes('referrerpolicy="no-referrer"'));
+
+  // Escaped <img>, parenthesized Wikimedia URL, Fandom /revision/latest, Unsplash
+  const edgeMsg = [
+    '&lt;img src=&quot;https://example.com/escaped.png&quot; alt=&quot;Escaped&quot; /&gt;',
+    '![Spamton](https://upload.wikimedia.org/wikipedia/en/a/ab/Spamton_(Deltarune).png)',
+    'https://static.wikia.nocookie.net/deltarune/images/2/26/Spamton.png/revision/latest?cb=2021',
+    'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=600&q=80',
+  ].join('\n');
+  const edgeImgs = formatRoleplaySegments(edgeMsg).filter((s) => s.type === 'image');
+  assert.equal(edgeImgs.length, 4);
+  assert.equal(edgeImgs[0].src, 'https://example.com/escaped.png');
+  assert.equal(edgeImgs[1].src, 'https://upload.wikimedia.org/wikipedia/en/a/ab/Spamton_(Deltarune).png');
+  assert.equal(edgeImgs[2].src, 'https://static.wikia.nocookie.net/deltarune/images/2/26/Spamton.png/revision/latest?cb=2021');
+
+  const edgeHtml = renderWikiMarkup(edgeMsg, 'Spamton');
+  assert.ok(!edgeHtml.includes('&lt;img'));
+  assert.ok(edgeHtml.includes('src="https://example.com/escaped.png"'));
+  assert.ok(edgeHtml.includes('src="https://upload.wikimedia.org/wikipedia/en/a/ab/Spamton_(Deltarune).png"'));
+  assert.ok(edgeHtml.includes('src="https://static.wikia.nocookie.net/deltarune/images/2/26/Spamton.png/revision/latest?cb=2021"'));
 });
 
+test('cleanRichHtmlToText preserves embedded HTML images as markdown images and inline colors as BBCode', async () => {
+  const { cleanRichHtmlToText } = await import('../../server/urlImporter.ts');
+  const cleaned = cleanRichHtmlToText(
+    '<p>Intro <span style="color: #ff4d6d;">rose</span> and <font color="gold">amber</font></p><p><img src="https://ella.janitorai.com/pic.webp" alt="Art" /></p>'
+  );
+  assert.ok(cleaned.includes('[color=#ff4d6d]rose[/color]'));
+  assert.ok(cleaned.includes('[color=gold]amber[/color]'));
+  assert.ok(cleaned.includes('![Art](https://ella.janitorai.com/pic.webp)'));
+});
 
+test('isSafeCssColor, formatRoleplaySegments, and renderWikiMarkup render all text colors safely instead of raw tags', async () => {
+  const { isSafeCssColor, sanitizeCssStyleString } = await import('./characterUtils.ts');
 
+  assert.equal(isSafeCssColor('#ff4d6d'), true);
+  assert.equal(isSafeCssColor('crimson'), true);
+  assert.equal(isSafeCssColor('rgb(255, 80, 120)'), true);
+  assert.equal(isSafeCssColor('linear-gradient(135deg, #f472b6, #a855f7)'), true);
+  assert.equal(isSafeCssColor('expression(alert(1))'), false);
+  assert.equal(isSafeCssColor('url(javascript:alert(1))'), false);
+  assert.equal(sanitizeCssStyleString('color: #38bdf8; background: url(evil.png); font-weight: bold'), 'color: #38bdf8; font-weight: bold');
 
+  const coloredMsg = [
+    'Normal <span style="color: #ff4d6d;">crimson</span> and <font color="gold">golden</font> text.',
+    '[color=#38bdf8]Sky BBCode[/color] with [bgcolor=#3b0764]plum badge[/bgcolor].',
+    '{{Color|#34d399|Emerald Wiki}} and <mark style="background: #fde047; color: #18181b;">Highlight</mark>.',
+    '&lt;span style=&quot;color: #f472b6;&quot;&gt;Escaped Pink&lt;/span&gt;',
+    '<span style="color: #ef4444;">*red action inside span*</span>',
+  ].join('\n');
+
+  const segments = formatRoleplaySegments(coloredMsg);
+  const allRuns = segments.flatMap((s) => s.runs || []);
+  const joinedText = segments.map((s) => s.text).join('\n');
+  assert.ok(!joinedText.includes('<span'));
+  assert.ok(!joinedText.includes('[color='));
+  assert.ok(!joinedText.includes('{{Color'));
+  assert.ok(!joinedText.includes('&lt;span'));
+  assert.ok(allRuns.some((r) => r.text === 'crimson' && r.style?.color === '#ff4d6d'));
+  assert.ok(allRuns.some((r) => r.text === 'golden' && r.style?.color === 'gold'));
+  assert.ok(allRuns.some((r) => r.text === 'Sky BBCode' && r.style?.color === '#38bdf8'));
+  assert.ok(allRuns.some((r) => r.text === 'plum badge' && r.style?.backgroundColor === '#3b0764'));
+  assert.ok(allRuns.some((r) => r.text === 'Emerald Wiki' && r.style?.color === '#34d399'));
+  assert.ok(allRuns.some((r) => r.text === 'Highlight' && r.style?.mark && r.style?.color === '#18181b'));
+  assert.ok(allRuns.some((r) => r.text === 'Escaped Pink' && r.style?.color === '#f472b6'));
+  assert.ok(allRuns.some((r) => r.text === 'red action inside span' && r.style?.color === '#ef4444' && r.style?.italic));
+
+  const wikiColored = [
+    '<span style="color: #ff4d6d;">*Red italic*</span>',
+    '<font color="gold">Gold font tag</font>',
+    '[color=#38bdf8]Sky BBCode[/color]',
+    '{{Color|#34d399|Emerald template}}',
+    '&lt;span style=&quot;color: #f472b6;&quot;&gt;Decoded span&lt;/span&gt;',
+    '<span style="color: expression(alert(1));">Blocked XSS color</span>',
+    '{| class="wikitable"',
+    '|- style="background: linear-gradient(135deg, #db2777, #be123c); color: #ffffff;"',
+    '! colspan="2" | Colored Header',
+    '|-',
+    '| style="color: #fbbf24; background-color: #18181b;" | Amber Cell || Plain Cell',
+    '|}',
+  ].join('\n');
+
+  const wikiHtml = renderWikiMarkup(wikiColored, 'Hero');
+  assert.ok(!wikiHtml.includes('[color='));
+  assert.ok(!wikiHtml.includes('{{Color'));
+  assert.ok(!wikiHtml.includes('&lt;span'));
+  assert.ok(!wikiHtml.includes('expression('));
+  assert.ok(!wikiHtml.includes('<font'));
+  assert.ok(wikiHtml.includes('color: #ff4d6d'));
+  assert.ok(wikiHtml.includes('<em>Red italic</em>'));
+  assert.ok(wikiHtml.includes('color: gold'));
+  assert.ok(wikiHtml.includes('color: #38bdf8'));
+  assert.ok(wikiHtml.includes('color: #34d399'));
+  assert.ok(wikiHtml.includes('color: #f472b6'));
+  assert.ok(wikiHtml.includes('<tr style="background: linear-gradient(135deg, #db2777, #be123c); color: #ffffff">'));
+  assert.ok(wikiHtml.includes('color: #fbbf24; background-color: #18181b'));
+  assert.ok(!wikiHtml.includes('style="color: #fbbf24; background-color: #18181b;" |'));
+});
 
