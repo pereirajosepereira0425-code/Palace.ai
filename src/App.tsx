@@ -40,6 +40,8 @@ import { UserProfileModal } from './components/UserProfileModal.tsx';
 import { ViewportSlot } from './components/ViewportSlot.tsx';
 import { OfflineIndicator } from './components/PWAInstallButton.tsx';
 import { DomainSeoModal } from './components/DomainSeoModal.tsx';
+import { AIMakerStudio } from './components/AIMakerStudio.tsx';
+import type { AiMakerDraft } from './utils/aiMakerUtils.ts';
 import { Character, ContentRating, SharedLorebookRecord, SharedPersona, TagRecord } from './types/index.ts';
 import { isOwnedByRequester } from './utils/ownership.ts';
 import { chunkItems } from './utils/viewportUnload.ts';
@@ -85,6 +87,7 @@ function PalaceApp() {
   const getInitialTab = (): PalaceNavTab => {
     const path = window.location.pathname.replace(/^\//, '').toLowerCase();
     if (path === 'create' || path === 'studio') return 'studio';
+    if (path === 'ai-maker' || path === 'ai_maker') return 'ai_maker';
     if (path === 'liked' || path === 'favorites') return 'favorites';
     if (path === 'profile' || path.startsWith('users/')) return 'profile';
     if (['chats', 'imagine', 'lorebooks', 'stages', 'personas', 'profile'].includes(path)) {
@@ -105,7 +108,14 @@ function PalaceApp() {
     if (tab === 'profile' && !username) {
       setInspectUsername(null);
     }
-    const newPath = tab === 'explore' ? '/' : tab === 'studio' ? '/create' : `/${tab}`;
+    const newPath =
+      tab === 'explore'
+        ? '/'
+        : tab === 'studio'
+        ? '/create'
+        : tab === 'ai_maker'
+        ? '/ai-maker'
+        : `/${tab}`;
     if (window.location.pathname !== newPath) {
       window.history.pushState(null, '', newPath);
     }
@@ -169,6 +179,7 @@ function PalaceApp() {
   const [isPresetsModalOpen, setIsPresetsModalOpen] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [isDomainSeoOpen, setIsDomainSeoOpen] = useState(false);
+  const [aiMakerDraft, setAiMakerDraft] = useState<AiMakerDraft | null>(null);
 
   // Support direct /character/:uuid URLs (indexed via /sitemap.xml)
   useEffect(() => {
@@ -697,9 +708,12 @@ function PalaceApp() {
             editingCharacter={editingCharacter}
             pendingLorebook={pendingLorebook}
             onConsumePendingLorebook={() => setPendingLorebook(null)}
+            aiGeneratedDraft={aiMakerDraft}
+            onConsumeAiDraft={() => setAiMakerDraft(null)}
             onCharacterCreated={(char) => {
               setForkCharacter(null);
               setEditingCharacter(null);
+              setAiMakerDraft(null);
               handleCharacterCreated(char);
             }}
             onCharacterUpdated={handleCharacterUpdated}
@@ -707,8 +721,23 @@ function PalaceApp() {
             onCancel={() => {
               setForkCharacter(null);
               setEditingCharacter(null);
+              setAiMakerDraft(null);
               setActiveTab('explore');
             }}
+          />
+        ) : activeTab === 'ai_maker' ? (
+          <AIMakerStudio
+            presets={presets}
+            onOpenInCharacterStudio={(generatedDraft) => {
+              setForkCharacter(null);
+              setEditingCharacter(null);
+              setAiMakerDraft(generatedDraft);
+              setActiveTab('studio');
+            }}
+            onCharacterPublished={(char) => {
+              handleCharacterCreated(char);
+            }}
+            onCancel={() => setActiveTab('explore')}
           />
         ) : activeTab === 'chats' ? (
           <UserChatsView
@@ -804,6 +833,16 @@ function PalaceApp() {
                     >
                       <PlusCircle className="h-4 w-4" />
                       <span>Create Character</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('ai_maker')}
+                      data-testid="hero-ai-maker-btn"
+                      className="flex items-center gap-2 rounded-xl border border-cyan-400/50 bg-cyan-950/50 px-4 py-2.5 text-xs font-bold text-cyan-100 hover:bg-cyan-900/50 transition-all cursor-pointer"
+                    >
+                      <BrainCircuit className="h-4 w-4 text-cyan-300" />
+                      <span>AI Character Maker</span>
                     </button>
 
                     <button

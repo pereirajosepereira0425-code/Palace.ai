@@ -6,8 +6,8 @@ import { buildRobotsTxt, buildSitemapXml } from '../src/utils/seoUtils.ts';
 
 export const app = express();
 
-app.use(express.json({ limit: '15mb' }));
-app.use(express.urlencoded({ extended: true, limit: '15mb' }));
+app.use(express.json({ limit: '45mb' }));
+app.use(express.urlencoded({ extended: true, limit: '45mb' }));
 
 function resolveRequestOrigin(req: express.Request): string {
   const envUrl = process.env.APP_URL?.trim();

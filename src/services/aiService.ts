@@ -1,4 +1,4 @@
-import { GoogleGenAI, ThinkingLevel } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import {
   CHUB_API_PROVIDERS,
   getModelStyleCalibration,
@@ -35,7 +35,18 @@ import {
   synthesizeCouncilReplies,
 } from '../utils/roleplayEngine.ts';
 import { isPalaceFreeApiKey } from '../utils/settingsSync.ts';
-import type { CustomVoiceRecord, ModelEnsembleConfig } from '../types/index.ts';
+import {
+  enforceParagraphCount,
+  normalizeMakerImages,
+  normalizeParagraphCounts,
+  synthesizePalaceMakerDraft,
+  type AiMakerDraft,
+  type MakerImageRef,
+  type MakerModelId,
+  type ParagraphCountsConfig,
+  type WebResearchDossier,
+} from '../utils/aiMakerUtils.ts';
+import type { ContentRating, CustomVoiceRecord, ModelEnsembleConfig } from '../types/index.ts';
 
 // Lazy server-side GoogleGenAI client initialization so booting without GEMINI_API_KEY
 // emits zero startup warnings and falls back cleanly without doomed ADC requests.
@@ -1426,3 +1437,320 @@ export async function generateChubCompatibleCompletion(params: {
     completionTokens: Math.max(1, Math.ceil(fallbackReply.length / 4)),
   };
 }
+
+export interface GenerateAiMakerSheetOptions {
+  prompt: string;
+  makerModel: MakerModelId | string;
+  nsfwAllowed?: boolean;
+  ratingOverride?: ContentRating | 'AUTO';
+  paragraphCounts?: Partial<ParagraphCountsConfig> | null;
+  images?: MakerImageRef[];
+  dossier?: Partial<WebResearchDossier> | null;
+  externalApiKey?: string;
+  externalApiUrl?: string;
+  externalApiProvider?: string;
+}
+
+function parseDataUrlImagePart(dataUrl: string): { mimeType: string; data: string } | null {
+  const m = String(dataUrl || '').match(/^data:(image\/(?:png|jpeg|jpg|webp|gif));base64,([A-Za-z0-9+/=]+)$/i);
+  if (!m) return null;
+  return {
+    mimeType: m[1].toLowerCase() === 'image/jpg' ? 'image/jpeg' : m[1].toLowerCase(),
+    data: m[2],
+  };
+}
+
+export async function generateAiMakerSheet(
+  options: GenerateAiMakerSheetOptions
+): Promise<AiMakerDraft> {
+  const prompt = String(options.prompt || '').trim();
+  if (!prompt) {
+    throw new Error('Please enter a character prompt first.');
+  }
+
+  const counts = normalizeParagraphCounts(options.paragraphCounts);
+  const images = normalizeMakerImages(options.images || []);
+  const dossier = options.dossier || null;
+  const requestedModel = String(options.makerModel || 'palace_maker_opus').trim();
+
+  // 1. Palace.ai Free Opus-5.5-Tier Maker Engine (Built-in, zero key required, SFW/NSFW/NSFL)
+  if (requestedModel === 'palace_maker_opus') {
+    return synthesizePalaceMakerDraft({
+      prompt,
+      ratingOverride: options.ratingOverride,
+      nsfwAllowed: options.nsfwAllowed,
+      paragraphCounts: counts,
+      images,
+      dossier,
+    });
+  }
+
+  const wikiContext = (dossier?.excerpts || [])
+    .map(
+      (ex) =>
+        `Source (${ex.sourceType}): ${ex.title} [${ex.url}]\nSummary: ${ex.summary}\nFacts: ${(ex.facts || []).join(' | ')}`
+    )
+    .join('\n\n');
+
+  const botContext = (dossier?.chatbotNotes || [])
+    .map(
+      (b) =>
+        `Reference Chatbot (${b.source} · ${b.name} by @${b.creatorName} · ${b.rating}):\nStyle Notes: ${b.styleNotes.join(' ')}\nPersonality Hooks: ${b.personalityHooks.join(' ')}\nScenario Hooks: ${b.scenarioHooks.join(' ')}\nExcerpt:\n${b.rawExcerpt}`
+    )
+    .join('\n\n');
+
+  const imagePromptNotes = images
+    .map(
+      (im, idx) =>
+        `Image #${idx + 1} (${im.name}, role=${im.role}${im.nsfw ? ', NSFW' : ''}): ${im.prompt || 'No extra caption'}`
+    )
+    .join('\n');
+
+  const baseSpecPrompt = [
+    `Master Character Prompt:\n${prompt}`,
+    `Content Rating Preference: ${options.ratingOverride && options.ratingOverride !== 'AUTO' ? options.ratingOverride : options.nsfwAllowed ? 'NSFW allowed cleanly if relevant' : 'SFW'}`,
+    `EXACT Paragraph Count Requirements (follow strictly by separating paragraphs with a blank line \\n\\n):`,
+    `- description: ${counts.description} paragraphs`,
+    `- personality: ${counts.personality} paragraphs`,
+    `- scenario: ${counts.scenario} paragraphs`,
+    `- greeting: ${counts.greeting} paragraphs`,
+    `- systemPrompt: ${counts.systemPrompt} paragraphs`,
+    `- postHistoryInstructions: ${counts.postHistoryInstructions} paragraphs`,
+    `- exampleDialogues: ${counts.exampleDialogues} paragraphs (use <START>, {{user}}:, {{char}}:)`,
+    `- alternateGreetings: ${counts.alternateGreetingsCount} greetings, each ${counts.alternateGreetingParagraphs} paragraphs`,
+    `- creatorNotes: ${counts.creatorNotes} paragraphs`,
+    imagePromptNotes ? `\nUploaded Reference Images (${images.length}/30):\n${imagePromptNotes}` : '',
+    wikiContext ? `\nLive Web & Wiki Research Excerpts:\n${wikiContext}` : '',
+    botContext ? `\nNotes from Reference Chatbots (JanitorAI / Chub.ai / SpicyChat / Web):\n${botContext}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+
+  // 2. Gemini 4 Hydrogen (Server-side @google/genai multimodal + structured JSON schema)
+  if (requestedModel === 'gemini-4-hydrogen') {
+    const ai = getGeminiClient();
+    if (!ai) {
+      throw Object.assign(
+        new Error(
+          'Gemini API key is not configured on the server. Add GEMINI_API_KEY in Settings > Secrets or choose "Palace.ai Maker Engine (Free)".'
+        ),
+        { status: 400 }
+      );
+    }
+
+    const parts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> = [
+      { text: baseSpecPrompt },
+    ];
+    let attachedInline = 0;
+    for (const im of images) {
+      if (attachedInline >= 12) break;
+      const parsedImg = parseDataUrlImagePart(im.dataUrl);
+      if (parsedImg) {
+        parts.push({ inlineData: parsedImg });
+        attachedInline++;
+      }
+    }
+
+    const response = await callGeminiWithTimeout(
+      () =>
+        ai.models.generateContent({
+          model: 'gemini-4-hydrogen',
+          contents: { parts },
+          config: {
+            systemInstruction:
+              'You are an expert Tavern V2 AI character architect. Synthesize deeply literary, subtext-rich character sheets grounded in every visual reference, wiki fact, and competitor chatbot note while strictly hitting the requested paragraph counts.',
+            thinkingConfig: { thinkingLevel: ThinkingLevel.HIGH },
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                name: { type: Type.STRING },
+                tagline: { type: Type.STRING },
+                rating: { type: Type.STRING },
+                gender: { type: Type.STRING },
+                pronouns: { type: Type.STRING },
+                description: { type: Type.STRING },
+                personality: { type: Type.STRING },
+                scenario: { type: Type.STRING },
+                greeting: { type: Type.STRING },
+                alternateGreetings: { type: Type.ARRAY, items: { type: Type.STRING } },
+                systemPrompt: { type: Type.STRING },
+                postHistoryInstructions: { type: Type.STRING },
+                exampleDialogues: { type: Type.STRING },
+                creatorNotes: { type: Type.STRING },
+                tags: { type: Type.ARRAY, items: { type: Type.STRING } },
+                voiceName: { type: Type.STRING },
+                voiceStyle: { type: Type.STRING },
+                loreEntries: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      key: { type: Type.STRING },
+                      content: { type: Type.STRING },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        }),
+      25000
+    );
+
+    const parsed = JSON.parse((response.text || '{}').trim());
+    const baseDraft = synthesizePalaceMakerDraft({
+      prompt,
+      ratingOverride: options.ratingOverride,
+      nsfwAllowed: options.nsfwAllowed,
+      paragraphCounts: counts,
+      images,
+      dossier,
+    });
+
+    const resolvedRating: ContentRating =
+      parsed.rating === 'NSFW' || parsed.rating === 'NSFL' || parsed.rating === 'NSFW + NSFL' || parsed.rating === 'SFW'
+        ? parsed.rating
+        : baseDraft.rating;
+
+    return {
+      ...baseDraft,
+      name: String(parsed.name || baseDraft.name).trim(),
+      tagline: String(parsed.tagline || baseDraft.tagline).trim().slice(0, 140),
+      rating: resolvedRating,
+      gender: String(parsed.gender || baseDraft.gender).trim(),
+      pronouns: String(parsed.pronouns || baseDraft.pronouns).trim(),
+      description: enforceParagraphCount(String(parsed.description || baseDraft.description), counts.description),
+      personality: enforceParagraphCount(String(parsed.personality || baseDraft.personality), counts.personality),
+      scenario: enforceParagraphCount(String(parsed.scenario || baseDraft.scenario), counts.scenario),
+      greeting: enforceParagraphCount(String(parsed.greeting || baseDraft.greeting), counts.greeting),
+      alternateGreetings:
+        counts.alternateGreetingsCount === 0
+          ? []
+          : (Array.isArray(parsed.alternateGreetings) && parsed.alternateGreetings.length > 0
+              ? parsed.alternateGreetings
+              : baseDraft.alternateGreetings
+            )
+              .slice(0, counts.alternateGreetingsCount)
+              .map((g: any) => enforceParagraphCount(String(g || ''), counts.alternateGreetingParagraphs)),
+      systemPrompt: enforceParagraphCount(String(parsed.systemPrompt || baseDraft.systemPrompt), counts.systemPrompt),
+      postHistoryInstructions: enforceParagraphCount(
+        String(parsed.postHistoryInstructions || baseDraft.postHistoryInstructions),
+        counts.postHistoryInstructions
+      ),
+      exampleDialogues: enforceParagraphCount(
+        String(parsed.exampleDialogues || baseDraft.exampleDialogues),
+        counts.exampleDialogues
+      ),
+      creatorNotes: enforceParagraphCount(String(parsed.creatorNotes || baseDraft.creatorNotes), counts.creatorNotes),
+      tags: Array.isArray(parsed.tags) && parsed.tags.length > 0 ? parsed.tags.map(String) : baseDraft.tags,
+      voiceName: String(parsed.voiceName || baseDraft.voiceName),
+      voiceStyle: String(parsed.voiceStyle || baseDraft.voiceStyle),
+      loreEntries:
+        Array.isArray(parsed.loreEntries) && parsed.loreEntries.length > 0
+          ? parsed.loreEntries
+              .filter((e: any) => e?.key && e?.content)
+              .map((e: any) => ({ key: String(e.key), content: String(e.content) }))
+          : baseDraft.loreEntries,
+      modelUsed: 'gemini-4-hydrogen (Vision + Web)',
+    };
+  }
+
+  // 3. External API Models (Claude Opus 5.5, Chub Mars/Asha, DeepSeek R1)
+  const providerMeta = CHUB_API_PROVIDERS.find((p) => p.id === options.externalApiProvider);
+  const rawUrl = String(options.externalApiUrl || providerMeta?.defaultUrl || '').trim();
+  const rawKey = String(options.externalApiKey || '').trim();
+  if (!rawKey || isPalaceFreeApiKey(rawKey) || !rawUrl) {
+    throw Object.assign(
+      new Error(
+        `Model "${requestedModel}" requires an external API Key & Endpoint in Presets (or switch to "Palace.ai Maker Engine (Free · Opus 5.5 Craft)" to synthesize free with zero keys).`
+      ),
+      { status: 400 }
+    );
+  }
+
+  const endpoint = normalizeChatCompletionsUrl(rawUrl);
+  const headers = buildExternalAuthHeaders(rawKey, endpoint, options.externalApiProvider);
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      model: requestedModel,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are an expert Tavern V2 AI character creator. Return ONLY valid JSON with keys: name, tagline, rating, gender, pronouns, description, personality, scenario, greeting, alternateGreetings, systemPrompt, postHistoryInstructions, exampleDialogues, creatorNotes, tags, loreEntries.',
+        },
+        {
+          role: 'user',
+          content: baseSpecPrompt,
+        },
+      ],
+      max_tokens: 3200,
+    }),
+    signal: AbortSignal.timeout(25000),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw Object.assign(
+      new Error(`External API error (${res.status}): ${errText.slice(0, 220)}`),
+      { status: res.status }
+    );
+  }
+
+  const extJson: any = await res.json();
+  const contentStr = String(extJson?.choices?.[0]?.message?.content || extJson?.content?.[0]?.text || '').trim();
+  const firstBrace = contentStr.indexOf('{');
+  const lastBrace = contentStr.lastIndexOf('}');
+  const parsedExt =
+    firstBrace !== -1 && lastBrace > firstBrace
+      ? JSON.parse(contentStr.slice(firstBrace, lastBrace + 1))
+      : {};
+
+  const baseDraft = synthesizePalaceMakerDraft({
+    prompt,
+    ratingOverride: options.ratingOverride,
+    nsfwAllowed: options.nsfwAllowed,
+    paragraphCounts: counts,
+    images,
+    dossier,
+  });
+
+  return {
+    ...baseDraft,
+    name: String(parsedExt.name || baseDraft.name).trim(),
+    tagline: String(parsedExt.tagline || baseDraft.tagline).trim().slice(0, 140),
+    description: enforceParagraphCount(String(parsedExt.description || baseDraft.description), counts.description),
+    personality: enforceParagraphCount(String(parsedExt.personality || baseDraft.personality), counts.personality),
+    scenario: enforceParagraphCount(String(parsedExt.scenario || baseDraft.scenario), counts.scenario),
+    greeting: enforceParagraphCount(String(parsedExt.greeting || baseDraft.greeting), counts.greeting),
+    alternateGreetings:
+      counts.alternateGreetingsCount === 0
+        ? []
+        : (Array.isArray(parsedExt.alternateGreetings) && parsedExt.alternateGreetings.length > 0
+            ? parsedExt.alternateGreetings
+            : baseDraft.alternateGreetings
+          )
+            .slice(0, counts.alternateGreetingsCount)
+            .map((g: any) => enforceParagraphCount(String(g || ''), counts.alternateGreetingParagraphs)),
+    systemPrompt: enforceParagraphCount(String(parsedExt.systemPrompt || baseDraft.systemPrompt), counts.systemPrompt),
+    postHistoryInstructions: enforceParagraphCount(
+      String(parsedExt.postHistoryInstructions || baseDraft.postHistoryInstructions),
+      counts.postHistoryInstructions
+    ),
+    exampleDialogues: enforceParagraphCount(
+      String(parsedExt.exampleDialogues || baseDraft.exampleDialogues),
+      counts.exampleDialogues
+    ),
+    creatorNotes: enforceParagraphCount(String(parsedExt.creatorNotes || baseDraft.creatorNotes), counts.creatorNotes),
+    tags: Array.isArray(parsedExt.tags) && parsedExt.tags.length > 0 ? parsedExt.tags.map(String) : baseDraft.tags,
+    loreEntries:
+      Array.isArray(parsedExt.loreEntries) && parsedExt.loreEntries.length > 0
+        ? parsedExt.loreEntries
+        : baseDraft.loreEntries,
+    modelUsed: requestedModel,
+  };
+}
+

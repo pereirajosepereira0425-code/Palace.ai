@@ -45,6 +45,7 @@ import { ViewportSlot } from './ViewportSlot.tsx';
 import { CustomVoiceStudioModal } from './CustomVoiceStudioModal.tsx';
 import { mergeCharacterLoreEntries, parseLorebookEntries } from '../utils/communityUtils.ts';
 import { playTTSResponseData, stopActiveTTSPlayback } from '../utils/ttsPlayer.ts';
+import type { AiMakerDraft } from '../utils/aiMakerUtils.ts';
 
 interface AttachedCharacterFile {
   id: string;
@@ -63,6 +64,8 @@ interface CharacterStudioProps {
   editingCharacter?: Character | null;
   pendingLorebook?: SharedLorebookRecord | null;
   onConsumePendingLorebook?: () => void;
+  aiGeneratedDraft?: AiMakerDraft | null;
+  onConsumeAiDraft?: () => void;
 }
 
 const AVATAR_PRESETS = [
@@ -92,6 +95,8 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
   editingCharacter,
   pendingLorebook,
   onConsumePendingLorebook,
+  aiGeneratedDraft,
+  onConsumeAiDraft,
 }) => {
   const { user, profile, getIdToken, guestId } = useAuth();
 
@@ -213,6 +218,62 @@ export const CharacterStudio: React.FC<CharacterStudioProps> = ({
         : `Forked "${sourceChar.name}"! Customize any field and publish your own version.`
     );
   }, [editingCharacter, forkFromCharacter]);
+
+  // Pre-fill from AI Character Maker Draft
+  React.useEffect(() => {
+    if (!aiGeneratedDraft) return;
+    setName(aiGeneratedDraft.name || '');
+    setTagline(aiGeneratedDraft.tagline || '');
+    if (aiGeneratedDraft.avatar) setAvatar(aiGeneratedDraft.avatar);
+    if (aiGeneratedDraft.backgroundImage) setBackgroundImage(aiGeneratedDraft.backgroundImage);
+    setRating(aiGeneratedDraft.rating || 'SFW');
+    setGreeting(aiGeneratedDraft.greeting || '');
+    setAlternateGreetings(
+      Array.isArray(aiGeneratedDraft.alternateGreetings) ? aiGeneratedDraft.alternateGreetings : []
+    );
+    setPersonality(aiGeneratedDraft.personality || '');
+    setDescription(aiGeneratedDraft.description || '');
+    setSystemPrompt(aiGeneratedDraft.systemPrompt || '');
+    setPostHistoryInstructions(aiGeneratedDraft.postHistoryInstructions || '');
+    setCreatorNotes(aiGeneratedDraft.creatorNotes || '');
+    setScenario(aiGeneratedDraft.scenario || '');
+    setExampleDialogues(aiGeneratedDraft.exampleDialogues || '');
+    setSelectedTags(
+      Array.isArray(aiGeneratedDraft.tags) && aiGeneratedDraft.tags.length > 0
+        ? aiGeneratedDraft.tags
+        : ['Roleplay']
+    );
+    if (aiGeneratedDraft.voiceName) setVoiceName(aiGeneratedDraft.voiceName);
+    if (aiGeneratedDraft.voiceStyle) setVoiceStyle(aiGeneratedDraft.voiceStyle);
+
+    const presetGenders = ['Female', 'Male', 'Non-Binary', 'Agender', 'Unknown'];
+    const rawGender = aiGeneratedDraft.gender || 'Unknown';
+    if (presetGenders.includes(rawGender)) {
+      setGender(rawGender);
+      setCustomGender('');
+    } else {
+      setGender('Custom');
+      setCustomGender(rawGender);
+    }
+
+    const presetPronouns = ['She/Her', 'He/Him', 'They/Them', 'It/Its', 'Any'];
+    const rawPronouns = aiGeneratedDraft.pronouns || 'They/Them';
+    if (presetPronouns.includes(rawPronouns)) {
+      setPronouns(rawPronouns);
+      setCustomPronouns('');
+    } else {
+      setPronouns('Custom');
+      setCustomPronouns(rawPronouns);
+    }
+
+    if (Array.isArray(aiGeneratedDraft.loreEntries) && aiGeneratedDraft.loreEntries.length > 0) {
+      setLoreEntries(aiGeneratedDraft.loreEntries);
+    }
+    setSuccessMsg(
+      `Imported AI Maker draft for "${aiGeneratedDraft.name}". Review any field and click Publish Character!`
+    );
+    onConsumeAiDraft?.();
+  }, [aiGeneratedDraft, onConsumeAiDraft]);
 
   // Any File Upload Handlers (FileReader base64 data URLs)
   const handleAvatarUpload = (e: React.ChangeEvent<HTMLInputElement>) => {

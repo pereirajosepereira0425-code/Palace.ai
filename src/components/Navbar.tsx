@@ -33,6 +33,7 @@ export type PalaceNavTab =
   | 'explore'
   | 'chats'
   | 'studio'
+  | 'ai_maker'
   | 'imagine'
   | 'lorebooks'
   | 'stages'
@@ -159,7 +160,7 @@ export const Navbar: React.FC<NavbarProps> = ({
         <nav className="order-last md:order-none w-full md:w-auto md:flex-1 min-w-0 flex items-center justify-start gap-0.5 overflow-x-auto no-scrollbar py-1 border-t border-zinc-900/80 md:border-t-0">
           <button
             onClick={() => setActiveTab('explore')}
-            className={`flex items-center gap-1 rounded-xl px-1.5 py-1.5 text-[11px] xl:text-xs font-semibold transition-all shrink-0 cursor-pointer ${
+            className={`flex items-center gap-1 rounded-xl px-1.5 py-1.5 text-[11px] font-semibold transition-all shrink-0 cursor-pointer whitespace-nowrap ${
               activeTab === 'explore'
                 ? 'bg-purple-600/20 text-purple-200 border border-purple-500/40 shadow-sm'
                 : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
@@ -172,7 +173,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           <button
             onClick={() => setActiveTab('chats')}
-            className={`flex items-center gap-1 rounded-xl px-1.5 py-1.5 text-[11px] xl:text-xs font-semibold transition-all shrink-0 cursor-pointer ${
+            className={`flex items-center gap-1 rounded-xl px-1.5 py-1.5 text-[11px] font-semibold transition-all shrink-0 cursor-pointer whitespace-nowrap ${
               activeTab === 'chats'
                 ? 'bg-purple-600/20 text-purple-200 border border-purple-500/40 shadow-sm'
                 : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
@@ -185,7 +186,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           <button
             onClick={() => setActiveTab('studio')}
-            className={`flex items-center gap-1 rounded-xl px-1.5 py-1.5 text-[11px] xl:text-xs font-semibold transition-all shrink-0 cursor-pointer ${
+            className={`flex items-center gap-1 rounded-xl px-1.5 py-1.5 text-[11px] font-semibold transition-all shrink-0 cursor-pointer whitespace-nowrap ${
               activeTab === 'studio'
                 ? 'bg-purple-600/20 text-purple-200 border border-purple-500/40 shadow-sm'
                 : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
@@ -197,8 +198,22 @@ export const Navbar: React.FC<NavbarProps> = ({
           </button>
 
           <button
+            onClick={() => setActiveTab('ai_maker')}
+            data-testid="nav-ai-maker-btn"
+            className={`flex items-center gap-1 rounded-xl px-1.5 py-1.5 text-[11px] font-semibold transition-all shrink-0 cursor-pointer whitespace-nowrap ${
+              activeTab === 'ai_maker'
+                ? 'bg-purple-600/20 text-purple-200 border border-purple-500/40 shadow-sm'
+                : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
+            }`}
+            title="AI Character Maker & Web Researcher (/ai-maker)"
+          >
+            <BrainCircuit className="h-3.5 w-3.5 text-cyan-400 shrink-0" />
+            <span className="hidden lg:inline">AI Maker</span>
+          </button>
+
+          <button
             onClick={() => setActiveTab('imagine')}
-            className={`flex items-center gap-1 rounded-xl px-1.5 py-1.5 text-[11px] xl:text-xs font-semibold transition-all shrink-0 cursor-pointer ${
+            className={`flex items-center gap-1 rounded-xl px-1.5 py-1.5 text-[11px] font-semibold transition-all shrink-0 cursor-pointer whitespace-nowrap ${
               activeTab === 'imagine'
                 ? 'bg-purple-600/20 text-purple-200 border border-purple-500/40 shadow-sm'
                 : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
@@ -211,7 +226,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           <button
             onClick={() => setActiveTab('lorebooks')}
-            className={`flex items-center gap-1 rounded-xl px-1.5 py-1.5 text-[11px] xl:text-xs font-semibold transition-all shrink-0 cursor-pointer ${
+            className={`flex items-center gap-1 rounded-xl px-1.5 py-1.5 text-[11px] font-semibold transition-all shrink-0 cursor-pointer whitespace-nowrap ${
               activeTab === 'lorebooks'
                 ? 'bg-purple-600/20 text-purple-200 border border-purple-500/40 shadow-sm'
                 : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
@@ -224,7 +239,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           <button
             onClick={() => setActiveTab('stages')}
-            className={`flex items-center gap-1 rounded-xl px-1.5 py-1.5 text-[11px] xl:text-xs font-semibold transition-all shrink-0 cursor-pointer ${
+            className={`flex items-center gap-1 rounded-xl px-1.5 py-1.5 text-[11px] font-semibold transition-all shrink-0 cursor-pointer whitespace-nowrap ${
               activeTab === 'stages'
                 ? 'bg-purple-600/20 text-purple-200 border border-purple-500/40 shadow-sm'
                 : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
@@ -237,7 +252,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           <button
             onClick={() => setActiveTab('personas')}
-            className={`flex items-center gap-1 rounded-xl px-1.5 py-1.5 text-[11px] xl:text-xs font-semibold transition-all shrink-0 cursor-pointer ${
+            className={`flex items-center gap-1 rounded-xl px-1.5 py-1.5 text-[11px] font-semibold transition-all shrink-0 cursor-pointer whitespace-nowrap ${
               activeTab === 'personas'
                 ? 'bg-purple-600/20 text-purple-200 border border-purple-500/40 shadow-sm'
                 : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
@@ -250,7 +265,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           <button
             onClick={() => setActiveTab('favorites')}
-            className={`flex items-center gap-1 rounded-xl px-1.5 py-1.5 text-[11px] xl:text-xs font-semibold transition-all shrink-0 cursor-pointer ${
+            className={`flex items-center gap-1 rounded-xl px-1.5 py-1.5 text-[11px] font-semibold transition-all shrink-0 cursor-pointer whitespace-nowrap ${
               activeTab === 'favorites'
                 ? 'bg-purple-600/20 text-purple-200 border border-purple-500/40 shadow-sm'
                 : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
@@ -258,7 +273,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             title="Liked Favorites"
           >
             <Heart className="h-3.5 w-3.5 text-rose-400 shrink-0" />
-            <span className="hidden lg:inline">Liked</span>
+            <span className="hidden xl:inline">Liked</span>
           </button>
 
         </nav>

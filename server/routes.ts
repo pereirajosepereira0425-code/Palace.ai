@@ -87,8 +87,10 @@ import {
   generatePersonaReaction,
   generateChatSummary,
   testExternalApiConnection,
+  generateAiMakerSheet,
 } from '../src/services/aiService.ts';
 import { importCharacterFromUrl, UrlImportError } from './urlImporter.ts';
+import { runWebResearchAgent } from './webAgent.ts';
 import { ensureSeedTags, getTags, upsertTags } from '../src/db/tags.ts';
 import { parsePageParams, slicePaginatedRows } from '../src/utils/viewportUnload.ts';
 import { mergeGlobalActiveLorebook } from '../src/utils/communityUtils.ts';
@@ -2101,3 +2103,71 @@ apiRouter.get('/seo/com-domain-kit.zip', async (req, res) => {
     res.status(500).json({ error: error.message || 'Failed to build .com domain kit' });
   }
 });
+
+// ----------------- AI CHARACTER MAKER (WEB AGENT + SYNTHESIS) -----------------
+apiRouter.post('/ai-maker/research', optionalAuth, async (req: AuthRequest, res) => {
+  try {
+    const query = typeof req.body?.query === 'string' ? req.body.query.trim() : '';
+    const explicitUrls = Array.isArray(req.body?.explicitUrls) ? req.body.explicitUrls : [];
+    const chatbotUrls = Array.isArray(req.body?.chatbotUrls) ? req.body.chatbotUrls : [];
+    const maxPages = typeof req.body?.maxPages === 'number' ? req.body.maxPages : 3;
+
+    if (!query && explicitUrls.length === 0 && chatbotUrls.length === 0) {
+      return res.status(400).json({ error: 'Provide a search query, wiki URL, or chatbot URL to research.' });
+    }
+
+    const dossier = await runWebResearchAgent({
+      query,
+      explicitUrls,
+      chatbotUrls,
+      maxPages,
+      enableVirtualInteraction: true,
+    });
+
+    res.json({ dossier });
+  } catch (error: any) {
+    console.error('AI Maker web research error:', error);
+    res.status(500).json({ error: error?.message || 'Failed to execute virtual browser research' });
+  }
+});
+
+apiRouter.post('/ai-maker/generate', optionalAuth, async (req: AuthRequest, res) => {
+  try {
+    const {
+      prompt,
+      makerModel,
+      nsfwAllowed,
+      ratingOverride,
+      paragraphCounts,
+      images,
+      dossier,
+      externalApiKey,
+      externalApiUrl,
+      externalApiProvider,
+    } = req.body || {};
+
+    if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
+      return res.status(400).json({ error: 'A character prompt is required to synthesize fields.' });
+    }
+
+    const draft = await generateAiMakerSheet({
+      prompt,
+      makerModel: makerModel || 'palace_maker_opus',
+      nsfwAllowed: Boolean(nsfwAllowed),
+      ratingOverride,
+      paragraphCounts,
+      images,
+      dossier,
+      externalApiKey,
+      externalApiUrl,
+      externalApiProvider,
+    });
+
+    res.json({ draft });
+  } catch (error: any) {
+    console.error('AI Maker synthesis error:', error);
+    const status = typeof error?.status === 'number' && error.status >= 400 && error.status < 600 ? error.status : 500;
+    res.status(status).json({ error: error?.message || 'Failed to generate AI character sheet' });
+  }
+});
+
