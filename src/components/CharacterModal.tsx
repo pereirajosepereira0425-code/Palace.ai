@@ -13,7 +13,8 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { Character } from '../types/index.ts';
-import { exportTavernCard, formatRoleplaySegments, renderWikiMarkup } from '../utils/characterUtils.ts';
+import { exportTavernCard, renderWikiMarkup } from '../utils/characterUtils.ts';
+import { RichMessageContent } from './RichMessageContent.tsx';
 
 interface CharacterModalProps {
   character: Character | null;
@@ -89,8 +90,6 @@ export const CharacterModal: React.FC<CharacterModalProps> = ({
     a.click();
     URL.revokeObjectURL(url);
   };
-
-  const greetingSegments = formatRoleplaySegments(character.greeting);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-black/80 backdrop-blur-md animate-in fade-in duration-200">
@@ -237,19 +236,12 @@ export const CharacterModal: React.FC<CharacterModalProps> = ({
                     <Sparkles className="h-4 w-4" />
                     <span>First Message / Scenario Starter</span>
                   </div>
-                  <div className="space-y-1.5 leading-relaxed text-zinc-200">
-                    {greetingSegments.map((seg, idx) =>
-                      seg.type === 'action' ? (
-                        <p key={idx} className="italic text-purple-300/90 font-serif">
-                          *{seg.text}*
-                        </p>
-                      ) : (
-                        <p key={idx} className="text-zinc-100 font-sans">
-                          {seg.text}
-                        </p>
-                      )
-                    )}
-                  </div>
+                  <RichMessageContent
+                    content={character.greeting}
+                    className="space-y-1.5 leading-relaxed text-zinc-200"
+                    textClassName="text-zinc-100 font-sans whitespace-pre-wrap break-words"
+                    actionClassName="italic text-purple-300/90 font-serif whitespace-pre-wrap break-words"
+                  />
                 </div>
 
                 {/* Personality & Scenario */}

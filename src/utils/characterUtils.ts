@@ -368,34 +368,45 @@ export function exportTavernCard(char: {
 }
 
 export interface RoleplaySegment {
-  type: 'action' | 'dialogue' | 'thought';
+  type: 'action' | 'dialogue' | 'thought' | 'image';
   text: string;
+  src?: string;
+  alt?: string;
+  href?: string;
 }
 
-/**
- * Splits text into roleplay action blocks (*action*) and spoken dialogue
- */
-export function formatRoleplaySegments(content: string): RoleplaySegment[] {
-  if (!content) return [];
-  const segments: RoleplaySegment[] = [];
+export function isSafeMediaUrl(url: string): boolean {
+  const trimmed = (url || '').trim();
+  if (!trimmed) return false;
+  if (/^data:image\/(?:png|jpeg|jpg|gif|webp|avif|svg\+xml|bmp);base64,[a-z0-9+/=\s]+$/i.test(trimmed)) {
+    return true;
+  }
+  if (/^https?:\/\/[^\s<>"']+$/i.test(trimmed)) return true;
+  if (/^\/(?!\/)[^\s<>"']*$/i.test(trimmed)) return true;
+  return false;
+}
 
+function splitRoleplayTextChunk(
+  text: string,
+  state: { inDoubleQuotes: boolean },
+  segments: RoleplaySegment[]
+): void {
+  if (!text) return;
   const regex = /(\*[^*]+\*)/g;
-  const parts = content.split(regex);
-  let inDoubleQuotes = false;
+  const parts = text.split(regex);
 
   for (const part of parts) {
     if (!part) continue;
-    if (part.startsWith('*') && part.endsWith('*') && !inDoubleQuotes) {
+    if (part.startsWith('*') && part.endsWith('*') && !state.inDoubleQuotes) {
       segments.push({
         type: 'action',
         text: part.slice(1, -1),
       });
     } else {
       const cleanPart = part.startsWith('*') && part.endsWith('*') ? part.slice(1, -1) : part;
-      // Track quote parity across dialogue text
       const quoteCount = (cleanPart.match(/"/g) || []).length;
       if (quoteCount % 2 === 1) {
-        inDoubleQuotes = !inDoubleQuotes;
+        state.inDoubleQuotes = !state.inDoubleQuotes;
       }
 
       const prev = segments[segments.length - 1];
@@ -408,6 +419,80 @@ export function formatRoleplaySegments(content: string): RoleplaySegment[] {
         });
       }
     }
+  }
+}
+
+/**
+ * Splits text into roleplay action blocks (*action*), spoken dialogue, and embedded images
+ */
+export function formatRoleplaySegments(content: string): RoleplaySegment[] {
+  if (!content) return [];
+  const segments: RoleplaySegment[] = [];
+  const state = { inDoubleQuotes: false };
+
+  // Match clickable markdown image, markdown image, HTML <img>, BBCode [img], data:image URI, or standalone image URL
+  const imageTokenRegex =
+    /\[!\[([^\]]*)\]\(((?:data:image\/[^\s)]+|https?:\/\/[^\s)]+|\/[^\s)]+))(?:\s+"[^"]*")?\)\]\(((?:https?:\/\/|\/)[^\s)]+)\)|!\[([^\]]*)\]\(((?:data:image\/[^\s)]+|https?:\/\/[^\s)]+|\/[^\s)]+))(?:\s+"[^"]*")?\)|<img\b([^>]*)>|\[img\]((?:data:image\/|https?:\/\/|\/)[^\[]+?)\[\/img\]|(data:image\/(?:png|jpeg|jpg|gif|webp|avif|svg\+xml|bmp);base64,[A-Za-z0-9+/=]+)|((?:^|(?<=[\s\n]))https?:\/\/[^\s<>()"']+\.(?:png|jpe?g|gif|webp|avif|svg)(?:\?[^\s<>()"']*)?(?:#[^\s<>()"']*)?)/gi;
+
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = imageTokenRegex.exec(content)) !== null) {
+    const matchStart = match.index;
+    const matchEnd = imageTokenRegex.lastIndex;
+
+    let src = '';
+    let alt = '';
+    let href: string | undefined;
+
+    if (match[2]) {
+      // [![alt](imgUrl)](href)
+      alt = (match[1] || '').trim();
+      src = match[2].trim();
+      href = match[3]?.trim();
+    } else if (match[5]) {
+      // ![alt](url)
+      alt = (match[4] || '').trim();
+      src = match[5].trim();
+    } else if (match[6] !== undefined) {
+      // <img ...>
+      const attrs = match[6];
+      const srcMatch = attrs.match(/\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+      const altMatch = attrs.match(/\balt\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+      src = (srcMatch?.[1] || srcMatch?.[2] || srcMatch?.[3] || '').trim();
+      alt = (altMatch?.[1] || altMatch?.[2] || '').trim();
+    } else if (match[7]) {
+      // [img]url[/img]
+      src = match[7].trim();
+    } else if (match[8]) {
+      // Bare data:image/... URI
+      src = match[8].trim();
+    } else if (match[9]) {
+      // Standalone image URL
+      src = match[9].trim();
+    }
+
+    if (!isSafeMediaUrl(src)) {
+      continue;
+    }
+
+    if (matchStart > lastIndex) {
+      splitRoleplayTextChunk(content.slice(lastIndex, matchStart), state, segments);
+    }
+
+    segments.push({
+      type: 'image',
+      text: alt || src,
+      src,
+      alt: alt || 'Embedded Image',
+      href: href && /^https?:\/\/|^\/(?!\/)/i.test(href) ? href : undefined,
+    });
+
+    lastIndex = matchEnd;
+  }
+
+  if (lastIndex < content.length) {
+    splitRoleplayTextChunk(content.slice(lastIndex), state, segments);
   }
 
   return segments;
@@ -523,12 +608,32 @@ export function parseCharacterUrl(url: string): {
   return { source: 'unknown', idOrPath: clean };
 }
 
+function escapeHtmlAttr(str: string): string {
+  return (str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function buildResponsiveWikiImg(src: string, alt: string = '', width?: string): string {
+  const safeSrc = escapeHtmlAttr(src.trim());
+  const safeAlt = escapeHtmlAttr(alt.trim() || 'Embedded Image');
+  const widthCss = width && /^\d+(?:px|%)$/i.test(width.trim()) ? `width: ${width.trim()}; ` : '';
+  return `<img src="${safeSrc}" alt="${safeAlt}" referrerpolicy="no-referrer" loading="lazy" style="${widthCss}max-width: 100%; max-height: 440px; height: auto; object-fit: contain; border-radius: 12px; margin: 8px 0; display: block; box-shadow: 0 4px 14px rgba(0,0,0,0.4);" />`;
+}
+
 /**
- * Converts Fandom Wikia / Miraheze / MediaWiki markup into clean safe styled HTML
+ * Converts Fandom Wikia / Miraheze / MediaWiki / Markdown markup & embedded images into clean safe styled HTML
  */
 export function renderWikiMarkup(text: string, characterName: string = 'Character'): string {
   if (!text) return '';
   let html = text;
+
+  // Strip dangerous script tags / inline JS event handlers / javascript: URLs
+  html = html.replace(/<script\b[\s\S]*?<\/script>/gi, '');
+  html = html.replace(/\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+  html = html.replace(/javascript\s*:/gi, '');
 
   // Protect <nowiki> content temporarily
   const nowikis: string[] = [];
@@ -536,6 +641,109 @@ export function renderWikiMarkup(text: string, characterName: string = 'Characte
     nowikis.push(content);
     return `%%NOWIKI_${nowikis.length - 1}%%`;
   });
+
+  // Protect media blocks (images, galleries, audio, video) BEFORE italic/link/linebreak transforms
+  const mediaBlocks: string[] = [];
+  const stashMedia = (snippet: string): string => {
+    mediaBlocks.push(snippet);
+    return `%%MEDIA_${mediaBlocks.length - 1}%%`;
+  };
+
+  // Wiki Image Gallery: <gallery> ... </gallery>
+  html = html.replace(/<gallery(?:[^>]*)>([\s\S]*?)<\/gallery>/gi, (_m, galleryContent) => {
+    const lines = galleryContent.trim().split('\n');
+    let galleryHtml = '<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; margin: 14px 0; background: rgba(24, 24, 27, 0.6); padding: 12px; border-radius: 12px; border: 1px solid rgba(63,63,70,0.6);">';
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const parts = trimmed.split('|');
+      const filePart = parts[0].replace(/^File:|^Image:/i, '').trim();
+      const caption = parts[1] || filePart;
+      const placeholderImg = isSafeMediaUrl(filePart)
+        ? filePart
+        : 'https://images.unsplash.com/photo-1579783900882-c0d3dad7b119?auto=format&fit=crop&w=400&q=80';
+      galleryHtml += `<div style="display: flex; flex-direction: column; align-items: center; background: rgba(9, 9, 11, 0.8); border: 1px solid rgba(168,85,247,0.3); border-radius: 10px; overflow: hidden; padding: 6px;"><img src="${escapeHtmlAttr(placeholderImg)}" alt="${escapeHtmlAttr(caption)}" referrerpolicy="no-referrer" loading="lazy" style="width: 100%; height: 90px; object-fit: cover; border-radius: 6px;" /><span style="font-size: 10px; color: #d4d4d8; text-align: center; margin-top: 4px; line-height: 1.2;">${escapeHtmlAttr(caption)}</span></div>`;
+    }
+    galleryHtml += '</div>';
+    return stashMedia(galleryHtml);
+  });
+
+  // Protect existing HTML <video> and <audio> tags
+  html = html.replace(/<(video|audio)\b[\s\S]*?<\/\1>/gi, (m) => stashMedia(m));
+
+  // Protect & normalize existing HTML <img ...> tags (adding referrerPolicy & responsive styling if missing)
+  html = html.replace(/<img\b([^>]*)>/gi, (fullTag, attrs) => {
+    const srcMatch = attrs.match(/\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+    const src = (srcMatch?.[1] || srcMatch?.[2] || srcMatch?.[3] || '').trim();
+    if (!isSafeMediaUrl(src)) return '';
+    const altMatch = attrs.match(/\balt\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+    const widthMatch = attrs.match(/\bwidth\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+    const alt = altMatch?.[1] || altMatch?.[2] || '';
+    const rawW = widthMatch?.[1] || widthMatch?.[2] || widthMatch?.[3] || '';
+    const width = /^\d+$/.test(rawW) ? `${rawW}px` : rawW;
+    if (/\bstyle\s*=/i.test(attrs)) {
+      const normalizedTag = /\breferrerpolicy\s*=/i.test(attrs)
+        ? fullTag
+        : fullTag.replace(/^<img\b/i, '<img referrerpolicy="no-referrer"');
+      return stashMedia(normalizedTag);
+    }
+    return stashMedia(buildResponsiveWikiImg(src, alt, width));
+  });
+
+  // Clickable Markdown Images: [![alt](imgUrl)](linkUrl)
+  html = html.replace(
+    /\[!\[([^\]]*)\]\(((?:data:image\/[^\s)]+|https?:\/\/[^\s)]+|\/[^\s)]+))(?:\s+"[^"]*")?\)\]\(((?:https?:\/\/|\/)[^\s)]+)\)/gi,
+    (_m, alt, imgSrc, href) => {
+      if (!isSafeMediaUrl(imgSrc)) return _m;
+      return stashMedia(
+        `<a href="${escapeHtmlAttr(href)}" target="_blank" rel="noopener noreferrer" style="display: inline-block; max-width: 100%;">${buildResponsiveWikiImg(imgSrc, alt)}</a>`
+      );
+    }
+  );
+
+  // Markdown Images: ![alt](imgUrl)
+  html = html.replace(
+    /!\[([^\]]*)\]\(((?:data:image\/[^\s)]+|https?:\/\/[^\s)]+|\/[^\s)]+))(?:\s+"[^"]*")?\)/gi,
+    (_m, alt, imgSrc) => {
+      if (!isSafeMediaUrl(imgSrc)) return _m;
+      return stashMedia(buildResponsiveWikiImg(imgSrc, alt));
+    }
+  );
+
+  // BBCode Images: [img]url[/img]
+  html = html.replace(
+    /\[img\]((?:data:image\/|https?:\/\/|\/)[^\[]+?)\[\/img\]/gi,
+    (_m, imgSrc) => {
+      if (!isSafeMediaUrl(imgSrc)) return _m;
+      return stashMedia(buildResponsiveWikiImg(imgSrc, 'Embedded Image'));
+    }
+  );
+
+  // MediaWiki File/Image embeds: [[File:...|...]] or [[Image:...|...]]
+  html = html.replace(/\[\[(?:File|Image):([^\]]+)\]\]/gi, (_m, inner) => {
+    const parts = inner.split('|').map((s: string) => s.trim()).filter(Boolean);
+    const target = parts[0] || '';
+    const widthPart = parts.find((p: string) => /^\d+px$/i.test(p));
+    const captionPart = parts.find(
+      (p: string, idx: number) =>
+        idx > 0 && !/^(?:thumb|thumbnail|frame|frameless|left|right|center|none|\d+px)$/i.test(p)
+    );
+    if (isSafeMediaUrl(target)) {
+      return stashMedia(buildResponsiveWikiImg(target, captionPart || 'Wiki Image', widthPart));
+    }
+    return stashMedia(
+      `<div style="display: inline-flex; align-items: center; gap: 6px; background: rgba(24,24,27,0.8); border: 1px solid rgba(168,85,247,0.35); border-radius: 10px; padding: 6px 10px; font-size: 12px; color: #e9d5ff; margin: 4px 0;">🖼️ <span>${escapeHtmlAttr(captionPart || target)}</span></div>`
+    );
+  });
+
+  // Standalone image URLs or bare data:image/... URIs on their own line
+  html = html.replace(
+    /(^|\n)[ \t]*((?:data:image\/(?:png|jpeg|jpg|gif|webp|avif|svg\+xml|bmp);base64,[A-Za-z0-9+/=]+)|(?:https?:\/\/[^\s<>()"']+\.(?:png|jpe?g|gif|webp|avif|svg)(?:\?[^\s<>()"']*)?(?:#[^\s<>()"']*)?))[ \t]*(?=\n|$)/gi,
+    (_m, lead, imgSrc) => {
+      if (!isSafeMediaUrl(imgSrc)) return _m;
+      return `${lead}${stashMedia(buildResponsiveWikiImg(imgSrc, 'Image'))}`;
+    }
+  );
 
   // MediaWiki Headings (Level 2 to 5)
   html = html.replace(/^=====\s*(.*?)\s*=====$/gim, '<h5 style="font-size: 0.95rem; font-weight: 700; color: #e9d5ff; margin-top: 10px; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em;">$1</h5>');
@@ -565,30 +773,19 @@ export function renderWikiMarkup(text: string, characterName: string = 'Characte
     return `<span style="display: inline-flex; align-items: center; gap: 4px; background: rgba(168,85,247,0.2); border: 1px solid rgba(168,85,247,0.4); border-radius: 6px; padding: 2px 8px; font-size: 11px; color: #e9d5ff; margin-right: 6px; margin-bottom: 4px;">🏷️ ${categoryName}</span>`;
   });
 
-  // Wiki Image Gallery: <gallery> ... </gallery>
-  html = html.replace(/<gallery(?:[^>]*)>([\s\S]*?)<\/gallery>/gi, (_m, galleryContent) => {
-    const lines = galleryContent.trim().split('\n');
-    let galleryHtml = '<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; margin: 14px 0; background: rgba(24, 24, 27, 0.6); padding: 12px; border-radius: 12px; border: 1px solid rgba(63,63,70,0.6);">';
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      const parts = trimmed.split('|');
-      const filePart = parts[0].replace(/^File:|^Image:/i, '').trim();
-      const caption = parts[1] || filePart;
-      const placeholderImg = filePart.startsWith('http') ? filePart : 'https://images.unsplash.com/photo-1579783900882-c0d3dad7b119?auto=format&fit=crop&w=400&q=80';
-      galleryHtml += `<div style="display: flex; flex-direction: column; align-items: center; background: rgba(9, 9, 11, 0.8); border: 1px solid rgba(168,85,247,0.3); border-radius: 10px; overflow: hidden; padding: 6px;"><img src="${placeholderImg}" alt="${caption}" style="width: 100%; height: 90px; object-fit: cover; border-radius: 6px;" /><span style="font-size: 10px; color: #d4d4d8; text-align: center; margin-top: 4px; line-height: 1.2;">${caption}</span></div>`;
-    }
-    galleryHtml += '</div>';
-    return galleryHtml;
-  });
-
   // Internal Wiki Links: [[Target|Label]] or [[Target]]
   html = html.replace(/\[\[([^|\]]+)(?:\|([^\]]+))?\]\]/g, (_m, target, label) => {
     const display = label || target;
     return `<span style="color: #c084fc; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; font-weight: 500;" title="Wiki link to ${target}">${display}</span>`;
   });
 
-  // External Links: [http://... Display Text]
+  // Markdown Links: [Label](https://...)
+  html = html.replace(
+    /\[([^\]]+)\]\(((?:https?:\/\/|\/)[^\s)]+)\)/g,
+    '<a href="$2" target="_blank" rel="noopener noreferrer" style="color: #38bdf8; text-decoration: underline; font-weight: 500;">$1 ↗</a>'
+  );
+
+  // External MediaWiki Links: [http://... Display Text]
   html = html.replace(/\[(https?:\/\/[^\s\]]+)\s+([^\]]+)\]/g, '<a href="$1" target="_blank" rel="noopener noreferrer" style="color: #38bdf8; text-decoration: underline; font-weight: 500;">$2 ↗</a>');
 
   // References: <ref>...</ref>
@@ -662,11 +859,19 @@ export function renderWikiMarkup(text: string, characterName: string = 'Characte
     return `<code>${nowikis[Number(idx)] || ''}</code>`;
   });
 
-  // Convert newlines to paragraphs
-  return html
+  // Convert newlines to paragraphs, then restore protected media blocks
+  const wrapped = html
     .split('\n\n')
-    .map((p) => `<p style="margin-bottom: 8px; line-height: 1.6;">${p.replace(/\n/g, '<br/>')}</p>`)
+    .map((p) => {
+      const trimmed = p.trim();
+      if (/^%%MEDIA_\d+%%$/.test(trimmed)) {
+        return trimmed;
+      }
+      return `<p style="margin-bottom: 8px; line-height: 1.6;">${p.replace(/\n/g, '<br/>')}</p>`;
+    })
     .join('');
+
+  return wrapped.replace(/%%MEDIA_(\d+)%%/g, (_m, idx) => mediaBlocks[Number(idx)] || '');
 }
 
 export interface TokenBreakdown {

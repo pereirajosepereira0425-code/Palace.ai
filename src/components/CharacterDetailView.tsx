@@ -39,6 +39,7 @@ import {
 } from 'lucide-react';
 import { Character, ChatSession, CustomVoiceRecord, SharedLorebookRecord } from '../types/index.ts';
 import { ThreeAvatarViewer } from './ThreeAvatarViewer.tsx';
+import { RichMessageContent } from './RichMessageContent.tsx';
 import {
   renderWikiMarkup,
   calculateTokenBreakdown,
@@ -945,10 +946,15 @@ export const CharacterDetailView: React.FC<CharacterDetailViewProps> = ({
 
                   {character.creatorNotes && (
                     <div className="rounded-2xl border border-purple-500/25 bg-black/35 px-4 py-2.5 text-xs text-zinc-300">
-                      <strong className="text-purple-300 uppercase text-[10px] tracking-wider block mb-0.5">
+                      <strong className="text-purple-300 uppercase text-[10px] tracking-wider block mb-1">
                         Creator Notes
                       </strong>
-                      {character.creatorNotes}
+                      <div
+                        className="wiki-rendered-content text-xs text-zinc-300 leading-relaxed overflow-x-auto"
+                        dangerouslySetInnerHTML={{
+                          __html: renderWikiMarkup(character.creatorNotes, character.name),
+                        }}
+                      />
                     </div>
                   )}
                 </div>
@@ -1001,9 +1007,11 @@ export const CharacterDetailView: React.FC<CharacterDetailViewProps> = ({
                           <span>Personality</span>
                           <span className="font-mono text-[10px] text-zinc-500">{tokens.personality} tok</span>
                         </div>
-                        <p className="text-xs text-zinc-300 leading-relaxed whitespace-pre-wrap">
-                          {character.personality || 'No explicit personality traits listed.'}
-                        </p>
+                        <RichMessageContent
+                          content={character.personality || 'No explicit personality traits listed.'}
+                          textClassName="text-xs text-zinc-300 leading-relaxed whitespace-pre-wrap break-words"
+                          actionClassName="text-xs font-serif italic text-purple-300 leading-relaxed whitespace-pre-wrap break-words"
+                        />
                       </div>
 
                       <div className="rounded-2xl border border-zinc-800 bg-zinc-950/70 p-4">
@@ -1011,9 +1019,11 @@ export const CharacterDetailView: React.FC<CharacterDetailViewProps> = ({
                           <span>Scenario</span>
                           <span className="font-mono text-[10px] text-zinc-500">{tokens.scenario} tok</span>
                         </div>
-                        <p className="text-xs text-zinc-300 leading-relaxed whitespace-pre-wrap">
-                          {character.scenario || 'Open-ended roleplay scenario.'}
-                        </p>
+                        <RichMessageContent
+                          content={character.scenario || 'Open-ended roleplay scenario.'}
+                          textClassName="text-xs text-zinc-300 leading-relaxed whitespace-pre-wrap break-words"
+                          actionClassName="text-xs font-serif italic text-purple-300 leading-relaxed whitespace-pre-wrap break-words"
+                        />
                       </div>
                     </div>
 
@@ -1096,9 +1106,11 @@ export const CharacterDetailView: React.FC<CharacterDetailViewProps> = ({
                               <span>Chat with this Greeting</span>
                             </button>
                           </div>
-                          <p className="text-xs text-zinc-200 leading-relaxed whitespace-pre-wrap italic">
-                            {greet}
-                          </p>
+                          <RichMessageContent
+                            content={greet}
+                            textClassName="text-xs text-zinc-200 leading-relaxed whitespace-pre-wrap break-words"
+                            actionClassName="text-xs font-serif italic text-purple-300 leading-relaxed whitespace-pre-wrap break-words"
+                          />
                         </div>
                       ))}
                     </div>
@@ -1698,7 +1710,12 @@ export const CharacterDetailView: React.FC<CharacterDetailViewProps> = ({
                     <strong className="block text-[11px] uppercase tracking-wider text-pink-400 mb-1">
                       Creator&apos;s Note
                     </strong>
-                    {character.creatorNotes}
+                    <div
+                      className="wiki-rendered-content text-xs text-pink-100 leading-relaxed overflow-x-auto"
+                      dangerouslySetInnerHTML={{
+                        __html: renderWikiMarkup(character.creatorNotes, character.name),
+                      }}
+                    />
                   </div>
                 )}
               </div>
@@ -1732,9 +1749,11 @@ export const CharacterDetailView: React.FC<CharacterDetailViewProps> = ({
                         <span>Personality</span>
                         <span className="font-mono text-[10px] text-zinc-500">{tokens.personality} tokens</span>
                       </div>
-                      <p className="text-zinc-300 leading-relaxed whitespace-pre-wrap">
-                        {character.personality || 'No personality definition specified.'}
-                      </p>
+                      <RichMessageContent
+                        content={character.personality || 'No personality definition specified.'}
+                        textClassName="text-zinc-300 leading-relaxed whitespace-pre-wrap break-words"
+                        actionClassName="font-serif italic text-pink-200/90 leading-relaxed whitespace-pre-wrap break-words"
+                      />
                     </div>
 
                     {/* Scenario */}
@@ -1743,9 +1762,11 @@ export const CharacterDetailView: React.FC<CharacterDetailViewProps> = ({
                         <span>Scenario</span>
                         <span className="font-mono text-[10px] text-zinc-500">{tokens.scenario} tokens</span>
                       </div>
-                      <p className="text-zinc-300 leading-relaxed whitespace-pre-wrap">
-                        {character.scenario || 'Freeform roleplay setting.'}
-                      </p>
+                      <RichMessageContent
+                        content={character.scenario || 'Freeform roleplay setting.'}
+                        textClassName="text-zinc-300 leading-relaxed whitespace-pre-wrap break-words"
+                        actionClassName="font-serif italic text-purple-200/90 leading-relaxed whitespace-pre-wrap break-words"
+                      />
                     </div>
 
                     {/* Initial Message + Alternate Greetings Switcher */}
@@ -1784,9 +1805,11 @@ export const CharacterDetailView: React.FC<CharacterDetailViewProps> = ({
                           </button>
                         </div>
                       </div>
-                      <p className="text-zinc-200 leading-relaxed italic whitespace-pre-wrap">
-                        {currentGreeting}
-                      </p>
+                      <RichMessageContent
+                        content={currentGreeting}
+                        textClassName="text-zinc-200 leading-relaxed whitespace-pre-wrap break-words"
+                        actionClassName="font-serif italic text-pink-200/90 leading-relaxed whitespace-pre-wrap break-words"
+                      />
                     </div>
 
                     {/* Example Dialogs */}

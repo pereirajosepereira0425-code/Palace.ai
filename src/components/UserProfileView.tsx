@@ -1037,9 +1037,15 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({
               <h3 className={`text-xs font-bold uppercase tracking-wider mb-3 ${theme.statAccent}`}>
                 About &bull; Creator Biography
               </h3>
-              <div className="wiki-rendered-content text-sm leading-relaxed text-zinc-200 whitespace-pre-wrap">
-                {renderWikiMarkup(p.bio || 'No biography written yet.')}
-              </div>
+              <div
+                className="wiki-rendered-content text-sm leading-relaxed text-zinc-200 overflow-x-auto"
+                dangerouslySetInnerHTML={{
+                  __html: renderWikiMarkup(
+                    p.bio || 'No biography written yet.',
+                    p.displayName || p.username || 'Creator'
+                  ),
+                }}
+              />
             </div>
           </div>
         )}

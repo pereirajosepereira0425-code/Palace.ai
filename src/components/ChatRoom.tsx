@@ -51,7 +51,7 @@ import {
   ModelEnsembleConfig,
 } from '../types/index.ts';
 import { useAuth } from '../context/AuthContext.tsx';
-import { formatRoleplaySegments, exportTavernCard } from '../utils/characterUtils.ts';
+import { exportTavernCard } from '../utils/characterUtils.ts';
 import { Stage } from './StagesManager.tsx';
 import { ChatTreeModal } from './ChatTreeModal.tsx';
 import { ChubSettingsModal, DEFAULT_CHUB_SETTINGS } from './ChubSettingsModal.tsx';
@@ -65,6 +65,7 @@ import {
 import { isBuiltInFreeProvider } from '../utils/chubOptions.ts';
 import { ThreeAvatarViewer } from './ThreeAvatarViewer.tsx';
 import { ViewportSlot } from './ViewportSlot.tsx';
+import { RichMessageContent } from './RichMessageContent.tsx';
 import { mergeGlobalActiveLorebook } from '../utils/communityUtils.ts';
 import {
   BrawlArenaHud,
@@ -1915,7 +1916,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             const isCharacter = message.sender === 'character';
             const isUser = message.sender === 'user';
             const isSystem = message.sender === 'system';
-            const segments = formatRoleplaySegments(message.content);
 
             const isInitialGreeting = msgIdx === 0 && isCharacter;
             const hasAlternateGreetings = isInitialGreeting && allGreetings.length > 1;
@@ -2105,31 +2105,13 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                         </div>
                       </div>
                     ) : (
-                      <div className="space-y-2">
-                        {segments.some((s) => s.text.trim()) ? (
-                          segments.map((seg, idx) =>
-                            seg.type === 'action' ? (
-                              <p
-                                key={idx}
-                                className="font-serif italic text-purple-300/95 leading-relaxed"
-                              >
-                                *{seg.text}*
-                              </p>
-                            ) : (
-                              <p key={idx} className="font-sans leading-relaxed text-zinc-100">
-                                {seg.text}
-                              </p>
-                            )
-                          )
-                        ) : (
-                          <p className="font-sans leading-relaxed text-zinc-100">
-                            {ensureNonEmptyRoleplayReply(
-                              message.content,
-                              message.speakerName || character.name
-                            )}
-                          </p>
+                      <RichMessageContent
+                        content={message.content}
+                        fallbackText={ensureNonEmptyRoleplayReply(
+                          message.content,
+                          message.speakerName || character.name
                         )}
-                      </div>
+                      />
                     )}
 
                     {/* AI Scenario Scene Image Illustration */}

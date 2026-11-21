@@ -1397,6 +1397,58 @@ test('parseCharacterUrl supports localized JanitorAI URLs for user imports', asy
   assert.equal(ptUrl.idOrPath, '2228b9ef-45ed-47d8-8a83-f1a3e4d2584c_character-soo-zee-democratic-bug');
 });
 
+test('formatRoleplaySegments and renderWikiMarkup render markdown, HTML, BBCode, MediaWiki File, and direct image URLs as real images instead of text', () => {
+  const sampleDataUri = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  const msg = [
+    '*She slides a glowing photo across the counter.*',
+    '![Spamton Poster](https://example.com/spamton_poster.png)',
+    '[![Banner](https://example.com/thumb.webp)](https://example.com/full)',
+    '<img src="https://example.com/card-art.jpg" alt="Card Art" />',
+    '[img]https://example.com/anim.gif[/img]',
+    sampleDataUri,
+    'https://example.com/standalone.avif?w=600',
+    'Look at this page https://example.com/about — not an image!',
+  ].join('\n');
+
+  const segments = formatRoleplaySegments(msg);
+  const imageSegments = segments.filter((s) => s.type === 'image');
+  assert.equal(imageSegments.length, 6);
+  assert.equal(imageSegments[0].src, 'https://example.com/spamton_poster.png');
+  assert.equal(imageSegments[0].alt, 'Spamton Poster');
+  assert.equal(imageSegments[1].src, 'https://example.com/thumb.webp');
+  assert.equal(imageSegments[1].href, 'https://example.com/full');
+  assert.equal(imageSegments[2].src, 'https://example.com/card-art.jpg');
+  assert.equal(imageSegments[2].alt, 'Card Art');
+  assert.equal(imageSegments[3].src, 'https://example.com/anim.gif');
+  assert.equal(imageSegments[4].src, sampleDataUri);
+  assert.equal(imageSegments[5].src, 'https://example.com/standalone.avif?w=600');
+  assert.ok(segments.some((s) => s.type === 'action' && s.text.includes('slides a glowing photo')));
+  assert.ok(segments.some((s) => s.type === 'dialogue' && s.text.includes('https://example.com/about')));
+
+  const wikiInput = [
+    '![Hero Art](https://example.com/hero_art*v2*.png)',
+    '[[File:https://example.com/wiki_pic.png|240px|Palace Banner]]',
+    '[img]https://example.com/bb.webp[/img]',
+    'https://example.com/direct_photo.jpg',
+    '<img src="https://example.com/raw_tag.png" onclick="alert(1)" alt="SafeTag" />',
+    '<script>evil()</script>',
+  ].join('\n\n');
+
+  const html = renderWikiMarkup(wikiInput, 'Hero');
+  assert.ok(!html.includes('![Hero Art]'));
+  assert.ok(!html.includes('[img]'));
+  assert.ok(!html.includes('<script>'));
+  assert.ok(!html.includes('onclick='));
+  assert.ok(html.includes('src="https://example.com/hero_art*v2*.png"'));
+  assert.ok(html.includes('src="https://example.com/wiki_pic.png"'));
+  assert.ok(html.includes('width: 240px'));
+  assert.ok(html.includes('src="https://example.com/bb.webp"'));
+  assert.ok(html.includes('src="https://example.com/direct_photo.jpg"'));
+  assert.ok(html.includes('src="https://example.com/raw_tag.png"'));
+  assert.ok(html.includes('referrerpolicy="no-referrer"'));
+});
+
+
 
 
 
