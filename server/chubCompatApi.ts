@@ -35,8 +35,10 @@ const CHUB_CORE_MODEL_IDS = [
   'mars',
   'mercury',
   'soji',
+  'sojourn',
   'asha',
   'mythomax',
+  'mix',
   'gemini-3.8-flash',
   'gemini-4-argon',
 ];

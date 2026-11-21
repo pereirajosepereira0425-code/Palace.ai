@@ -236,6 +236,7 @@ export interface ChubChatSettings {
   selectedResponderUuid?: string | null;
   ensembleConfig?: ModelEnsembleConfig;
   brawlState?: BrawlCombatState;
+  updatedAt?: number;
 }
 
 export interface ChatSession {

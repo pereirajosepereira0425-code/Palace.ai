@@ -32,12 +32,14 @@ import {
   type ApiConnectionTestResult,
   fetchEndpointModels,
   fetchFreePalaceApiKey,
+  getSameOriginV1Url,
   isChubUrlOrProvider,
   runSmartConnectionTest,
 } from '../utils/apiErrorUtils.ts';
 import {
   CHUB_SETTINGS_STORAGE_KEY,
   PRESETS_UPDATED_EVENT,
+  isPalaceFreeApiKey,
   mergeSettingsFromPresets,
 } from '../utils/settingsSync.ts';
 import {
@@ -129,10 +131,19 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
 
   const handleProviderSelect = (providerId: string) => {
     const prov = CHUB_API_PROVIDERS.find((p) => p.id === providerId);
+    const hasExplicitFreeKey =
+      Boolean(formData.chubApiKey?.trim()) && isPalaceFreeApiKey(formData.chubApiKey);
+    const nextUrl = isBuiltInFreeProvider(providerId)
+      ? ''
+      : hasExplicitFreeKey
+        ? getSameOriginV1Url()
+        : prov?.defaultUrl !== undefined
+          ? prov.defaultUrl
+          : formData.chubApiUrl;
     setFormData({
       ...formData,
       apiProvider: providerId,
-      chubApiUrl: prov?.defaultUrl !== undefined ? prov.defaultUrl : formData.chubApiUrl,
+      chubApiUrl: nextUrl,
       customModel: prov?.defaultModel || formData.customModel,
     });
     setTestResult(null);
@@ -253,14 +264,18 @@ export const PresetsModal: React.FC<PresetsModalProps> = ({
 
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
-    onSavePresets(formData);
+    const stampedPresets: GenerationPresets & { updatedAt: number } = {
+      ...formData,
+      updatedAt: Date.now(),
+    };
+    onSavePresets(stampedPresets);
     // Sync key Chub settings into localStorage & broadcast live update to open ChatRoom
     try {
       const existingRaw = localStorage.getItem(CHUB_SETTINGS_STORAGE_KEY);
       const existing = existingRaw ? JSON.parse(existingRaw) : {};
-      const merged = mergeSettingsFromPresets(existing, formData);
+      const merged = mergeSettingsFromPresets(existing, stampedPresets);
       localStorage.setItem(CHUB_SETTINGS_STORAGE_KEY, JSON.stringify(merged));
-      window.dispatchEvent(new CustomEvent(PRESETS_UPDATED_EVENT, { detail: formData }));
+      window.dispatchEvent(new CustomEvent(PRESETS_UPDATED_EVENT, { detail: stampedPresets }));
     } catch {
       // ignore storage error
     }

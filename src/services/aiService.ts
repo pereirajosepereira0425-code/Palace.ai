@@ -112,6 +112,7 @@ export interface GenerateReplyOptions {
     trimIncompleteSentences?: boolean;
     restrictNarration?: boolean;
     stagingUrl?: string;
+    variationSalt?: string | number;
   };
 }
 
@@ -201,13 +202,13 @@ async function tryPollinationsFreeCompletion(params: {
     });
 
     if (!res.ok) {
-      pollinationsCooldownUntil = Date.now() + 46_000;
+      pollinationsCooldownUntil = Date.now() + 120_000;
       return null;
     }
 
     const rawText = await res.text().catch(() => '');
     if (!rawText.trim() || looksLikeHtmlResponse(rawText, res.headers.get('content-type'))) {
-      pollinationsCooldownUntil = Date.now() + 46_000;
+      pollinationsCooldownUntil = Date.now() + 120_000;
       return null;
     }
 
@@ -215,12 +216,12 @@ async function tryPollinationsFreeCompletion(params: {
     const reply = String(parsed?.choices?.[0]?.message?.content || parsed?.choices?.[0]?.text || '').trim();
     const readableLen = reply.replace(/\*/g, '').replace(/\s+/g, ' ').trim().length;
     if (readableLen < 6 || /FREE_LIMIT|pollinations\.ai\/sponsor|Support Pollinations/i.test(reply)) {
-      pollinationsCooldownUntil = Date.now() + 46_000;
+      pollinationsCooldownUntil = Date.now() + 120_000;
       return null;
     }
     return reply;
   } catch {
-    pollinationsCooldownUntil = Date.now() + 46_000;
+    pollinationsCooldownUntil = Date.now() + 120_000;
     return null;
   }
 }
@@ -394,11 +395,13 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
   }
 
   const requestedModelId = (chatSettings.model || modelPreference || 'gemini-3.8-flash').trim();
-  const activeProvider = options.fallbackToBuiltInFree ? 'palace_free' : chatSettings.apiProvider;
+  const hasPalaceFreeKey = isPalaceFreeApiKey(options.chubApiKey);
+  const activeProvider =
+    options.fallbackToBuiltInFree || hasPalaceFreeKey ? 'palace_free' : chatSettings.apiProvider;
   const useBuiltInFree =
-    Boolean(options.fallbackToBuiltInFree) || isBuiltInFreeProvider(activeProvider) || !options.chubApiKey;
-  const calibration = useBuiltInFree ? getModelStyleCalibration(requestedModelId) : null;
-  if (calibration?.styleDirective) {
+    Boolean(options.fallbackToBuiltInFree) || isBuiltInFreeProvider(activeProvider) || hasPalaceFreeKey;
+  const calibration = getModelStyleCalibration(requestedModelId);
+  if (useBuiltInFree && calibration?.styleDirective) {
     systemInstructionParts.push(calibration.styleDirective);
   }
 
@@ -411,15 +414,21 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
 
   const systemInstruction = systemInstructionParts.join('\n\n');
 
-  // Check if external/Chub.ai OpenAI-compatible API endpoint was configured by user with a real key
+  // Check if external/Chub.ai OpenAI-compatible API endpoint was configured by user with a real external key
   const providerMeta = CHUB_API_PROVIDERS.find((p) => p.id === activeProvider);
   const rawExternalUrl =
-    !options.fallbackToBuiltInFree && !isBuiltInFreeProvider(activeProvider)
+    !options.fallbackToBuiltInFree && !isBuiltInFreeProvider(activeProvider) && !hasPalaceFreeKey
       ? options.chubApiUrl ||
         (activeProvider ? chatSettings.stagingUrl || providerMeta?.defaultUrl : null)
       : null;
 
-  if (!options.fallbackToBuiltInFree && !isBuiltInFreeProvider(activeProvider) && options.chubApiKey && rawExternalUrl) {
+  if (
+    !options.fallbackToBuiltInFree &&
+    !isBuiltInFreeProvider(activeProvider) &&
+    !hasPalaceFreeKey &&
+    options.chubApiKey &&
+    rawExternalUrl
+  ) {
     const completionsUrl = normalizeChatCompletionsUrl(rawExternalUrl);
     if (completionsUrl) {
       try {
@@ -545,8 +554,10 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
   const isCustomCalibratedFree =
     Boolean(calibration?.styleDirective) && requestedModelId !== 'gemini-3.8-flash';
   const baseModelBadge = isCustomCalibratedFree
-    ? `Palace Free API (${calibration!.displayLabel})`
-    : 'gemini-3.8-flash';
+    ? `Palace Free · ${calibration!.displayLabel}`
+    : requestedModelId && requestedModelId !== 'gemini-3.8-flash'
+      ? `Palace Free · ${calibration.displayLabel}`
+      : 'Palace Free · Gemini 3.8';
 
   const roleplayFlags = {
     modelId: requestedModelId,
@@ -559,6 +570,7 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
     chatSummary,
     brawlContextPrompt: options.brawlContextPrompt,
     groupSceneCharacters: options.groupSceneCharacters,
+    variationSalt: chatSettings?.variationSalt,
   };
 
   const buildLocalContextualReply = () =>
@@ -571,7 +583,6 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
 
   const ai = getGeminiClient();
   if (!ai) {
-    // Try free Pollinations remote inference when available (respecting 46s rate cooldown)
     const remoteMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
       { role: 'system', content: systemInstruction },
       ...budgeted.history.slice(-8).map((m) => ({
@@ -596,11 +607,8 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
 
     return {
       reply: finalReply,
-      thinkingProcess: remoteFree
-        ? `${baseModelBadge} · Live free inference active.`
-        : `Built-in Palace Free Engine (${requestedModelId}) active with full card & lorebook grounding.`,
       groundingSources: [],
-      modelUsed: `${baseModelBadge} (Free Engine)`,
+      modelUsed: baseModelBadge,
     };
   }
 
@@ -633,9 +641,8 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
       if (isPermanentGeminiAuthError(argonError)) {
         return {
           reply: buildLocalContextualReply(),
-          thinkingProcess: 'Gemini credentials unavailable in local runtime. Resonant in-character continuity active.',
           groundingSources: [],
-          modelUsed: `${baseModelBadge} (Safe Continuity)`,
+          modelUsed: baseModelBadge,
         };
       }
     }
@@ -712,21 +719,19 @@ export async function generateCharacterReply(options: GenerateReplyOptions): Pro
       }
     }
 
-    // If any quota or rate limit error occurred, provide smart in-character fallback
+    // If any quota, rate limit, or transient error occurred, provide clean in-character response without ugly note boxes
     if (isQuotaOrRateLimitError(err)) {
       return {
         reply: buildLocalContextualReply(),
-        thinkingProcess: 'Quota limitation reached on API key. Intelligent contextual roleplay fallback generated.',
         groundingSources: [],
-        modelUsed: `${baseModelBadge} (Resonant Roleplay Mode)`,
+        modelUsed: baseModelBadge,
       };
     }
 
     return {
       reply: buildLocalContextualReply(),
-      thinkingProcess: 'Temporary connection anomaly. Roleplay continuity preserved.',
       groundingSources: [],
-      modelUsed: `${baseModelBadge} (Safe Continuity)`,
+      modelUsed: baseModelBadge,
     };
   }
 }
@@ -1350,11 +1355,28 @@ export async function generateChubCompatibleCompletion(params: {
   }
 
   const lastUserContent = [...(params.messages || [])].reverse().find((m) => m.role === 'user')?.content || '';
+  const extractSection = (label: string): string => {
+    const regex = new RegExp(
+      `(?:^|\\n)${label}:\\s*([\\s\\S]*?)(?=\\n(?:Tagline|Description|Personality|Instructions|Scenario|User Persona|Memory Summary|Lorebook|Example Dialogues|Post-History|Author Note|\\[Model Profile):|$)`,
+      'i'
+    );
+    return systemInstruction.match(regex)?.[1]?.trim() || '';
+  };
+
   const nameMatch =
     systemInstruction.match(/roleplaying as\s+"([^"]+)"/i) ||
     systemInstruction.match(/named\s+([A-Z][a-zA-Z0-9 _-]{1,32})/) ||
     systemInstruction.match(/You are\s+(?:playing as\s+)?([A-Z][a-zA-Z0-9 _-]{1,32})/);
   const charName = nameMatch?.[1]?.trim() || 'Character';
+  const parsedTagline = extractSection('Tagline');
+  const parsedDescription = extractSection('Description') || systemInstruction.slice(0, 1200);
+  const parsedPersonality = extractSection('Personality');
+  const parsedScenario = extractSection('Scenario');
+  const parsedUserPersona = extractSection('User Persona');
+  const parsedMemory = extractSection('Memory Summary');
+  const parsedLore = extractSection('Lorebook');
+  const parsedExampleDialogues = extractSection('Example Dialogues');
+  const parsedAuthorNote = extractSection('Author Note');
 
   const remoteFree = await tryPollinationsFreeCompletion({
     messages: (params.messages || []).map((m) => ({
@@ -1373,17 +1395,25 @@ export async function generateChubCompatibleCompletion(params: {
       buildContextualRoleplayReply({
         character: {
           name: charName,
-          tagline: '',
-          description: systemInstruction.slice(0, 260),
+          tagline: parsedTagline,
+          description: parsedDescription,
+          personality: parsedPersonality,
           systemPrompt: systemInstruction,
-          scenario: '',
+          scenario: parsedScenario,
+          exampleDialogues: parsedExampleDialogues,
+          userPersona: parsedUserPersona,
         },
         userMessage: lastUserContent,
         history: (params.messages || []).map((m) => ({
           sender: m.role === 'user' ? 'user' : m.role === 'system' ? 'system' : 'character',
           content: m.content,
         })),
-        flags: { modelId: requestedModel },
+        flags: {
+          modelId: requestedModel,
+          promptNote: parsedAuthorNote || undefined,
+          chatSummary: parsedMemory || undefined,
+          relevantLore: parsedLore ? parsedLore.split('\n').filter(Boolean) : undefined,
+        },
       }),
     charName,
     lastUserContent

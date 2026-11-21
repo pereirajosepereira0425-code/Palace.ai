@@ -381,19 +381,32 @@ export function formatRoleplaySegments(content: string): RoleplaySegment[] {
 
   const regex = /(\*[^*]+\*)/g;
   const parts = content.split(regex);
+  let inDoubleQuotes = false;
 
   for (const part of parts) {
     if (!part) continue;
-    if (part.startsWith('*') && part.endsWith('*')) {
+    if (part.startsWith('*') && part.endsWith('*') && !inDoubleQuotes) {
       segments.push({
         type: 'action',
         text: part.slice(1, -1),
       });
     } else {
-      segments.push({
-        type: 'dialogue',
-        text: part,
-      });
+      const cleanPart = part.startsWith('*') && part.endsWith('*') ? part.slice(1, -1) : part;
+      // Track quote parity across dialogue text
+      const quoteCount = (cleanPart.match(/"/g) || []).length;
+      if (quoteCount % 2 === 1) {
+        inDoubleQuotes = !inDoubleQuotes;
+      }
+
+      const prev = segments[segments.length - 1];
+      if (prev && prev.type === 'dialogue') {
+        prev.text += cleanPart;
+      } else {
+        segments.push({
+          type: 'dialogue',
+          text: cleanPart,
+        });
+      }
     }
   }
 

@@ -1072,7 +1072,12 @@ export async function tryBrowserExternalCompletion(params: {
   chatSettings?: Record<string, any>;
 }): Promise<{ ok: true; reply: string; modelUsed: string } | { ok: false; error: ApiConnectionTestResult }> {
   const providerMeta = CHUB_API_PROVIDERS.find((p) => p.id === params.apiProvider);
-  const rawUrl = (params.apiUrl || providerMeta?.defaultUrl || '').trim();
+  const isLocal = isLocalProviderOrUrl(params.apiProvider, params.apiUrl);
+  const hasFreeKey = isPalaceFreeApiKey(params.apiKey);
+  const rawUrl =
+    !isLocal && hasFreeKey
+      ? getSameOriginV1Url()
+      : (params.apiUrl || providerMeta?.defaultUrl || '').trim();
   const targetModel =
     (params.model && !params.model.startsWith('gemini-') ? params.model : null) ||
     providerMeta?.defaultModel ||
@@ -1139,7 +1144,7 @@ export async function tryBrowserExternalCompletion(params: {
   }
 
   let lastError: ApiConnectionTestResult | null = null;
-  for (const endpoint of candidates.slice(0, 6)) {
+  for (const endpoint of candidates.slice(0, 4)) {
     const sendCompletion = async (chosenModel: string) => {
       const headers = buildExternalAuthHeaders(params.apiKey, endpoint, params.apiProvider);
       const res = await fetch(endpoint, {
@@ -1154,7 +1159,7 @@ export async function tryBrowserExternalCompletion(params: {
           frequency_penalty: cs.frequencyPenalty ?? 0,
           presence_penalty: cs.presencePenalty ?? 0,
         }),
-        signal: AbortSignal.timeout(20000),
+        signal: AbortSignal.timeout(7000),
       });
       const ct = res.headers.get('content-type') || '';
       const rawBody = await res.text().catch(() => '');

@@ -79,22 +79,34 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(() => loadSavedGuestProfile());
   const [loading, setLoading] = useState(true);
-  const [guestId, setGuestId] = useState<string>('guest_' + Math.random().toString(36).substring(2, 9));
+  const [guestId, setGuestId] = useState<string>(() => {
+    try {
+      if (typeof window !== 'undefined') {
+        const saved = localStorage.getItem('palace_guest_id');
+        if (saved) return saved;
+        const created = 'guest_' + Math.random().toString(36).substring(2, 9);
+        localStorage.setItem('palace_guest_id', created);
+        return created;
+      }
+    } catch {
+      // ignore storage failures
+    }
+    return 'guest_' + Math.random().toString(36).substring(2, 9);
+  });
   const [persona, setPersona] = useState<ActivePersonaState>({
     name: 'Adventurer',
     bio: 'A curious traveler seeking stories across worlds.',
     lorebook: null,
   });
 
-  // Load or generate guest ID & local persona
+  // Ensure localStorage has guest ID & load local persona
   useEffect(() => {
-    const savedGuest = localStorage.getItem('palace_guest_id');
-    if (savedGuest) {
-      setGuestId(savedGuest);
-    } else {
-      const newGuest = 'guest_' + Math.random().toString(36).substring(2, 9);
-      localStorage.setItem('palace_guest_id', newGuest);
-      setGuestId(newGuest);
+    try {
+      if (!localStorage.getItem('palace_guest_id') && guestId) {
+        localStorage.setItem('palace_guest_id', guestId);
+      }
+    } catch {
+      // ignore
     }
 
     const savedPersona = localStorage.getItem('palace_persona');

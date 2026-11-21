@@ -20,6 +20,7 @@ export interface SyncablePresets {
   customVoiceUuid?: string;
   ttsEndpointUrl?: string;
   ttsApiKey?: string;
+  updatedAt?: number;
 }
 
 /**
@@ -63,6 +64,7 @@ export function mergeSettingsFromPresets(
     ...(presets.chubApiUrl !== undefined ? { stagingUrl: presets.chubApiUrl } : {}),
     ...(typeof presets.temperature === 'number' ? { temperature: presets.temperature } : {}),
     ...(typeof presets.topP === 'number' ? { topP: presets.topP } : {}),
+    ...(typeof presets.updatedAt === 'number' ? { updatedAt: presets.updatedAt } : {}),
   };
 }
 
@@ -100,6 +102,7 @@ export function extractPresetsFromSettings(
         ? settings.temperature
         : existingPresets.temperature,
     topP: typeof settings.topP === 'number' ? settings.topP : existingPresets.topP,
+    updatedAt: typeof settings.updatedAt === 'number' ? settings.updatedAt : Date.now(),
   };
 }
 
@@ -108,7 +111,8 @@ export function extractPresetsFromSettings(
  * 1. defaults
  * 2. global saved presets / localStorage settings
  * 3. DB session chatSettings (per-session saved overrides like promptNote, custom model, checkboxes)
- * Never lets empty `{}` DB chatSettings wipe saved user settings, and never drops saved DB session edits!
+ * When global presets were explicitly saved MORE RECENTLY than the DB session's timestamp,
+ * global model/provider/generation choices apply cleanly without wiping session promptNote/roster/brawl state.
  */
 export function hydrateChatSettingsOnSessionLoad(params: {
   defaults: ChubChatSettings;
@@ -145,10 +149,20 @@ export function hydrateChatSettingsOnSessionLoad(params: {
     }
   }
 
-  return {
+  const presetsTs = typeof params.localPresets?.updatedAt === 'number' ? params.localPresets.updatedAt : 0;
+  const sessionTs = typeof parsedSession.updatedAt === 'number' ? parsedSession.updatedAt : 0;
+  const presetsAreNewerThanSession = presetsTs > 0 && presetsTs > sessionTs;
+
+  const baseMerged: ChubChatSettings = {
     ...withPresets,
     ...cleanSessionOverrides,
   };
+
+  if (presetsAreNewerThanSession && params.localPresets) {
+    return mergeSettingsFromPresets(baseMerged, params.localPresets);
+  }
+
+  return baseMerged;
 }
 
 /**

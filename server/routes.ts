@@ -1668,7 +1668,7 @@ apiRouter.post('/chat/swipe', optionalAuth, async (req: AuthRequest, res) => {
           brawlContextPrompt,
           ensembleConfig: activeEnsemble,
           fallbackToBuiltInFree: Boolean(fallbackToBuiltInFree),
-          chatSettings: parsedSettings,
+          chatSettings: { ...parsedSettings, variationSalt: swipes.length },
         };
 
         const aiResult = activeEnsemble?.enabled
@@ -1689,6 +1689,7 @@ apiRouter.post('/chat/swipe', optionalAuth, async (req: AuthRequest, res) => {
         swipes,
         activeSwipeIndex: newIndex,
         content: swipes[newIndex],
+        groundingSources: Array.isArray(targetMsg.groundingSources) ? targetMsg.groundingSources : [],
         speakerCharacterUuid: targetMsg.speakerCharacterUuid,
         speakerName: targetMsg.speakerName,
         speakerAvatar: targetMsg.speakerAvatar,

@@ -36,6 +36,7 @@ import {
   type ApiConnectionTestResult,
   fetchEndpointModels,
   fetchFreePalaceApiKey,
+  getSameOriginV1Url,
   isChubUrlOrProvider,
   runSmartConnectionTest,
 } from '../utils/apiErrorUtils.ts';
@@ -44,6 +45,7 @@ import {
   PRESETS_STORAGE_KEY,
   PRESETS_UPDATED_EVENT,
   extractPresetsFromSettings,
+  isPalaceFreeApiKey,
 } from '../utils/settingsSync.ts';
 
 export const DEFAULT_CHUB_SETTINGS: ChubChatSettings = {
@@ -291,19 +293,29 @@ export const ChubSettingsModal: React.FC<ChubSettingsModalProps> = ({
   };
 
   const handleSaveAndClose = () => {
-    // Sync API Key & provider back to palace_generation_presets + storage + global listeners
+    const stampedSettings: ChubChatSettings = {
+      ...current,
+      updatedAt: Date.now(),
+    };
+    setCurrent(stampedSettings);
+
+    // Sync API Key & provider back to palace_generation_presets + storage + App presets state
     try {
       const rawPresets = localStorage.getItem(PRESETS_STORAGE_KEY);
       const existingPresets = rawPresets ? JSON.parse(rawPresets) : {};
-      const nextPresets = extractPresetsFromSettings(existingPresets, current, apiKeyInput);
+      const nextPresets = extractPresetsFromSettings(existingPresets, stampedSettings, apiKeyInput);
       localStorage.setItem(PRESETS_STORAGE_KEY, JSON.stringify(nextPresets));
-      localStorage.setItem(CHUB_SETTINGS_STORAGE_KEY, JSON.stringify(current));
-      window.dispatchEvent(new CustomEvent(PRESETS_UPDATED_EVENT, { detail: nextPresets }));
+      localStorage.setItem(CHUB_SETTINGS_STORAGE_KEY, JSON.stringify(stampedSettings));
+      window.dispatchEvent(
+        new CustomEvent(PRESETS_UPDATED_EVENT, {
+          detail: { ...nextPresets, _source: 'chub_settings' },
+        })
+      );
     } catch {
       // ignore storage error
     }
 
-    onSave(current);
+    onSave(stampedSettings);
     setSavedSuccess(true);
     setTimeout(() => {
       setSavedSuccess(false);
@@ -407,11 +419,18 @@ export const ChubSettingsModal: React.FC<ChubSettingsModalProps> = ({
                     onChange={(e) => {
                       const nextProvider = e.target.value;
                       const match = CHUB_API_PROVIDERS.find((p) => p.id === nextProvider);
+                      const hasExplicitFreeKey =
+                        Boolean(apiKeyInput.trim()) && isPalaceFreeApiKey(apiKeyInput);
+                      const nextUrl = isBuiltInFreeProvider(nextProvider)
+                        ? ''
+                        : hasExplicitFreeKey
+                          ? getSameOriginV1Url()
+                          : match?.defaultUrl || current.stagingUrl;
                       setCurrent({
                         ...current,
                         apiProvider: nextProvider,
                         model: match?.defaultModel || current.model,
-                        stagingUrl: match?.defaultUrl || current.stagingUrl,
+                        stagingUrl: nextUrl,
                       });
                     }}
                     className="w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3.5 py-2.5 text-xs text-zinc-100 focus:border-purple-500 focus:outline-none"

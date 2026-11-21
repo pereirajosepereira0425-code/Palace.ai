@@ -74,3 +74,46 @@ test('resolveEffectiveChatApiConfig passes explicit model/key cleanly while stri
   assert.equal(resolved.chubApiKey, 'pk-palace-free-abc');
   assert.equal(resolved.chubApiUrl, undefined);
 });
+
+test('hydrateChatSettingsOnSessionLoad respects newer Presets updatedAt without clobbering newer session edits', () => {
+  const olderSession = JSON.stringify({
+    apiProvider: 'gemini',
+    model: 'gemini-3.8-flash',
+    promptNote: 'Keep tension sharp',
+    updatedAt: 1000,
+  });
+
+  const withNewerPresets = hydrateChatSettingsOnSessionLoad({
+    defaults: DEFAULT_CHUB_SETTINGS,
+    localPresets: {
+      ...DEFAULT_PRESETS,
+      apiProvider: 'chub_mars',
+      customModel: 'asha',
+      updatedAt: 2000,
+    },
+    sessionChatSettings: olderSession,
+  });
+
+  assert.equal(withNewerPresets.apiProvider, 'chub_mars');
+  assert.equal(withNewerPresets.model, 'asha');
+  assert.equal(withNewerPresets.promptNote, 'Keep tension sharp');
+
+  const withNewerSession = hydrateChatSettingsOnSessionLoad({
+    defaults: DEFAULT_CHUB_SETTINGS,
+    localPresets: {
+      ...DEFAULT_PRESETS,
+      apiProvider: 'gemini',
+      customModel: 'gemini-3.8-flash',
+      updatedAt: 1500,
+    },
+    sessionChatSettings: JSON.stringify({
+      apiProvider: 'chub_mars',
+      model: 'soji',
+      updatedAt: 3000,
+    }),
+  });
+
+  assert.equal(withNewerSession.apiProvider, 'chub_mars');
+  assert.equal(withNewerSession.model, 'soji');
+});
+

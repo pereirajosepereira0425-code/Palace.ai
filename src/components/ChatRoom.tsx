@@ -94,6 +94,7 @@ import {
   PRESETS_STORAGE_KEY,
   PRESETS_UPDATED_EVENT,
   hydrateChatSettingsOnSessionLoad,
+  isPalaceFreeApiKey,
   mergeSettingsFromPresets,
   resolveEffectiveChatApiConfig,
 } from '../utils/settingsSync.ts';
@@ -388,11 +389,12 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     initSession();
   }, [character.uuid, guestId, initialSessionUuid, startNewChat, greetingOverride]);
 
-  // Live sync whenever PresetsModal or ChubSettingsModal broadcasts updated presets/settings
+  // Live sync whenever PresetsModal broadcasts updated presets/settings
   useEffect(() => {
     const onPresetsUpdated = (e: any) => {
       const updatedPresets = e?.detail;
       if (!updatedPresets || typeof updatedPresets !== 'object') return;
+      if (updatedPresets._source === 'chub_settings') return;
       setChubSettings((prev) => {
         const merged = mergeSettingsFromPresets(prev, updatedPresets);
         try {
@@ -913,13 +915,25 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
       const isSingleStandardSpeaker =
         roster.length <= 1 && !ensembleConfig.enabled && !nextBrawlState.active && !triggerOnly;
+      const isSameOriginPalaceGateway =
+        typeof chubApiUrl === 'string' &&
+        typeof window !== 'undefined' &&
+        chubApiUrl.startsWith(window.location.origin);
+      const isLocalBackend =
+        !isSameOriginPalaceGateway && isLocalProviderOrUrl(effectiveSettings.apiProvider, chubApiUrl);
+      const usesPalaceFreeKey = !isLocalBackend && isPalaceFreeApiKey(chubApiKey);
+      if (usesPalaceFreeKey && !isBuiltInFreeProvider(effectiveSettings.apiProvider)) {
+        fallbackToBuiltInFree = true;
+      }
+
       const shouldTryBrowserDirect =
         isSingleStandardSpeaker &&
         effectiveSettings.apiProvider &&
         !isBuiltInFreeProvider(effectiveSettings.apiProvider) &&
-        (Boolean(chubApiKey) || isLocalProviderOrUrl(effectiveSettings.apiProvider, chubApiUrl)) &&
-        (isChubUrlOrProvider(effectiveSettings.apiProvider, chubApiUrl) ||
-          isLocalProviderOrUrl(effectiveSettings.apiProvider, chubApiUrl));
+        !usesPalaceFreeKey &&
+        !isSameOriginPalaceGateway &&
+        (Boolean(chubApiKey) || isLocalBackend) &&
+        (isChubUrlOrProvider(effectiveSettings.apiProvider, chubApiUrl) || isLocalBackend);
 
       const activeGlobalLoreRaw = localStorage.getItem('palace_active_lorebook');
       const personaLoreRaw = persona.lorebook || null;
@@ -961,9 +975,10 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           preGeneratedModelUsed = directRes.modelUsed;
           setExternalFallbackNotice(null);
         } else if (
+          isChubUrlOrProvider(effectiveSettings.apiProvider, chubApiUrl) ||
           shouldFallbackToBuiltInFreeOnExternalError(directRes.error.code, directRes.error.status)
         ) {
-          // Never block roleplay on external credit/quota limits (e.g. Chub 429 "You are out of credits")
+          // Never block or show error bubbles when external Chub/API endpoints reject or limit credits
           fallbackToBuiltInFree = true;
           const isCreditOrQuota =
             directRes.error.code === 'RATE_LIMITED' ||
@@ -976,11 +991,11 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
               : `External endpoint unavailable (${directRes.error.code}) — seamlessly continuing via Palace Unlimited Free Engine!`
           );
         } else if (
-          directRes.error.code === 'UNAUTHORIZED' ||
-          directRes.error.code === 'BAD_REQUEST' ||
           directRes.error.code === 'CONNECTION_REFUSED'
         ) {
           throw new Error(directRes.error.message);
+        } else {
+          fallbackToBuiltInFree = true;
         }
       }
 
@@ -1103,12 +1118,24 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           let preGeneratedReply: string | undefined;
           let fallbackToBuiltInFree = false;
 
+          const isSameOriginPalaceGateway =
+            typeof chubApiUrl === 'string' &&
+            typeof window !== 'undefined' &&
+            chubApiUrl.startsWith(window.location.origin);
+          const isLocalBackend =
+            !isSameOriginPalaceGateway && isLocalProviderOrUrl(mergedSettings.apiProvider, chubApiUrl);
+          const usesPalaceFreeKey = !isLocalBackend && isPalaceFreeApiKey(chubApiKey);
+          if (usesPalaceFreeKey && !isBuiltInFreeProvider(mergedSettings.apiProvider)) {
+            fallbackToBuiltInFree = true;
+          }
+
           const shouldTryBrowserDirect =
             mergedSettings.apiProvider &&
             !isBuiltInFreeProvider(mergedSettings.apiProvider) &&
-            (Boolean(chubApiKey) || isLocalProviderOrUrl(mergedSettings.apiProvider, chubApiUrl)) &&
-            (isChubUrlOrProvider(mergedSettings.apiProvider, chubApiUrl) ||
-              isLocalProviderOrUrl(mergedSettings.apiProvider, chubApiUrl));
+            !usesPalaceFreeKey &&
+            !isSameOriginPalaceGateway &&
+            (Boolean(chubApiKey) || isLocalBackend) &&
+            (isChubUrlOrProvider(mergedSettings.apiProvider, chubApiUrl) || isLocalBackend);
 
           const activeGlobalLoreRaw = localStorage.getItem('palace_active_lorebook');
           const personaLoreRaw = persona.lorebook || null;
@@ -1149,6 +1176,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
               preGeneratedReply = directRes.reply;
               setExternalFallbackNotice(null);
             } else if (
+              isChubUrlOrProvider(mergedSettings.apiProvider, chubApiUrl) ||
               shouldFallbackToBuiltInFreeOnExternalError(directRes.error.code, directRes.error.status)
             ) {
               fallbackToBuiltInFree = true;
@@ -1554,7 +1582,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       {/* Top Header */}
       <div className="relative z-10 flex h-16 shrink-0 items-center justify-between gap-2 border-b border-zinc-800/80 bg-zinc-950/80 px-3 sm:px-6 backdrop-blur-xl max-w-full overflow-hidden">
         {/* Left: Back & Character info */}
-        <div className="flex items-center gap-2 sm:gap-3 min-w-0 shrink-0 max-w-[46%] sm:max-w-none">
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0 shrink-0 max-w-[38%] sm:max-w-[260px] lg:max-w-[290px]">
           <button
             onClick={onBack}
             className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-zinc-800/80 text-zinc-300 hover:bg-zinc-700 hover:text-white transition-all"
@@ -1583,7 +1611,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                   {character.rating}
                 </span>
               </div>
-              <p className="text-[11px] text-zinc-400 line-clamp-1 max-w-[140px] sm:max-w-xs">
+              <p className="text-[11px] text-zinc-400 line-clamp-1 max-w-[140px] sm:max-w-[190px]">
                 {character.tagline}
               </p>
             </div>
@@ -1591,15 +1619,16 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         </div>
 
         {/* Right: AI Mode Controls, Presets, Tree, & New Chat */}
-        <div className="flex items-center gap-1 sm:gap-1.5 min-w-0 flex-1 justify-start sm:justify-end overflow-x-auto no-scrollbar">
+        <div className="flex items-center min-w-0 flex-1 overflow-x-auto no-scrollbar">
+          <div className="flex items-center gap-1 ml-auto shrink-0">
           {/* New Chat Button */}
           <button
             onClick={() => handleCreateNewSession()}
-            className="flex items-center gap-1 rounded-xl bg-purple-600/30 border border-purple-500/50 px-2.5 py-1.5 text-xs text-purple-200 hover:bg-purple-600/50 transition-all shadow-sm cursor-pointer"
+            className="flex items-center gap-1 rounded-xl bg-purple-600/30 border border-purple-500/50 px-2 py-1 text-[11px] text-purple-200 hover:bg-purple-600/50 transition-all shadow-sm cursor-pointer whitespace-nowrap shrink-0"
             title="Start New Parallel Chat Session"
           >
             <PlusCircle className="h-3.5 w-3.5 text-amber-300" />
-            <span className="hidden sm:inline font-bold">New Chat</span>
+            <span className="hidden xl:inline font-bold">New</span>
           </button>
 
           {/* All Chats Button */}
@@ -1608,11 +1637,11 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
               fetchAllSessions();
               setIsAllChatsOpen(true);
             }}
-            className="flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900/90 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 transition-all cursor-pointer"
+            className="flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900/90 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800 transition-all cursor-pointer whitespace-nowrap shrink-0"
             title="View All Chats with this Character"
           >
             <List className="h-3.5 w-3.5 text-purple-400" />
-            <span className="hidden md:inline font-semibold">All Chats</span>
+            <span className="hidden lg:inline font-semibold">Chats</span>
           </button>
 
           {/* Group Characters Manager */}
@@ -1620,7 +1649,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             type="button"
             data-testid="open-group-modal-btn"
             onClick={() => setIsGroupModalOpen(true)}
-            className={`flex items-center gap-1 rounded-xl border px-2.5 py-1.5 text-xs font-semibold transition-all cursor-pointer whitespace-nowrap ${
+            className={`flex items-center gap-1 rounded-xl border px-2 py-1 text-[11px] font-semibold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
               roster.length > 1
                 ? 'border-purple-500/60 bg-purple-600/25 text-purple-100'
                 : 'border-zinc-800 bg-zinc-900/90 text-zinc-300 hover:bg-zinc-800'
@@ -1629,7 +1658,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           >
             <Users className="h-3.5 w-3.5 text-purple-400" />
             <span className="hidden sm:inline">Group</span>
-            <span className="font-mono tabular-nums text-[11px]">({roster.length})</span>
+            <span className="font-mono tabular-nums text-[10px]">({roster.length})</span>
           </button>
 
           {/* Multi-Model Collaboration Team */}
@@ -1637,7 +1666,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             type="button"
             data-testid="open-multimodel-modal-btn"
             onClick={() => setIsMultiModelModalOpen(true)}
-            className={`flex items-center gap-1 rounded-xl border px-2.5 py-1.5 text-xs font-semibold transition-all cursor-pointer whitespace-nowrap ${
+            className={`flex items-center gap-1 rounded-xl border px-2 py-1 text-[11px] font-semibold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
               ensembleConfig.enabled
                 ? 'border-indigo-500/70 bg-indigo-600/30 text-indigo-100'
                 : 'border-zinc-800 bg-zinc-900/90 text-zinc-300 hover:bg-zinc-800'
@@ -1655,7 +1684,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             type="button"
             data-testid="brawl-toggle-btn"
             onClick={handleToggleBrawlManual}
-            className={`flex items-center gap-1 rounded-xl border px-2.5 py-1.5 text-xs font-semibold transition-all cursor-pointer whitespace-nowrap ${
+            className={`flex items-center gap-1 rounded-xl border px-2 py-1 text-[11px] font-semibold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
               brawlState.active
                 ? 'border-rose-500 bg-rose-600/30 text-rose-100'
                 : 'border-zinc-800 bg-zinc-900/90 text-zinc-300 hover:border-rose-500/40 hover:bg-zinc-800'
@@ -1664,14 +1693,14 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           >
             <Swords className="h-3.5 w-3.5 text-rose-400" />
             <span className="hidden md:inline">
-              {brawlState.active ? 'End Fight' : 'Text Fight'}
+              {brawlState.active ? 'End Fight' : 'Fight'}
             </span>
           </button>
 
           {/* Chat Tree Modal Button */}
           <button
             onClick={() => setIsChatTreeOpen(true)}
-            className="flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900/90 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 transition-all cursor-pointer whitespace-nowrap shrink-0"
+            className="flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900/90 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800 transition-all cursor-pointer whitespace-nowrap shrink-0"
             title="View Full Chat Tree & Alternate Branches"
           >
             <GitBranch className="h-3.5 w-3.5 text-indigo-400" />
@@ -1681,7 +1710,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           {/* Show AI Images Toggle */}
           <button
             onClick={handleToggleAiImages}
-            className={`flex items-center gap-1 rounded-xl px-2.5 py-1.5 text-xs font-semibold border transition-all cursor-pointer whitespace-nowrap shrink-0 ${
+            className={`flex items-center gap-1 rounded-xl px-2 py-1 text-[11px] font-semibold border transition-all cursor-pointer whitespace-nowrap shrink-0 ${
               showAiImages
                 ? 'border-purple-400 bg-purple-600/30 text-purple-200 shadow-sm'
                 : 'border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-200'
@@ -1689,14 +1718,14 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             title="Toggle AI Scenario Scene Illustrations & 3D Poses"
           >
             <ImageIcon className="h-3.5 w-3.5 text-pink-400" />
-            <span className="hidden xl:inline">AI Images:</span>
+            <span className="hidden xl:inline">Images</span>
             <span className="text-[10px] font-bold">{showAiImages ? 'ON' : 'OFF'}</span>
           </button>
 
           {/* Chub Chat Settings */}
           <button
             onClick={() => setIsChubSettingsOpen(true)}
-            className="flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900/90 p-2 text-zinc-300 hover:border-purple-500/50 hover:bg-zinc-800 transition-all cursor-pointer shrink-0"
+            className="flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900/90 p-1.5 text-zinc-300 hover:border-purple-500/50 hover:bg-zinc-800 transition-all cursor-pointer shrink-0"
             title="Chub.ai Chat Settings (https://chub.ai/chats/177970478)"
           >
             <Settings2 className="h-4 w-4 text-purple-400" />
@@ -1706,7 +1735,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           <button
             type="button"
             onClick={handleToggleAvatarBackground}
-            className={`flex items-center gap-1 rounded-xl px-2.5 py-1.5 text-xs font-semibold border transition-all cursor-pointer whitespace-nowrap shrink-0 ${
+            className={`flex items-center gap-1 rounded-xl px-2 py-1 text-[11px] font-semibold border transition-all cursor-pointer whitespace-nowrap shrink-0 ${
               useAvatarBg
                 ? 'border-fuchsia-400 bg-fuchsia-600/30 text-fuchsia-100 shadow-sm'
                 : 'border-zinc-800 bg-zinc-900/90 text-zinc-300 hover:border-purple-500/50 hover:bg-zinc-800'
@@ -1715,18 +1744,18 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             aria-pressed={useAvatarBg}
           >
             <ImageIcon className="h-3.5 w-3.5 text-fuchsia-400" />
-            <span className="hidden lg:inline">Avatar BG</span>
+            <span className="hidden xl:inline">Avatar BG</span>
           </button>
 
           {/* Stages Quick Switcher */}
           {onOpenStages && (
             <button
               onClick={onOpenStages}
-              className="hidden sm:flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900/90 px-2.5 py-1.5 text-xs text-indigo-300 hover:border-indigo-500/50 hover:bg-zinc-800 transition-all cursor-pointer whitespace-nowrap shrink-0"
+              className="hidden sm:flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900/90 px-2 py-1 text-[11px] text-indigo-300 hover:border-indigo-500/50 hover:bg-zinc-800 transition-all cursor-pointer whitespace-nowrap shrink-0"
               title="Change Atmosphere Stage (/my_stages)"
             >
               <Palette className="h-3.5 w-3.5 shrink-0" />
-              <span className="hidden lg:inline font-semibold max-w-[110px] truncate">
+              <span className="hidden lg:inline font-semibold max-w-[90px] truncate">
                 {activeStage ? activeStage.name : 'Stage'}
               </span>
             </button>
@@ -1740,7 +1769,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 searchGrounding
               )
             }
-            className={`flex items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-xs font-semibold border transition-all ${
+            className={`flex items-center gap-1 rounded-xl px-2 py-1 text-[11px] font-semibold border transition-all whitespace-nowrap shrink-0 ${
               thinkingLevel === 'HIGH'
                 ? 'bg-purple-600/30 text-purple-200 border-purple-500 shadow-sm shadow-purple-900/40'
                 : 'bg-zinc-900 text-zinc-400 border-zinc-800 hover:text-zinc-200'
@@ -1748,7 +1777,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             title="Toggle High Thinking Mode (gemini-4-argon with ThinkingLevel.HIGH)"
           >
             <BrainCircuit className="h-3.5 w-3.5 text-purple-400" />
-            <span className="hidden md:inline">Reasoning</span>
+            <span className="hidden lg:inline">Think</span>
             <span
               className={`text-[10px] font-bold uppercase ${
                 thinkingLevel === 'HIGH' ? 'text-amber-300' : ''
@@ -1766,7 +1795,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 !searchGrounding
               )
             }
-            className={`hidden sm:flex items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-xs font-semibold border transition-all ${
+            className={`hidden sm:flex items-center gap-1 rounded-xl px-2 py-1 text-[11px] font-semibold border transition-all whitespace-nowrap shrink-0 ${
               searchGrounding
                 ? 'bg-sky-600/30 text-sky-200 border-sky-500 shadow-sm shadow-sky-900/40'
                 : 'bg-zinc-900 text-zinc-400 border-zinc-800 hover:text-zinc-200'
@@ -1774,13 +1803,13 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             title="Toggle Google Search Grounding for real-time web knowledge"
           >
             <Globe className="h-3.5 w-3.5 text-sky-400" />
-            <span className="hidden md:inline">Search</span>
+            <span className="hidden xl:inline">Search</span>
           </button>
 
           {/* Reset Chat */}
           <button
             onClick={handleResetChat}
-            className={`flex items-center justify-center rounded-xl border transition-all cursor-pointer ${
+            className={`flex shrink-0 items-center justify-center rounded-xl border transition-all cursor-pointer ${
               confirmReset
                 ? 'h-9 px-2.5 gap-1 bg-rose-600 border-rose-500 text-white text-xs font-bold'
                 : 'h-9 w-9 bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-amber-400 hover:border-amber-500/40'
@@ -1791,6 +1820,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             <RotateCcw className="h-4 w-4" />
             {confirmReset && <span>Confirm</span>}
           </button>
+          </div>
         </div>
       </div>
 
@@ -2108,7 +2138,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                         <img
                           src={message.imageUrl}
                           alt="Scenario Illustration"
-                          className="max-h-72 w-full object-cover transition-transform hover:scale-[1.02] duration-300"
+                          className="max-h-72 w-full object-cover object-top transition-transform hover:scale-[1.02] duration-300"
                         />
                       </div>
                     )}
@@ -2129,28 +2159,43 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                     )}
 
                     {/* Google Search Grounding Sources */}
-                    {message.groundingSources && message.groundingSources.length > 0 && (
-                      <div className="mt-3.5 pt-3 border-t border-zinc-800">
-                        <span className="text-[10px] font-bold uppercase tracking-wider text-sky-400 flex items-center gap-1 mb-1.5">
-                          <Globe className="h-3 w-3" />
-                          <span>Google Search Sources</span>
-                        </span>
-                        <div className="flex flex-wrap gap-1.5">
-                          {message.groundingSources.map((src, i) => (
-                            <a
-                              key={i}
-                              href={src.uri}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="flex items-center gap-1 rounded-lg bg-sky-950/40 border border-sky-800/50 px-2 py-0.5 text-[10px] font-medium text-sky-300 hover:bg-sky-900/50 hover:text-white transition-all"
-                            >
-                              <span className="truncate max-w-[140px]">{src.title}</span>
-                              <ExternalLink className="h-2.5 w-2.5" />
-                            </a>
-                          ))}
+                    {(() => {
+                      const rawSources: unknown = message.groundingSources;
+                      let sources: Array<{ title: string; uri: string }> = [];
+                      if (Array.isArray(rawSources)) {
+                        sources = rawSources;
+                      } else if (typeof rawSources === 'string' && rawSources.trim()) {
+                        try {
+                          const parsed = JSON.parse(rawSources);
+                          if (Array.isArray(parsed)) sources = parsed;
+                        } catch {
+                          sources = [];
+                        }
+                      }
+                      if (sources.length === 0) return null;
+                      return (
+                        <div className="mt-3.5 pt-3 border-t border-zinc-800">
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-sky-400 flex items-center gap-1 mb-1.5">
+                            <Globe className="h-3 w-3" />
+                            <span>Google Search Sources</span>
+                          </span>
+                          <div className="flex flex-wrap gap-1.5">
+                            {sources.map((src, i) => (
+                              <a
+                                key={i}
+                                href={src.uri}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="flex items-center gap-1 rounded-lg bg-sky-950/40 border border-sky-800/50 px-2 py-0.5 text-[10px] font-medium text-sky-300 hover:bg-sky-900/50 hover:text-white transition-all"
+                              >
+                                <span className="truncate max-w-[140px]">{src.title}</span>
+                                <ExternalLink className="h-2.5 w-2.5" />
+                              </a>
+                            ))}
+                          </div>
                         </div>
-                      </div>
-                    )}
+                      );
+                    })()}
                   </div>
 
                   {/* Message Action Footer (Swipes, TTS, Edit, Delete, Copy — wraps cleanly on mobile) */}

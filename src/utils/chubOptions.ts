@@ -480,12 +480,49 @@ export function getModelStyleCalibration(modelId?: string | null): {
         '[Model Profile: Deep Reasoning Calibration] Track character motives, tactical spatial details, and plot threads step-by-step before responding decisively in character.',
     };
   }
-  if (lower.includes('chub-') || lower.includes('euryale') || lower.includes('lumimaid')) {
+  if (lower.includes('asha')) {
     return {
       modelId: rawId,
-      displayLabel,
+      displayLabel: 'Chub Asha',
       styleDirective:
-        '[Model Profile: Unfiltered RP Immersion] Prioritize vivid immediate chemistry, punchy dramatic action blocks, reactive dialogue, and zero generic stiffness.',
+        '[Model Profile: Chub Asha Calibration] Write expressive, vivid character-first prose rich in micro-expressions, physical environment cues, natural voice quirks, and emotional continuity.',
+    };
+  }
+  if (lower.includes('soji') || lower.includes('sojourn')) {
+    return {
+      modelId: rawId,
+      displayLabel: 'Chub Sojourn (Soji)',
+      styleDirective:
+        '[Model Profile: Chub Sojourn Calibration] Deliver immersive long-form roleplay with layered pacing, detailed physicality, atmospheric worldbuilding, and authentic unhurried dialogue.',
+    };
+  }
+  if (lower.includes('mercury')) {
+    return {
+      modelId: rawId,
+      displayLabel: 'Chub Mercury',
+      styleDirective:
+        '[Model Profile: Chub Mercury Calibration] Keep banter brisk, reactive, witty, and tightly focused on immediate back-and-forth momentum.',
+    };
+  }
+  if (
+    lower.includes('chub-') ||
+    lower === 'mars' ||
+    /\bmars\b/.test(lower) ||
+    lower.includes('mythomax') ||
+    lower === 'mix' ||
+    lower.includes('euryale') ||
+    lower.includes('lumimaid')
+  ) {
+    return {
+      modelId: rawId,
+      displayLabel:
+        lower === 'mars' || lower === 'chub-mars'
+          ? 'Chub Mars (70B)'
+          : lower.includes('mythomax')
+            ? 'MythoMax-L2-13B'
+            : displayLabel,
+      styleDirective:
+        '[Model Profile: Chub Mars Unfiltered RP] Prioritize vivid immediate chemistry, punchy dramatic action blocks, distinctive character voice, and zero generic stiffness.',
     };
   }
   if (lower.includes('gpt-4') || lower.includes('o4') || lower.includes('grok')) {

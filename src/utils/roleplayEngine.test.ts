@@ -99,3 +99,45 @@ test('Multi-Model Council generates distinct slot perspectives and synthesizes t
   assert.ok(merged.length > 40);
   assert.ok(!merged.includes('* *'));
 });
+
+test('buildContextualRoleplayReply uses short names, inferred she/her pronouns, physical traits, and zero canned boilerplate', () => {
+  const bugCard = {
+    name: 'Soo-Zee, Democratic Bug',
+    tagline: 'Cheerful insectoid engineer aboard a Stackship',
+    description: 'She is an enthusiastic bug diver with bright head fins, wings beneath her back plates, and clawed fingers.',
+    personality: 'Warm, bubbly, eager, endlessly curious',
+    scenario: 'Inside the busy Stackship hangar bay',
+  };
+
+  const replyClarify = buildContextualRoleplayReply({
+    character: bugCard,
+    userMessage: 'I meant that is because I am cool',
+    history: [
+      { sender: 'user', content: '█████' },
+      { sender: 'character', content: '*Soo-Zee blinks.* "I didn\'t catch that—maybe say it one more time?"' },
+    ],
+    flags: { modelId: 'asha' },
+  });
+
+  // Short call-sign name, no comma-title spam in actions
+  assert.ok(replyClarify.includes('Soo-Zee'));
+  assert.ok(!replyClarify.includes('Soo-Zee, Democratic Bug'));
+  // Uses she/her pronouns from the card
+  assert.ok(/\b(her|she)\b/i.test(replyClarify));
+  // Zero robotic canned boilerplate
+  assert.ok(!replyClarify.includes('unspoken subtext hanging'));
+  assert.ok(!replyClarify.includes('Careful—flattery and swagger'));
+  assert.ok(!replyClarify.includes('Calling yourself cool'));
+  assert.ok(!replyClarify.includes("'I meant"));
+
+  // Garbled input does not echo literal gibberish in single quotes
+  const replyGarbled = buildContextualRoleplayReply({
+    character: bugCard,
+    userMessage: '████ ▓▓▓▓ ░░░░',
+    history: [],
+    flags: { modelId: 'claude-opus-5-5' },
+  });
+  assert.ok(!replyGarbled.includes('████'));
+  assert.ok(/\b(wings|fins|claws|chitin|hangar)\b/i.test(replyGarbled));
+});
+

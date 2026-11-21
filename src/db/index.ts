@@ -16,11 +16,24 @@ export const createPool = () => {
       password: process.env.SQL_PASSWORD,
       database: process.env.SQL_DB_NAME,
       max: 10,
+      idleTimeoutMillis: 20000,
+      allowExitOnIdle: true,
       connectionTimeoutMillis: 15000,
+      keepAlive: true,
+      keepAliveInitialDelayMillis: 10000,
     });
 
-    // Prevent unhandled pool-level errors from crashing the application
-    global._postgresPool.on('error', (err) => {
+    // Prevent unhandled pool-level errors from crashing or spamming stderr on idle Cloud SQL proxy drops
+    global._postgresPool.on('error', (err: any) => {
+      const msg = String(err?.message || '');
+      const code = String(err?.code || '');
+      const isExpectedIdleDrop =
+        /Connection terminated unexpectedly|server closed the connection unexpectedly|ECONNRESET|EPIPE|ETIMEDOUT/i.test(msg) ||
+        ['57P01', '57P02', '57P03', '08006', '08003', 'ECONNRESET', 'EPIPE', 'ETIMEDOUT'].includes(code);
+      if (isExpectedIdleDrop) {
+        // pg.Pool automatically evicts the dead idle client and opens a fresh one on the next query.
+        return;
+      }
       console.error('Unexpected error on idle SQL pool client:', err);
     });
   }
